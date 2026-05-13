@@ -1,0 +1,53 @@
+version: '3.8'
+
+services:
+  # 后端 API 服务
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: autopublish-api
+    ports:
+      - "8000:8000"
+    environment:
+      - DATABASE_URL=sqlite:///./autopublish.db
+      - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
+      - DEBUG=true
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+    volumes:
+      - ./backend:/app
+      - autopublish-data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Redis（用于 Celery 队列，V1.0 阶段使用）
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: autopublish-redis
+  #   ports:
+  #     - "6379:6379"
+  #   volumes:
+  #     - redis-data:/data
+  #   restart: unless-stopped
+
+  # Celery Worker（V1.0 阶段启用）
+  # celery-worker:
+  #   build:
+  #     context: ./backend
+  #     dockerfile: Dockerfile
+  #   container_name: autopublish-celery
+  #   command: celery -A app.tasks.celery_app worker --loglevel=info
+  #   environment:
+  #     - DATABASE_URL=sqlite:///./autopublish.db
+  #     - REDIS_URL=redis://redis:6379/0
+  #   depends_on:
+  #     - redis
+  #   restart: unless-stopped
+
+volumes:
+  autopublish-data:
+  redis-data:

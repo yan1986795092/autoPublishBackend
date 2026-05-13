@@ -1,0 +1,97 @@
+"""CodeAgent — 代码示例生成、技术文档、沙箱执行"""
+
+from langchain_core.messages import SystemMessage, HumanMessage
+from langchain_openai import ChatOpenAI
+from ..agent_utils import SYSTEM_PROMPT_TEMPLATE, extract_output
+from src.tools.code_runner import CodeRunner
+
+
+async def handle_code(task_input: dict, llm: ChatOpenAI) -> dict:
+    topic = task_input.get("topic", task_input.get("query", ""))
+    language = task_input.get("language", "python")
+    run_code = task_input.get("run_code", False)
+
+    prompt = f"""## 技术内容创作
+
+主题：{topic}
+语言：{language}
+
+要求：
+- 代码可运行
+- 添加中文注释
+- 考虑边界情况"""
+
+    response = await llm.ainvoke([
+        SystemMessage(content=SYSTEM_PROMPT_TEMPLATE.format(role="技术写作者", description=f"生成{language}代码示例")),
+        HumanMessage(content=prompt),
+    ])
+
+    content = extract_output(response.content)
+    tokens = len(response.content) // 4
+
+    output: dict = {
+        "content": content,
+        "language": language,
+        "type": "text",
+        "stats": {"code_blocks": content.count("```") // 2},
+    }
+
+    # 沙箱执行
+    if run_code and content:
+        code = _extract_code_block(content, language)
+        if code:
+            runner = CodeRunner()
+            if language in ("python", "py"):
+                run_result = await runner.run_python(code)
+            elif language in ("javascript", "js", "node"):
+                run_result = await runner.run_javascript(code)
+                run_result.language = "javascript"
+            else:
+                run_result = await runner.run_python(code)
+
+            output["execution"] = {
+                "success": run_result.success,
+                "stdout": run_result.stdout,
+                "stderr": run_result.stderr,
+                "error": run_result.error,
+                "execution_time_ms": run_result.execution_time_ms,
+            }
+
+    return {
+        "status": "completed",
+        "agent_type": "CodeAgent",
+        "output": output,
+        "tokens_used": tokens,
+        "thinking_steps": [{
+            "agent": "CodeAgent",
+            "action": "execute" if run_code else "generate",
+            "reasoning": f"Generating {language} code for: {topic}",
+            "output_summary": f"Generated {content.count('```') // 2} code blocks" +
+                (f", execution: {'PASS' if output.get('execution', {}).get('success') else 'FAIL'}" if run_code else ""),
+            "tokens_used": tokens,
+            "status": "done",
+        }],
+    }
+
+
+def _extract_code_block(text: str, language: str) -> str:
+    """从 markdown 响应中提取代码块"""
+    lang_markers = {
+        "python": ["```python", "```py", "```"],
+        "py": ["```python", "```py", "```"],
+        "javascript": ["```javascript", "```js", "```node", "```"],
+        "js": ["```javascript", "```js", "```node", "```"],
+        "node": ["```javascript", "```js", "```node", "```"],
+    }
+    markers = lang_markers.get(language, ["```"])
+
+    for marker in markers:
+        if marker in text:
+            parts = text.split(marker, 1)
+            if len(parts) > 1:
+                after = parts[1]
+                if "```" in after:
+                    return after.split("```", 1)[0].strip()
+
+    # 无 markdown 标记时返回全部内容
+    return text.strip()
