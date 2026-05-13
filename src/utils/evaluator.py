@@ -67,5 +67,4 @@ def seo_suggestions(content: str, keywords: list[dict], score: dict | None) -> l
         suggestions.append("标题长度建议在 20-60 字符之间")
     if score and score.get("details", {}).get("keyword_score", 100) < 70:
         suggestions.append("关键词使用不足，建议在标题和首段中包含核心关键词")
-    suggestions.append("建议在标题和首段中包含核心关键词")
     return suggestions

@@ -15,6 +15,8 @@ from .workflow.task_queue import task_queue
 from .workflow.worker import worker
 from src.api.auth import get_current_user
 from src.models import User
+from src.tools.vector_search import vector_search
+from src.tools.langchain import CrawlerTool
 
 router = APIRouter(tags=["agent"])
 
@@ -128,6 +130,9 @@ REPURPOSE_AGENT_MAP = {
     "copywriting": "WritingAgent",
     "script": "WritingAgent",
     "report": "WritingAgent",
+    "weibo_post": "WritingAgent",
+    "twitter_thread": "WritingAgent",
+    "podcast_script": "WritingAgent",
 }
 
 REPURPOSE_FORMAT_GUIDE = {
@@ -137,6 +142,9 @@ REPURPOSE_FORMAT_GUIDE = {
     "copywriting": "将其改写为营销文案，突出价值主张和行动号召",
     "script": "将其改写为短视频口播脚本，包含开场钩子和分镜描述",
     "report": "将其扩展为一份结构化的分析报告，包含数据摘要和结论建议",
+    "weibo_post": "将其提炼为 2-3 条微博短帖，每条不超过140字，带话题标签，一针见血",
+    "twitter_thread": "将其改写为英文 Twitter/X Thread，3-6条推文，开场hook吸引点击，每条独立可读",
+    "podcast_script": "将其转化为一期播客脚本，包含开场白、2-3个讨论环节、嘉宾问答、收尾总结",
 }
 
 
@@ -379,10 +387,26 @@ async def agent_stream(
                 }, ensure_ascii=False),
             }
 
-            # 2. 提交异步任务执行
+            # 2. 提交异步任务执行（传递预计算计划，确保 Worker 执行的计划与 SSE 推送的一致）
+            plan_dict = {
+                "goal": plan.goal,
+                "reasoning": plan.reasoning,
+                "estimated_steps": plan.estimated_steps,
+                "tasks": [
+                    {
+                        "id": t.id,
+                        "agent_type": t.agent_type,
+                        "input": t.input,
+                        "dependencies": t.dependencies,
+                        "config": {},
+                    }
+                    for t in plan.tasks
+                ],
+            }
             async_task = await task_queue.enqueue(
                 prompt=request.prompt,
                 user_id=current_user.id,
+                plan=plan_dict,
             )
 
             yield {
@@ -481,6 +505,141 @@ async def agent_stream(
             }
 
     return EventSourceResponse(event_generator())
+
+
+# ===================== URL 输入处理 =====================
+
+
+class URLCrawlRequest(BaseModel):
+    url: str
+    max_length: int = 3000
+    analyze: bool = False  # 是否进一步用 Agent 分析抓取内容
+
+
+@router.post("/agent/crawl", response_model=AgentRunResponse)
+
+
+# ===================== 死信队列管理 =====================
+
+
+@router.get("/agent/dlq", response_model=AgentRunResponse)
+async def list_dlq_tasks(
+    current_user: User = Depends(get_current_user),
+):
+    """查看死信队列中的失败任务列表"""
+    tasks = task_queue.get_dlq_tasks()
+    return AgentRunResponse(
+        success=True,
+        data={
+            "tasks": [t.to_dict() for t in tasks],
+            "total": len(tasks),
+        },
+    )
+
+
+@router.post("/agent/dlq/{task_id}/retry", response_model=AgentRunResponse)
+async def retry_dlq_task(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """从死信队列中重试指定任务"""
+    task = task_queue.retry_from_dlq(task_id)
+    if not task:
+        raise HTTPException(status_code=404, detail="任务未在死信队列中找到")
+    return AgentRunResponse(
+        success=True,
+        data={"task_id": task.id, "state": task.state.value},
+    )
+
+
+# ===================== VectorSearch 接口 =====================
+
+
+class VectorSearchRequest(BaseModel):
+    query: str
+    top_k: int = 5
+    texts: Optional[list[str]] = None
+
+
+@router.post("/agent/vector-search", response_model=AgentRunResponse)
+async def search_vector_db(
+    request: VectorSearchRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """在向量知识库中搜索相似内容"""
+    if request.texts:
+        vector_search.add_documents(
+            texts=request.texts,
+            metadatas=[{"user_id": current_user.id}] * len(request.texts),
+        )
+    result = vector_search.search(query=request.query, top_k=request.top_k)
+    return AgentRunResponse(success=True, data=result)
+
+
+# ===================== Cache 统计 =====================
+
+
+@router.get("/agent/cache/stats", response_model=AgentRunResponse)
+async def get_cache_stats(
+    current_user: User = Depends(get_current_user),
+):
+    """查看 Agent 缓存统计信息"""
+    from .cache import agent_cache, llm_cache
+    return AgentRunResponse(success=True, data={
+        "agent_cache": agent_cache.stats,
+        "llm_cache": llm_cache.stats,
+    })
+
+
+@router.post("/agent/cache/invalidate", response_model=AgentRunResponse)
+async def invalidate_cache(
+    agent_type: Optional[str] = None,
+    current_user: User = Depends(get_current_user),
+):
+    """清空 Agent 缓存"""
+    from .cache import agent_cache, llm_cache
+    agent_cache.invalidate(agent_type)
+    if not agent_type:
+        llm_cache.invalidate()
+    return AgentRunResponse(success=True, data={"message": "Cache invalidated"})
+
+async def crawl_url(
+    request: URLCrawlRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """抓取并分析指定 URL 的内容
+
+    如果 analyze=True，会进一步用 Agent 对抓取结果进行分析总结。
+    适用于长文阅读、竞品分析等场景。
+    """
+    try:
+        from .handlers.web_search import handle_url_crawl
+        # URLCrawler 不需要 LLM，传 None
+        crawl_result = await handle_url_crawl({
+            "url": request.url,
+            "max_length": request.max_length,
+        }, llm=None)
+
+        if crawl_result.get("status") == "failed":
+            return AgentRunResponse(success=False, error=crawl_result.get("error", "Crawl failed"))
+
+        if not request.analyze:
+            return AgentRunResponse(success=True, data=crawl_result)
+
+        # analyze=True：用 WritingAgent 对抓取内容进行分析
+        orchestrator = _create_orchestrator()
+        content_text = crawl_result.get("output", {}).get("content", "")
+        result = await orchestrator.run(
+            user_request=f"分析以下从 {request.url} 抓取的内容，提取核心观点和关键信息：\n\n{content_text[:8000]}",
+            context={"force_template": "simple"},
+            timeout=120.0,
+        )
+        return AgentRunResponse(
+            success=result.status.value in ("completed", "partial"),
+            data={"crawl": crawl_result, "analysis": result.to_dict()},
+        )
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===================== WebSocket =====================

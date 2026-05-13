@@ -75,3 +75,74 @@ class LLMCache:
 
 # 模块级单例
 llm_cache = LLMCache()
+
+
+class AgentCache:
+    """Agent 执行结果缓存
+
+    缓存相同输入的 Agent 执行结果，避免重复 LLM 调用。
+    基于 (agent_type, input_hash) 的缓存，带 TTL 和 LRU 淘汰。
+    """
+
+    def __init__(self, default_ttl: int = 3600, max_entries: int = 500):
+        self._cache: OrderedDict[str, dict] = OrderedDict()
+        self._default_ttl = default_ttl
+        self._max_entries = max_entries
+        self._lock = threading.Lock()
+        self._hits = 0
+        self._misses = 0
+
+    def _make_key(self, agent_type: str, task_input: dict) -> str:
+        normalized = json.dumps(task_input, sort_keys=True, ensure_ascii=False)
+        input_hash = hashlib.sha256(normalized.encode()).hexdigest()[:16]
+        return f"{agent_type}:{input_hash}"
+
+    def get(self, agent_type: str, task_input: dict) -> Optional[dict]:
+        key = self._make_key(agent_type, task_input)
+        with self._lock:
+            if key in self._cache:
+                expires_at, result = self._cache[key]
+                if time.time() < expires_at:
+                    self._cache.move_to_end(key)
+                    self._hits += 1
+                    return result
+                del self._cache[key]
+            self._misses += 1
+            return None
+
+    def set(self, agent_type: str, task_input: dict, result: dict, ttl: Optional[int] = None) -> None:
+        if result.get("status") == "failed":
+            return
+        key = self._make_key(agent_type, task_input)
+        with self._lock:
+            if key in self._cache:
+                self._cache.move_to_end(key)
+            self._cache[key] = (time.time() + (ttl or self._default_ttl), result)
+            while len(self._cache) > self._max_entries:
+                self._cache.popitem(last=False)
+
+    def invalidate(self, agent_type: Optional[str] = None) -> None:
+        with self._lock:
+            if agent_type is None:
+                self._cache.clear()
+            else:
+                keys = [k for k in self._cache if k.startswith(f"{agent_type}:")]
+                for k in keys:
+                    del self._cache[k]
+            self._hits = 0
+            self._misses = 0
+
+    @property
+    def stats(self) -> dict:
+        total = self._hits + self._misses
+        return {
+            "entries": len(self._cache),
+            "max_entries": self._max_entries,
+            "hits": self._hits,
+            "misses": self._misses,
+            "hit_rate": round(self._hits / max(total, 1), 3),
+        }
+
+
+# 全局 Agent 缓存实例
+agent_cache = AgentCache()

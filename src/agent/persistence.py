@@ -196,26 +196,28 @@ def cleanup_old_records(retention_days: Optional[dict] = None) -> dict[str, int]
 
     with SessionLocal() as db:
         try:
+            from datetime import timedelta
+
             # 清理 ThinkingTrace（保留 7 天）
-            trace_cutoff = now.timestamp() - retention["thinking_traces"] * 86400
+            trace_cutoff = now - timedelta(days=retention["thinking_traces"])
             old_traces = db.query(ThinkingTraceRecord).filter(
-                ThinkingTraceRecord.created_at < datetime.fromtimestamp(trace_cutoff)
+                ThinkingTraceRecord.created_at < trace_cutoff
             ).delete(synchronize_session=False)
             counts["thinking_traces"] = old_traces
 
             # 清理 ToolCall（保留 30 天）
-            tool_cutoff = now.timestamp() - retention["tool_calls"] * 86400
+            tool_cutoff = now - timedelta(days=retention["tool_calls"])
             old_tools = db.query(ToolCallModel).filter(
-                ToolCallModel.created_at < datetime.fromtimestamp(tool_cutoff)
+                ToolCallModel.created_at < tool_cutoff
             ).delete(synchronize_session=False)
             counts["tool_calls"] = old_tools
 
             # 清理已完成的 AgentTask（保留 90 天）
-            task_cutoff = now.timestamp() - retention["agent_tasks"] * 86400
+            task_cutoff = now - timedelta(days=retention["agent_tasks"])
             from src.models import AgentTask as AgentTaskModel
             old_tasks = db.query(AgentTaskModel).filter(
                 AgentTaskModel.status.in_(["completed", "failed", "cancelled"]),
-                AgentTaskModel.completed_at < datetime.fromtimestamp(task_cutoff),
+                AgentTaskModel.completed_at < task_cutoff,
             ).delete(synchronize_session=False)
             counts["agent_tasks"] = old_tasks
 

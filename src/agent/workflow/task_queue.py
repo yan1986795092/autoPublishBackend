@@ -32,6 +32,7 @@ class AsyncTask:
     id: str
     user_id: str
     prompt: str
+    plan: Optional[dict] = None         # 预生成的执行计划（SSE 传递到 Worker）
     state: TaskState = TaskState.PENDING
     progress: float = 0.0
     progress_message: str = ""
@@ -61,6 +62,8 @@ class AsyncTask:
             "created_at": self.created_at,
             "completed_at": self.completed_at,
         }
+        if self.plan:
+            d["plan"] = {k: v for k, v in self.plan.items() if k in ("goal", "reasoning", "estimated_steps")}
         if self.pending_decision:
             d["pending_decision"] = {
                 "decision_id": self.pending_decision.get("decision_id"),
@@ -87,12 +90,15 @@ class TaskQueue:
         self._progress_events: dict[str, list[asyncio.Event]] = {}
         self._decision_events: dict[str, asyncio.Event] = {}
         self._decisions: dict[str, Optional[str]] = {}
+        # 死信队列：重试耗尽后仍然失败的任务
+        self._dead_letter_queue: dict[str, AsyncTask] = {}
 
-    async def enqueue(self, prompt: str, user_id: str, metadata: Optional[dict] = None) -> AsyncTask:
+    async def enqueue(self, prompt: str, user_id: str, metadata: Optional[dict] = None, plan: Optional[dict] = None) -> AsyncTask:
         task = AsyncTask(
             id=str(uuid.uuid4()),
             user_id=user_id,
             prompt=prompt,
+            plan=plan,
             metadata=metadata or {},
         )
         self._tasks[task.id] = task
@@ -149,6 +155,32 @@ class TaskQueue:
         if user_id:
             tasks = [t for t in tasks if t.user_id == user_id]
         return tasks[:limit]
+
+    def send_to_dlq(self, task_id: str, reason: str = "") -> None:
+        """将任务移入死信队列（所有重试耗尽后的最终归宿）"""
+        task = self._tasks.get(task_id)
+        if task:
+            task.state = TaskState.FAILED
+            task.error = f"DLQ: {reason or 'All retries exhausted'}"
+            task.completed_at = datetime.utcnow().isoformat()
+            self._dead_letter_queue[task_id] = task
+            self._notify_progress(task_id)
+
+    def get_dlq_tasks(self, limit: int = 20) -> list[AsyncTask]:
+        """获取死信队列中的任务列表"""
+        return sorted(self._dead_letter_queue.values(), key=lambda t: t.created_at, reverse=True)[:limit]
+
+    def retry_from_dlq(self, task_id: str) -> Optional[AsyncTask]:
+        """从死信队列中取出任务重新入队重试"""
+        task = self._dead_letter_queue.pop(task_id, None)
+        if task:
+            task.state = TaskState.PENDING
+            task.error = None
+            task.completed_at = None
+            task.retry_count = (task.retry_count or 0) + 1
+            self._tasks[task_id] = task
+            self._queue.put_nowait(task)
+        return task
 
     def _cleanup_old_tasks(self) -> None:
         """清理超过 1 小时的已完成/失败/取消任务，防止内存泄漏"""

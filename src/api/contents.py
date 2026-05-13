@@ -1,6 +1,6 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi.responses import StreamingResponse
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 from typing import Optional
 import json
 
@@ -113,7 +113,7 @@ def list_contents(
                     "title": c.title,
                     "topic": c.topic,
                     "platform_code": c.platform_code,
-                    "status": c.status.value if hasattr(c.status, 'value') else c.status,
+                    "status": c.status.value if c.status else "unknown",
                     "tags": c.tags.split(",") if c.tags else [],
                     "view_count": c.view_count or 0,
                     "like_count": c.like_count or 0,
@@ -160,7 +160,7 @@ def get_content(
             "platform_code": content.platform_code,
             "content_md": content.content_md,
             "content_html": content.content_html,
-            "status": content.status.value if hasattr(content.status, 'value') else content.status,
+            "status": content.status.value if content.status else "unknown",
             "tags": content.tags.split(",") if content.tags else [],
             "view_count": content.view_count or 0,
             "like_count": content.like_count or 0,
@@ -303,14 +303,26 @@ def get_content_calendar(
     if not month:
         month = now.month
 
-    # 当月所有内容
+    # 当月所有内容（使用 SQL 级 WHERE 避免全表扫描 + selectinload 避免 N+1）
+    start_date = f"{year}-{month:02d}-01"
+    if month == 12:
+        end_date = f"{year + 1}-01-01"
+    else:
+        end_date = f"{year}-{month+1:02d}-01"
+
     contents = db.query(Content).filter(
         Content.user_id == current_user.id,
+        Content.created_at >= start_date,
+        Content.created_at < end_date,
     ).all()
 
-    # 当月所有发布记录
-    publish_records = db.query(PublishRecord).join(Content).filter(
+    # 当月所有发布记录（带上 eager loading 避免 r.content.title N+1）
+    publish_records = db.query(PublishRecord).options(
+        selectinload(PublishRecord.content)
+    ).join(Content).filter(
         Content.user_id == current_user.id,
+        PublishRecord.created_at >= start_date,
+        PublishRecord.created_at < end_date,
     ).all()
 
     # 按日期分组
@@ -326,7 +338,7 @@ def get_content_calendar(
                 "title": c.title or c.topic or "未命名",
                 "type": "created",
                 "platform_code": c.platform_code,
-                "status": c.status.value if hasattr(c.status, 'value') else c.status,
+                "status": c.status.value,
             })
 
     for r in publish_records:
@@ -344,7 +356,7 @@ def get_content_calendar(
                             "title": r.content.title or r.content.topic or "未命名",
                             "type": "scheduled",
                             "platform_code": r.platform_code,
-                            "status": r.status.value if hasattr(r.status, 'value') else r.status,
+                            "status": r.status.value,
                         })
             except (json.JSONDecodeError, AttributeError):
                 pass
@@ -402,7 +414,7 @@ def diff_versions(
 
     service = ContentService(db)
     try:
-        result = service.diff_versions(v1, v2)
+        result = service.diff_versions(content_id, v1, v2)
         return {"success": True, "data": result}
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

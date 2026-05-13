@@ -1,9 +1,25 @@
 """PlatformAdapter Agent — 多平台格式转换 (小红书/公众号/知乎)"""
 
 import logging
+import os
 from langchain_openai import ChatOpenAI
 
 logger = logging.getLogger(__name__)
+
+
+def _load_credentials(target_platform: str) -> dict:
+    """从环境变量加载平台凭证，兜底 mock 模式"""
+    env_map = {
+        "xiaohongshu": ("XHS_COOKIE",),
+        "wechat": ("WECHAT_APP_ID", "WECHAT_APP_SECRET"),
+        "zhihu": ("ZHIHU_COOKIE",),
+    }
+    keys = env_map.get(target_platform, [])
+    creds = {k.lower(): os.getenv(k, "") for k in keys}
+    if any(creds.values()):
+        creds["is_mock"] = False
+        return creds
+    return {"is_mock": True}
 
 
 async def handle_platform_adapter(task_input: dict, llm: ChatOpenAI) -> dict:
@@ -30,7 +46,7 @@ async def handle_platform_adapter(task_input: dict, llm: ChatOpenAI) -> dict:
 
         adapter_cls = PLATFORM_ADAPTERS.get(target_platform)
         if adapter_cls:
-            adapter = adapter_cls({})  # mock 模式凭据
+            adapter = adapter_cls(_load_credentials(target_platform))
             platform_content = PlatformContent(
                 title=content[:60].strip().split("\n")[0],
                 body_md=content,

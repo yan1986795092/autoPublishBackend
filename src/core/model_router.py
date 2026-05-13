@@ -123,3 +123,4 @@ class ModelRouter:
 
     def invalidate_cache(self) -> None:
         self._cache.clear()
+        self._chat_cache.clear()
