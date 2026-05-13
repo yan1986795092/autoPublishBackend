@@ -1,5 +1,7 @@
 """Agent 系统 Prompt 模板和写作指南"""
 
+from src.utils.evaluator import BANNED_WORDS
+
 CONTENT_TYPE_PROMPTS = {
     "blog": "写一篇技术博客文章。要求：有吸引力的标题、引言、2-4个主要章节、结论。使用专业但易懂的语言。",
     "social_post": "写一篇社交媒体帖子。要求：吸引眼球的开头、简短有力、有互动引导。",
@@ -25,8 +27,6 @@ QUALITY_CHECKS = [
     "是否有违禁词或敏感词",
     "段落长度是否适中，是否便于阅读",
 ]
-
-BANNED_WORDS = ["首个", "独家", "唯一", "绝对", "顶级", "百分百", "100%", "全网", "国家级", "最佳"]
 
 SYSTEM_PROMPT_TEMPLATE = """You are an AI {role}. Your task is to {description}.
 

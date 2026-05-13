@@ -1,8 +1,9 @@
-"""ReviewAgent — 内容质量审核、违禁词检查"""
+"""ReviewAgent — 内容质量审核、违禁词检查、事实核查"""
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import QUALITY_CHECKS, check_banned_words
+from .factcheck import factcheck_report
 
 
 async def handle_review(task_input: dict, llm: ChatOpenAI) -> dict:
@@ -16,13 +17,17 @@ async def handle_review(task_input: dict, llm: ChatOpenAI) -> dict:
 
     content_type = task_input.get("content_type", "general")
     banned_found = check_banned_words(content) if content else []
+    known_facts = task_input.get("known_facts")
 
     if not content:
         return {
             "status": "completed", "agent_type": "ReviewAgent",
-            "output": {"passed": False, "banned_words": [], "suggestions": ["无内容可审核"]},
+            "output": {"passed": False, "banned_words": [], "factcheck": None, "suggestions": ["无内容可审核"]},
             "tokens_used": 0, "thinking_steps": [],
         }
+
+    # 事实核查
+    fc_report = factcheck_report(content, known_facts) if content else None
 
     prompt = f"""## 审核任务
 
@@ -45,12 +50,18 @@ async def handle_review(task_input: dict, llm: ChatOpenAI) -> dict:
 
     return {
         "status": "completed", "agent_type": "ReviewAgent",
-        "output": {"passed": passed, "banned_words": banned_found, "suggestions": suggestions, "content": quality},
+        "output": {
+            "passed": passed,
+            "banned_words": banned_found,
+            "factcheck": fc_report,
+            "suggestions": suggestions,
+            "content": quality,
+        },
         "tokens_used": len(response.content) // 4,
         "thinking_steps": [{
             "agent": "ReviewAgent", "action": "validate",
             "reasoning": f"Reviewing {content_type} content",
-            "output_summary": f"{'Passed' if passed else 'Needs improvement'}, {len(banned_found)} banned words",
+            "output_summary": f"{'Passed' if passed else 'Needs improvement'}, {len(banned_found)} banned words, {fc_report['total_claims_checked'] if fc_report else 0} claims checked",
             "status": "done",
         }],
     }

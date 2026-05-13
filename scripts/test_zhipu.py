@@ -3,7 +3,7 @@ import asyncio
 import json
 
 async def test_zhipu_stream():
-    api_key = "946cbe443a1a4f598c9413b748727b41.YJYEanO3LiyNV9TX"
+    api_key = "your-zhipu-api-key"  # 请替换为实际的 API 密钥
     base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
     model = "glm-4-flash"
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}

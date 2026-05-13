@@ -1,3 +1,4 @@
+import logging
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -5,18 +6,20 @@ from datetime import datetime
 import random
 import json
 
+from src.database import get_db
+from src.models import Content, PublishRecord, Platform, ContentStatus, PublishStatus
+from src.schemas.publish import PublishRequest
+from src.api.auth import get_current_user
+from src.services.content_service import ContentService
+
+logger = logging.getLogger(__name__)
+
 
 class BatchPublishRequest(BaseModel):
     content_id: str
     platforms: list[str]
     publish_mode: str = "draft"
     schedule_time: str | None = None
-
-from src.database import get_db
-from src.models import Content, PublishRecord, Platform, ContentStatus, PublishStatus
-from src.schemas.publish import PublishRequest
-from src.api.auth import get_current_user
-from src.services.content_service import ContentService
 
 router = APIRouter(prefix="/publish", tags=["发布"])
 
@@ -60,7 +63,7 @@ def publish_content(
                     }
                 }
         except ValueError:
-            pass  # fall through to immediate publish
+            logger.warning(f"Invalid schedule_time format: {request.schedule_time}, falling through to immediate publish")
 
     # Mock 模式：模拟发布结果（90% 成功率）
     success = random.random() > 0.1
@@ -80,9 +83,9 @@ def publish_content(
     db.flush()
 
     url_patterns = {
-        "xiaohongshu": f"https://www.xiaohongshu.com/explore/{record.id}",
-        "wechat": f"https://mp.weixin.qq.com/s/{record.id}",
-        "zhihu": f"https://zhuanlan.zhihu.com/p/{record.id}",
+        "xiaohongshu": f"https://mock.example.com/xiaohongshu/{record.id}",
+        "wechat": f"https://mock.example.com/wechat/{record.id}",
+        "zhihu": f"https://mock.example.com/zhihu/{record.id}",
     }
 
     if success:
@@ -259,11 +262,11 @@ def batch_publish(
             record.status = PublishStatus.SUCCESS
             record.platform_post_id = f"mock_{record.id}"
             url_patterns = {
-                "xiaohongshu": f"https://www.xiaohongshu.com/explore/{record.id}",
-                "wechat": f"https://mp.weixin.qq.com/s/{record.id}",
-                "zhihu": f"https://zhuanlan.zhihu.com/p/{record.id}",
+                "xiaohongshu": f"https://mock.example.com/xiaohongshu/{record.id}",
+                "wechat": f"https://mock.example.com/wechat/{record.id}",
+                "zhihu": f"https://mock.example.com/zhihu/{record.id}",
             }
-            record.platform_url = url_patterns.get(platform_code)
+            record.platform_url = url_patterns.get(platform_code, url_patterns["xiaohongshu"])
             record.published_at = datetime.utcnow()
 
             if request.publish_mode == "publish":

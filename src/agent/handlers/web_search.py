@@ -1,7 +1,8 @@
-"""WebSearch Agent — 实时搜索 (SerpAPI → DuckDuckGo → 内部知识)"""
+"""WebSearch Agent — 实时搜索 (SerpAPI → DuckDuckGo → 内部知识) + URL 抓取"""
 
 import os
 import re
+import json
 import logging
 import httpx
 from langchain_openai import ChatOpenAI
@@ -41,8 +42,9 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI) -> dict:
             }) as client:
                 resp = await client.get("https://html.duckduckgo.com/html/", params={"q": query})
                 text = resp.text
-                link_pattern = re.findall(r'<a[^>]*class="result__a"[^>]*href="([^"]*)"[^>]*>([^<]*)</a>', text)
-                snippet_pattern = re.findall(r'<a[^>]*class="result__snippet"[^>]*>([^<]*(?:<[^/][^>]*>[^<]*</[^>]*>)?[^<]*)</a>', text)
+                # Use lookaheads so the regex works regardless of HTML attribute order
+                link_pattern = re.findall(r'<a(?=[^>]*class="result__a")[^>]*href="([^"]*)"[^>]*>([^<]*)</a>', text)
+                snippet_pattern = re.findall(r'<a(?=[^>]*class="result__snippet")[^>]*>([^<]*(?:<[^/][^>]*>[^<]*</[^>]*>)?[^<]*)</a>', text)
                 for i, (url, title) in enumerate(link_pattern[:count]):
                     snippet = snippet_pattern[i] if i < len(snippet_pattern) else ""
                     snippet = re.sub(r"<[^>]+>", "", snippet).strip()
@@ -70,3 +72,71 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI) -> dict:
         "tokens_used": 0,
         "thinking_steps": [{"agent": "WebSearch", "action": "search", "reasoning": f"Searching: {query}", "output_summary": f"Found {len(results)} results via {source}", "status": "done"}],
     }
+
+
+async def handle_url_crawl(task_input: dict, llm: ChatOpenAI) -> dict:
+    """URLCrawler — 抓取指定 URL 的文本内容"""
+    url = task_input.get("url", "")
+    max_length = task_input.get("max_length", 3000)
+    query = task_input.get("query", "")
+
+    if not url:
+        return {
+            "status": "failed", "agent_type": "URLCrawler",
+            "error": "No URL provided",
+            "output": {"content": ""},
+            "tokens_used": 0, "thinking_steps": [],
+        }
+
+    try:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            resp = await client.get(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+            if resp.status_code != 200:
+                return {
+                    "status": "failed", "agent_type": "URLCrawler",
+                    "error": f"HTTP {resp.status_code}",
+                    "output": {"content": f"抓取失败，HTTP {resp.status_code}"},
+                    "tokens_used": 0, "thinking_steps": [],
+                }
+
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, "html.parser")
+                for tag in soup(["script", "style", "nav", "footer", "header", "noscript"]):
+                    tag.decompose()
+                title = soup.title.string.strip() if soup.title and soup.title.string else url
+                text = soup.get_text(separator="\n", strip=True)
+                text = "\n".join(line for line in text.split("\n") if line.strip())[:max_length]
+                source = "beautifulsoup"
+            except ImportError:
+                text = resp.text[:max_length]
+                title = url
+                source = "raw"
+
+            content = f"标题: {title}\n\n来源: {url}\n\n{text}"
+            return {
+                "status": "completed", "agent_type": "URLCrawler",
+                "output": {"content": content, "url": url, "title": title, "source": source},
+                "tokens_used": 0,
+                "thinking_steps": [{
+                    "agent": "URLCrawler", "action": "crawl",
+                    "reasoning": f"Crawling: {url}",
+                    "output_summary": f"Got {len(text)} chars from {title}",
+                    "status": "done",
+                }],
+            }
+    except httpx.TimeoutException:
+        return {
+            "status": "failed", "agent_type": "URLCrawler",
+            "error": "Request timeout",
+            "output": {"content": f"抓取超时：{url}"},
+            "tokens_used": 0, "thinking_steps": [],
+        }
+    except Exception as e:
+        logger.warning(f"URLCrawler failed: {e}")
+        return {
+            "status": "failed", "agent_type": "URLCrawler",
+            "error": str(e),
+            "output": {"content": f"抓取失败：{e}"},
+            "tokens_used": 0, "thinking_steps": [],
+        }

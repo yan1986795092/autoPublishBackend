@@ -386,9 +386,10 @@ class ContentService:
         # 人设查询
         persona_desc = ""
         persona_obj = None
-        if request.parameters and request.parameters.get("persona_id"):
+        persona_id = request.parameters.get("persona_id") if request.parameters else None
+        if persona_id:
             persona_obj = self.db.query(Persona).filter(
-                Persona.id == request.parameters["persona_id"]
+                Persona.id == persona_id
             ).first()
             if persona_obj:
                 persona_desc = self._build_persona_desc(persona_obj)
@@ -520,9 +521,10 @@ class ContentService:
         # 人设查询
         persona_desc = ""
         persona_obj = None
-        if request.parameters and request.parameters.get("persona_id"):
+        persona_id = request.parameters.get("persona_id") if request.parameters else None
+        if persona_id:
             persona_obj = self.db.query(Persona).filter(
-                Persona.id == request.parameters["persona_id"]
+                Persona.id == persona_id
             ).first()
             if persona_obj:
                 persona_desc = self._build_persona_desc(persona_obj)
@@ -590,42 +592,43 @@ class ContentService:
                 title = parsed["title"]
                 yield f"data: {json.dumps({'type': 'title', 'content': title})}\n\n"
 
-            # 保存到数据库
-            content = Content(
-                user_id=user_id,
-                title=title,
-                topic=request.topic,
-                platform_code=request.platform_code,
-                content_md=full_content,
-                content_html=full_content.replace("\n", "<br>"),
-                status=ContentStatus.DRAFT,
-                metadata_json=json.dumps(request.parameters or {}),
-            )
-            self.db.add(content)
-            self.db.commit()
-            self.db.refresh(content)
-
-            # 创建第一个版本
-            version = ContentVersion(
-                content_id=content.id,
-                version_number=1,
-                content_md=full_content,
-                content_html=full_content.replace("\n", "<br>"),
-                change_summary="初稿生成",
-            )
-            self.db.add(version)
-            self.db.commit()
-
-            # 更新模板使用次数
-            if db_template:
-                db_template.use_count += 1
+            # 保存到数据库（仅在 session 仍然活跃时）
+            if self.db.is_active:
+                content = Content(
+                    user_id=user_id,
+                    title=title,
+                    topic=request.topic,
+                    platform_code=request.platform_code,
+                    content_md=full_content,
+                    content_html=full_content.replace("\n", "<br>"),
+                    status=ContentStatus.DRAFT,
+                    metadata_json=json.dumps(request.parameters or {}),
+                )
+                self.db.add(content)
                 self.db.commit()
+                self.db.refresh(content)
+
+                # 创建第一个版本
+                version = ContentVersion(
+                    content_id=content.id,
+                    version_number=1,
+                    content_md=full_content,
+                    content_html=full_content.replace("\n", "<br>"),
+                    change_summary="初稿生成",
+                )
+                self.db.add(version)
+                self.db.commit()
+
+                # 更新模板使用次数
+                if db_template:
+                    db_template.use_count += 1
+                    self.db.commit()
 
             generation_time_ms = int((time.time() - start_time) * 1000)
 
             done_data = {
                 'type': 'done',
-                'content_id': content.id,
+                'content_id': content.id if self.db.is_active else '',
                 'title': title,
                 'metadata': {
                     'model': model_name,
@@ -636,7 +639,7 @@ class ContentService:
             }
             yield f"data: {json.dumps(done_data)}\n\n"
 
-        except Exception as e:
+        except (Exception, asyncio.CancelledError) as e:
             import traceback
             traceback.print_exc()
             yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
@@ -687,28 +690,40 @@ class ContentService:
         return found
 
     async def batch_generate(self, user_id: str, platforms: list[str], topic: str, parameters: dict | None = None, model: str | None = None) -> list[dict]:
-        """批量生成多平台内容（并发调用）"""
+        """批量生成多平台内容（每个平台使用独立 DB session，避免并发竞态）"""
+        from src.database import SessionLocal
         from src.schemas.content import GenerateRequest
 
-        tasks = []
-        for platform in platforms:
-            gen_request = GenerateRequest(
-                topic=topic,
-                platform_code=platform,
-                model=model,
-                parameters=parameters,
-            )
-            tasks.append(self.generate_content(user_id, gen_request))
+        async def _gen(platform: str) -> dict:
+            db = SessionLocal()
+            try:
+                svc = ContentService(db)
+                req = GenerateRequest(
+                    topic=topic,
+                    platform_code=platform,
+                    model=model,
+                    parameters=parameters,
+                )
+                return await svc.generate_content(user_id, req)
+            finally:
+                db.close()
 
+        tasks = [_gen(p) for p in platforms]
         results = await asyncio.gather(*tasks)
         return list(results)
 
-    def diff_versions(self, version_id_1: str, version_id_2: str) -> dict:
-        """对比两个版本的差异"""
+    def diff_versions(self, content_id: str, version_id_1: str, version_id_2: str) -> dict:
+        """对比两个版本的差异（校验版本属于指定内容）"""
         import difflib
 
-        v1 = self.db.query(ContentVersion).filter(ContentVersion.id == version_id_1).first()
-        v2 = self.db.query(ContentVersion).filter(ContentVersion.id == version_id_2).first()
+        v1 = self.db.query(ContentVersion).filter(
+            ContentVersion.id == version_id_1,
+            ContentVersion.content_id == content_id,
+        ).first()
+        v2 = self.db.query(ContentVersion).filter(
+            ContentVersion.id == version_id_2,
+            ContentVersion.content_id == content_id,
+        ).first()
 
         if not v1 or not v2:
             raise ValueError("版本不存在")
@@ -749,7 +764,10 @@ class ContentService:
         query = self.db.query(Content).filter(Content.user_id == user_id)
 
         if status:
-            query = query.filter(Content.status == status)
+            try:
+                query = query.filter(Content.status == ContentStatus(status))
+            except ValueError:
+                query = query.filter(Content.status == status)
         if platform_code:
             query = query.filter(Content.platform_code == platform_code)
         if search:
@@ -758,7 +776,13 @@ class ContentService:
                 (Content.topic.contains(search))
             )
         if tag:
-            query = query.filter(Content.tags.contains(tag))
+            # 精确匹配标签，避免 LIKE '%tag%' 子串误报
+            query = query.filter(
+                (Content.tags == tag) |
+                (Content.tags.like(f"{tag},%")) |
+                (Content.tags.like(f"%,{tag}")) |
+                (Content.tags.like(f"%,{tag},%"))
+            )
 
         total = query.count()
         items = query.order_by(Content.created_at.desc()).offset((page - 1) * page_size).limit(page_size).all()

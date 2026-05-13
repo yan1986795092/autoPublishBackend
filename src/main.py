@@ -3,6 +3,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
+import asyncio
 
 from src.core.exceptions import GenerateError
 from src.database import engine
@@ -15,7 +16,8 @@ from src.agent.workflow.worker import worker
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # 启动时：创建表 + 启动 Worker
-    Base.metadata.create_all(bind=engine)
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, lambda: Base.metadata.create_all(bind=engine))
     await worker.start()
     print("[Agent Worker] Started")
     yield

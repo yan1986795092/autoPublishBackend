@@ -1,7 +1,18 @@
-"""Agent 共享常量和工具函数 — 从 nodes.py 提取"""
+"""Agent 共享常量和工具函数 — 从 nodes.py 提取
+
+违禁词检查相关函数 (check_banned_words / BANNED_WORDS / 正则模式)
+统一由 src.utils.evaluator 维护，此处通过 import 引用避免重复。
+"""
 
 from __future__ import annotations
-import re
+
+from src.utils.evaluator import (
+    BANNED_WORDS,
+    check_banned_words,
+    extract_output,
+    seo_score,
+    seo_suggestions,
+)
 
 # ── 内容类型 Prompt 模板 ──
 
@@ -12,6 +23,9 @@ CONTENT_TYPE_PROMPTS = {
     "script": "写一个视频脚本。要求：口播自然、有开场钩子、分镜描述。",
     "newsletter": "写一封邮件Newsletter。要求：友好的问候语、2-3个核心内容。",
     "report": "写一份分析报告。要求：数据驱动、结构化、有结论和建议。",
+    "weibo_post": "写一条微博/即刻短帖。要求：140字以内、一针见血、有话题标签、适合快速传播。",
+    "twitter_thread": "写一条 Twitter/X Thread。要求：英文为主、开头hook吸引点击、每条推文独立可读、有逻辑递进、结尾带CTA和话题标签。",
+    "podcast_script": "写一期播客脚本。要求：有开场介绍、嘉宾引入（如适用）、2-3个讨论环节、收尾总结和预告。",
 }
 
 STYLE_GUIDES = {
@@ -30,16 +44,6 @@ QUALITY_CHECKS = [
     "是否有违禁词或敏感词",
     "段落长度是否适中，是否便于阅读",
 ]
-
-BANNED_WORDS = ["首个", "独家", "唯一", "绝对", "顶级", "百分百", "100%", "全网", "国家级", "最佳"]
-
-_BANNED_PATTERNS = [
-    re.compile(r'(?:排名|销量|口碑|销量|业绩|行业|全国|全球|全网)\s*第一'),
-    re.compile(r'第一\s*(?:品牌|名|好|大)'),
-    re.compile(r'第\s*一\s*(?:位|名)'),
-]
-for w in BANNED_WORDS:
-    _BANNED_PATTERNS.append(re.compile(re.escape(w)))
 
 SYSTEM_PROMPT_TEMPLATE = """You are an AI {role}. Your task is to {description}.
 
@@ -87,62 +91,3 @@ Output format:
   ]
 }
 ```"""
-
-
-# ── 工具函数 ──
-
-def extract_output(response: str) -> str:
-    """从 LLM 响应中提取 OUTPUT: 后面的内容"""
-    if "OUTPUT:" in response:
-        return response[response.index("OUTPUT:") + len("OUTPUT:"):].strip()
-    return response.strip()
-
-
-def check_banned_words(content: str) -> list[dict]:
-    """违禁词检查，返回匹配列表"""
-    banned_found = []
-    seen = set()
-    for pattern in _BANNED_PATTERNS:
-        for match in pattern.finditer(content):
-            word = match.group()
-            if word not in seen:
-                seen.add(word)
-                banned_found.append({"word": word, "severity": "warning"})
-    return banned_found
-
-
-def seo_score(content: str, keywords: list[dict], topic: str) -> dict | None:
-    """计算 SEO 评分"""
-    if not content:
-        return None
-    content_lower = content.lower()
-    word_count = len(content.split())
-    keyword_scores = {}
-    for k in keywords:
-        kw = k["keyword"].lower()
-        count = content_lower.count(kw)
-        density = count / max(word_count, 1)
-        target = k.get("density_target", 0.02)
-        keyword_scores[kw] = {
-            "count": count, "density": round(density, 4),
-            "score": min(100, int((1 - abs(density - target) / target) * 100)) if target else 50,
-        }
-    avg_kw = sum(v["score"] for v in keyword_scores.values()) / max(len(keyword_scores), 1)
-    title_score = 80 if 20 <= len(topic) <= 60 else 50
-    readability = 90 if 15 <= (word_count / max(len(content.split("。")), 1)) <= 30 else 70
-    return {
-        "overall": int(avg_kw * 0.4 + title_score * 0.3 + readability * 0.3),
-        "word_count": word_count,
-        "details": {"title_score": title_score, "keyword_score": int(avg_kw), "readability_score": readability},
-    }
-
-
-def seo_suggestions(content: str, keywords: list[dict], score: dict | None) -> list[str]:
-    """生成 SEO 建议"""
-    suggestions = []
-    if score and score.get("details", {}).get("title_score", 100) < 70:
-        suggestions.append("标题长度建议在 20-60 字符之间")
-    if score and score.get("details", {}).get("keyword_score", 100) < 70:
-        suggestions.append("关键词使用不足，建议在标题和首段中包含核心关键词")
-    suggestions.append("建议在标题和首段中包含核心关键词")
-    return suggestions

@@ -213,11 +213,3 @@ class PlatformRegistry:
     def is_registered(cls, platform_code: str) -> bool:
         """检查平台是否已注册"""
         return platform_code in cls._adapters
-
-
-def register_all_adapters():
-    """注册所有内置适配器"""
-    # 导入所有适配器以触发注册
-    from .xiaohongshu import XiaohongshuAdapter
-    from .wechat import WechatAdapter
-    from .zhihu import ZhihuAdapter

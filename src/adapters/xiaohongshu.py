@@ -4,7 +4,6 @@ from src.adapters.base import (
     PublishResult,
     PublishStatus,
     PlatformRegistry,
-    register_all_adapters,
 )
 
 

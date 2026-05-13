@@ -12,7 +12,7 @@ class LLMGateway:
     PROVIDERS = {
         "openai": "https://api.openai.com/v1",
         "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-        "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+        "zhipu": "https://open.bigmodel.cn/api/coding/paas/v4",
     }
 
     def __init__(self, api_key: str, provider: str = "openai", model: str = "", base_url: str = ""):

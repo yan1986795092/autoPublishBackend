@@ -12,6 +12,24 @@ import time
 import uuid
 from typing import Any, Optional
 
+
+# Python 3.10 兼容的 asyncio.timeout 包装
+class _AsyncioTimeout:
+    """兼容 Python 3.10 的 asyncio.timeout 替代"""
+    def __init__(self, timeout: float):
+        self._timeout = timeout
+        self._task: asyncio.Task | None = None
+
+    async def __aenter__(self) -> "_AsyncioTimeout":
+        self._task = asyncio.current_task()
+        self._cancelled = False
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        if exc_type is asyncio.CancelledError:
+            self._cancelled = True
+        return False
+
 from langchain_openai import ChatOpenAI
 
 from .graph import build_agent_graph
@@ -127,13 +145,15 @@ class Orchestrator:
         task_id = trace.task_id
 
         try:
-            async with asyncio.timeout(timeout):
-                # ── 构建初始 state ──
+            # Python 3.10 兼容：asyncio.timeout 在 3.11+ 才支持上下文管理器
+            async with asyncio.timeout(timeout) if hasattr(asyncio, 'timeout') else _AsyncioTimeout(timeout):
+                # ── 构建初始 state（支持预计算计划，避免 SSE plan ≠ 执行计划）──
+                precomputed = (context or {}).get("precomputed_plan")
                 initial_state: AgentGraphState = {
                     "user_request": user_request,
                     "context": context or {},
-                    "plan": None,
-                    "plan_reasoning": "",
+                    "plan": precomputed,
+                    "plan_reasoning": (precomputed or {}).get("reasoning", ""),
                     "task_queue": [],
                     "completed_task_ids": [],
                     "failed_task_ids": [],
