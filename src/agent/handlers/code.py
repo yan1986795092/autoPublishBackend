@@ -6,7 +6,7 @@ from ..agent_utils import SYSTEM_PROMPT_TEMPLATE, extract_output
 from src.tools.code_runner import CodeRunner
 
 
-async def handle_code(task_input: dict, llm: ChatOpenAI) -> dict:
+async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     topic = task_input.get("topic", task_input.get("query", ""))
     language = task_input.get("language", "python")
     run_code = task_input.get("run_code", False)
@@ -64,10 +64,10 @@ async def handle_code(task_input: dict, llm: ChatOpenAI) -> dict:
         "tokens_used": tokens,
         "thinking_steps": [{
             "agent": "CodeAgent",
-            "action": "execute" if run_code else "generate",
-            "reasoning": f"Generating {language} code for: {topic}",
-            "output_summary": f"Generated {content.count('```') // 2} code blocks" +
-                (f", execution: {'PASS' if output.get('execution', {}).get('success') else 'FAIL'}" if run_code else ""),
+            "action": "代码执行完成" if run_code else "代码生成完成",
+            "reasoning": f"生成 {language} 代码：{topic[:30]}...",
+            "output_summary": f"生成代码块 {content.count('```') // 2} 个" +
+                (f"，执行结果：{'成功 ✓' if output.get('execution', {}).get('success') else '失败 ✗'}" if run_code else ""),
             "tokens_used": tokens,
             "status": "done",
         }],

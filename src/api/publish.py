@@ -124,6 +124,17 @@ def publish_content(
         }
 
 
+@router.get("/best-time", response_model=dict)
+def get_best_publish_time(
+    platform_code: str = "xiaohongshu",
+    db: Session = Depends(get_db)
+):
+    """获取最佳发布时间建议（必须在 /{record_id} 之前定义，避免路径冲突）"""
+    service = ContentService(db)
+    suggestion = service.suggest_best_time(platform_code)
+    return {"success": True, "data": suggestion}
+
+
 @router.get("/{record_id}", response_model=dict)
 def get_publish_status(
     record_id: str,
@@ -152,17 +163,6 @@ def get_publish_status(
             "published_at": record.published_at.isoformat() if record.published_at else None,
         }
     }
-
-
-@router.get("/best-time", response_model=dict)
-def get_best_publish_time(
-    platform_code: str = "xiaohongshu",
-    db: Session = Depends(get_db)
-):
-    """获取最佳发布时间建议"""
-    service = ContentService(db)
-    suggestion = service.suggest_best_time(platform_code)
-    return {"success": True, "data": suggestion}
 
 
 @router.get("/content/{content_id}", response_model=dict)

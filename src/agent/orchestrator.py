@@ -95,6 +95,7 @@ class Orchestrator:
         task_queue: Any = None,
         async_task_id: str = "",
         max_concurrent: int = 3,
+        mcp_tools: list | None = None,
     ):
         self.llm_gateway = llm_gateway
         self.chat_models = chat_models or {}
@@ -103,6 +104,7 @@ class Orchestrator:
         self.task_queue = task_queue
         self.async_task_id = async_task_id
         self.max_concurrent = max_concurrent
+        self.mcp_tools = mcp_tools or []
 
         self._graph = build_agent_graph()
 
@@ -171,10 +173,13 @@ class Orchestrator:
                     "_async_task_id": self.async_task_id or task_id,
                     "_task_queue_ref": self.task_queue,
                     "_llm_models": self.chat_models,
+                    "_mcp_tools": self.mcp_tools,
+                    "_streaming_mode": True,  # 开启实时流式推送
                 }
 
                 # ── 运行 Graph ──
-                final_state = await self._graph.ainvoke(initial_state)
+                config = {"recursion_limit": 200}
+                final_state = await self._graph.ainvoke(initial_state, config=config)
 
                 elapsed = round(time.time() - start_time, 2)
                 status = final_state.get("status", "completed")

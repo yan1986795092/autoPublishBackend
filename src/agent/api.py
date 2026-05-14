@@ -6,12 +6,15 @@ import asyncio
 import json
 import uuid
 
+# ===================== SSE 流式接口 =====================
+
+
 from sse_starlette.sse import EventSourceResponse
 
 from .schemas import AgentTask
 from .factory import create_orchestrator
 from .orchestrator import Orchestrator
-from .workflow.task_queue import task_queue
+from .workflow.task_queue import task_queue, StreamEvent
 from .workflow.worker import worker
 from src.api.auth import get_current_user
 from src.models import User
@@ -360,9 +363,16 @@ async def agent_stream(
     request: AgentStreamRequest,
     current_user: User = Depends(get_current_user),
 ):
-    """流式 Agent 执行 — SSE 推送计划、思考步骤、进度和结果"""
+    """流式 Agent 执行 — 通过 EventBus 实时推送计划、思考步骤、进度和结果
+
+    核心改进：不再轮询 TaskQueue，改为订阅 EventBus，事件驱动的实时推送。
+    支持事件类型：plan, task_created, thinking_step, llm_chunk, reasoning, progress, result, error, done
+    """
+
+    task_id_placeholder = None  # 将在 enqueue 后填充
 
     async def event_generator() -> AsyncGenerator[dict, None]:
+        nonlocal task_id_placeholder
         try:
             # 1. 生成执行计划
             orchestrator = _create_orchestrator()
@@ -387,7 +397,7 @@ async def agent_stream(
                 }, ensure_ascii=False),
             }
 
-            # 2. 提交异步任务执行（传递预计算计划，确保 Worker 执行的计划与 SSE 推送的一致）
+            # 2. 提交异步任务（传递预计算计划）
             plan_dict = {
                 "goal": plan.goal,
                 "reasoning": plan.reasoning,
@@ -408,95 +418,112 @@ async def agent_stream(
                 user_id=current_user.id,
                 plan=plan_dict,
             )
+            task_id_placeholder = async_task.id
 
             yield {
                 "event": "task_created",
                 "data": json.dumps({"task_id": async_task.id}, ensure_ascii=False),
             }
 
-            # 3. 轮询进度并推送
-            last_step_count = 0
-            last_progress = -1
-            timeout_seconds = 300
-            start_time = asyncio.get_event_loop().time()
+            # 3. 收集已完成推送的步骤索引（防止重复）
+            seen_step_count = 0
 
-            while True:
-                elapsed = asyncio.get_event_loop().time() - start_time
-                if elapsed > timeout_seconds:
-                    yield {
-                        "event": "error",
-                        "data": json.dumps({"message": "任务执行超时"}, ensure_ascii=False),
-                    }
-                    break
+            # 4. 创建 EventBus 订阅队列（线程安全队列用于跨协程传递事件）
+            evt_queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
 
-                task = task_queue.get_task(async_task.id)
-                if not task:
-                    yield {
-                        "event": "error",
-                        "data": json.dumps({"message": "任务丢失"}, ensure_ascii=False),
-                    }
-                    break
+            async def on_event(event: StreamEvent) -> None:
+                """EventBus 回调：将事件放入队列"""
+                await evt_queue.put(event)
 
-                # 推送进度
-                if task.progress != last_progress:
-                    last_progress = task.progress
-                    yield {
-                        "event": "progress",
-                        "data": json.dumps({
-                            "progress": task.progress,
-                            "current_step": task.current_step,
-                            "progress_message": task.progress_message,
-                            "completed_steps": task.completed_steps,
-                            "total_steps": task.total_steps,
-                        }, ensure_ascii=False),
-                    }
+            # 订阅 EventBus
+            task_queue.subscribe(async_task.id, on_event)
 
-                # 推送新增的 thinking steps
-                if task.result and isinstance(task.result, dict):
-                    trace = task.result.get("thinking_trace", {})
-                    steps = trace.get("steps", []) if isinstance(trace, dict) else []
-                    if len(steps) > last_step_count:
-                        for step in steps[last_step_count:]:
-                            yield {
-                                "event": "thinking_step",
-                                "data": json.dumps(step, ensure_ascii=False),
-                            }
-                        last_step_count = len(steps)
+            try:
+                timeout_seconds = 600
+                start_time = asyncio.get_event_loop().time()
 
-                # 检查是否需要用户决策
-                if task.state.value == "awaiting_input" and task.pending_decision:
-                    pd = task.pending_decision
-                    yield {
-                        "event": "decision_required",
-                        "data": json.dumps({
-                            "task_id": async_task.id,
-                            "decision_id": pd.get("decision_id"),
-                            "question": pd.get("question", ""),
-                            "options": pd.get("options", []),
-                            "context": pd.get("context", {}),
-                        }, ensure_ascii=False),
-                    }
-                    break
-
-                # 任务完成
-                if task.state.value in ("completed", "failed", "cancelled"):
-                    if task.state.value == "completed" and task.result:
-                        yield {
-                            "event": "result",
-                            "data": json.dumps(task.result, ensure_ascii=False),
-                        }
-                    elif task.state.value == "failed":
+                while True:
+                    elapsed = asyncio.get_event_loop().time() - start_time
+                    if elapsed > timeout_seconds:
                         yield {
                             "event": "error",
-                            "data": json.dumps({"message": task.error or "任务执行失败"}, ensure_ascii=False),
+                            "data": json.dumps({"message": "任务执行超时"}, ensure_ascii=False),
                         }
-                    yield {
-                        "event": "done",
-                        "data": json.dumps({"task_id": async_task.id, "state": task.state.value}, ensure_ascii=False),
-                    }
-                    break
+                        break
 
-                await asyncio.sleep(0.5)
+                    # 等待事件（带超时，周期性检查任务是否完成）
+                    try:
+                        event = await asyncio.wait_for(evt_queue.get(), timeout=1.0)
+                    except asyncio.TimeoutError:
+                        # 超时检查：任务是否已自己结束
+                        task = task_queue.get_task(async_task.id)
+                        if task and task.state.value in ("completed", "failed", "cancelled"):
+                            break
+                        continue
+
+                    et = event.event_type
+
+                    # 跳过已处理的 steps（由 task.result 包含的完整 thinking_trace）
+                    if et == "thinking_step":
+                        seen_step_count += 1
+                        yield {
+                            "event": "thinking_step",
+                            "data": json.dumps(event.data, ensure_ascii=False),
+                        }
+                    elif et == "progress":
+                        yield {
+                            "event": "progress",
+                            "data": json.dumps(event.data, ensure_ascii=False),
+                        }
+                    elif et == "llm_chunk":
+                        yield {
+                            "event": "llm_chunk",
+                            "data": json.dumps(event.data, ensure_ascii=False),
+                        }
+                    elif et == "reasoning":
+                        yield {
+                            "event": "reasoning",
+                            "data": json.dumps(event.data, ensure_ascii=False),
+                        }
+                    elif et == "decision_required":
+                        task = task_queue.get_task(async_task.id)
+                        if task and task.pending_decision:
+                            pd = task.pending_decision
+                            yield {
+                                "event": "decision_required",
+                                "data": json.dumps({
+                                    "task_id": async_task.id,
+                                    "decision_id": pd.get("decision_id"),
+                                    "question": pd.get("question", ""),
+                                    "options": pd.get("options", []),
+                                    "context": pd.get("context", {}),
+                                }, ensure_ascii=False),
+                            }
+                        break
+                    elif et == "result":
+                        yield {
+                            "event": "result",
+                            "data": json.dumps(event.data, ensure_ascii=False),
+                        }
+                        yield {
+                            "event": "done",
+                            "data": json.dumps({"task_id": async_task.id, "state": "completed"}, ensure_ascii=False),
+                        }
+                        break
+                    elif et == "error":
+                        yield {
+                            "event": "error",
+                            "data": json.dumps(event.data, ensure_ascii=False),
+                        }
+                        yield {
+                            "event": "done",
+                            "data": json.dumps({"task_id": async_task.id, "state": "failed"}, ensure_ascii=False),
+                        }
+                        break
+
+            finally:
+                # 取消订阅 EventBus
+                task_queue.unsubscribe(async_task.id, on_event)
 
         except Exception as e:
             yield {

@@ -5,7 +5,7 @@ from ..agent_utils import seo_score, seo_suggestions
 from .keyword_tool import extract_keywords, suggest_related_keywords, keyword_density_analysis
 
 
-async def handle_seo(task_input: dict, llm: ChatOpenAI) -> dict:
+async def handle_seo(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     topic = task_input.get("topic", task_input.get("query", ""))
     content = task_input.get("content", "")
     if not content:
@@ -54,9 +54,9 @@ async def handle_seo(task_input: dict, llm: ChatOpenAI) -> dict:
         },
         "tokens_used": 0,
         "thinking_steps": [{
-            "agent": "SEOAgent", "action": "seo_score",
-            "reasoning": f"SEO analysis for: {topic}",
-            "output_summary": f"Score: {score['overall'] if score else 'N/A'}/100, {len(related)} related keywords",
+            "agent": "SEOAgent", "action": "SEO分析完成",
+            "reasoning": f"为「{topic}」进行SEO优化分析",
+            "output_summary": f"SEO得分：{score['overall'] if score else 'N/A'}/100 · 找到相关关键词 {len(related)} 个",
             "status": "done",
         }],
     }

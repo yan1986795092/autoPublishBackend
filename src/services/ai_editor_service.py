@@ -12,16 +12,25 @@ class AIEditorService:
             settings = get_settings()
             default_provider = settings.default_llm_provider
             api_key = getattr(settings, f"{default_provider}_api_key", "")
+            model = getattr(settings, f"{default_provider}_model", "")
+            base_url = getattr(settings, f"{default_provider}_base_url", "")
             if not api_key:
                 for provider in ["openai", "zhipu", "qwen"]:
                     api_key = getattr(settings, f"{provider}_api_key", "")
                     if api_key:
                         default_provider = provider
+                        model = getattr(settings, f"{provider}_model", "")
+                        base_url = getattr(settings, f"{provider}_base_url", "")
                         break
             if not api_key:
                 self._mock_mode = True
                 return None
-            self._gateway = LLMGateway(api_key=api_key, provider=default_provider)
+            self._gateway = LLMGateway(
+                api_key=api_key,
+                provider=default_provider,
+                model=model,
+                base_url=base_url,
+            )
         return self._gateway
 
     async def rewrite(self, text: str, instruction: str) -> str:

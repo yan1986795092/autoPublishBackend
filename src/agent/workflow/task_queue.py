@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field, asdict
 from datetime import datetime
 from enum import Enum
-from typing import Any, Optional
+from typing import Any, Callable, Awaitable, Optional
 import asyncio
 import uuid
 
@@ -81,8 +81,65 @@ class AsyncTask:
             self.current_step = step
 
 
+# ──────────────────────────────────────────
+# 全局实时事件总线（供 SSE + WebSocket 订阅）
+# ──────────────────────────────────────────
+
+@dataclass
+class StreamEvent:
+    """流式事件结构"""
+    task_id: str
+    event_type: str       # plan | thinking_step | progress | result | error | decision_required | llm_chunk
+    data: dict
+
+EventCallback = Callable[[StreamEvent], Awaitable[None]]
+
+class EventBus:
+    """轻量事件总线：支持多订阅者发布/订阅"""
+
+    def __init__(self):
+        self._subscribers: dict[str, list[EventCallback]] = {}  # task_id -> [callbacks]
+        self._all_subscribers: list[EventCallback] = []          # 订阅所有任务的全局监听器
+
+    def subscribe(self, task_id: str, callback: EventCallback) -> None:
+        if task_id not in self._subscribers:
+            self._subscribers[task_id] = []
+        self._subscribers[task_id].append(callback)
+
+    def subscribe_all(self, callback: EventCallback) -> None:
+        self._all_subscribers.append(callback)
+
+    def unsubscribe(self, task_id: str, callback: EventCallback) -> None:
+        if task_id in self._subscribers:
+            try:
+                self._subscribers[task_id].remove(callback)
+            except ValueError:
+                pass
+
+    async def publish(self, event: StreamEvent) -> None:
+        # 发送给任务专属订阅者
+        if event.task_id in self._subscribers:
+            for cb in self._subscribers[event.task_id]:
+                try:
+                    await cb(event)
+                except Exception:
+                    pass
+        # 发送给全局订阅者
+        for cb in self._all_subscribers:
+            try:
+                await cb(event)
+            except Exception:
+                pass
+
+# 全局单例
+event_bus = EventBus()
+
+
 class TaskQueue:
-    """内存任务队列（单进程适用，可按需替换为 Redis）"""
+    """内存任务队列（单进程适用，可按需替换为 Redis）
+
+    支持实时事件推送：通过 event_bus 通知所有订阅者（WebSocket / SSE）。
+    """
 
     def __init__(self):
         self._queue: asyncio.Queue[AsyncTask] = asyncio.Queue()
@@ -124,6 +181,12 @@ class TaskQueue:
             task.result = result
             task.completed_at = datetime.utcnow().isoformat()
             self._notify_progress(task_id)
+            # 发布完成事件到 EventBus（SSE/WebSocket 订阅者会收到）
+            asyncio.create_task(self._publish_event(StreamEvent(
+                task_id=task_id,
+                event_type="result",
+                data=result,
+            )))
 
     def fail_task(self, task_id: str, error: str) -> None:
         task = self._tasks.get(task_id)
@@ -132,6 +195,11 @@ class TaskQueue:
             task.error = error
             task.completed_at = datetime.utcnow().isoformat()
             self._notify_progress(task_id)
+            asyncio.create_task(self._publish_event(StreamEvent(
+                task_id=task_id,
+                event_type="error",
+                data={"message": error},
+            )))
 
     def cancel_task(self, task_id: str) -> bool:
         task = self._tasks.get(task_id)
@@ -148,6 +216,25 @@ class TaskQueue:
             task.update_progress(progress, message, step)
             task.completed_steps = int(progress / 100 * task.total_steps)
             self._notify_progress(task_id)
+            # 发布进度事件（给 SSE 实时推送，无需轮询）
+            asyncio.create_task(self._publish_event(StreamEvent(
+                task_id=task_id,
+                event_type="progress",
+                data={
+                    "progress": task.progress,
+                    "current_step": task.current_step,
+                    "progress_message": task.progress_message,
+                    "completed_steps": task.completed_steps,
+                    "total_steps": task.total_steps,
+                },
+            )))
+
+    async def _publish_event(self, event: StreamEvent) -> None:
+        """发布事件到 EventBus，异步执行不阻塞主流程"""
+        try:
+            await event_bus.publish(event)
+        except Exception:
+            pass
 
     def list_tasks(self, user_id: Optional[str] = None, limit: int = 20) -> list[AsyncTask]:
         self._cleanup_old_tasks()
@@ -182,6 +269,30 @@ class TaskQueue:
             self._queue.put_nowait(task)
         return task
 
+    async def publish_thinking_step(self, task_id: str, step_data: dict) -> None:
+        """由 Worker 调用：在子任务完成时立即发布 thinking_step 事件"""
+        await self._publish_event(StreamEvent(
+            task_id=task_id,
+            event_type="thinking_step",
+            data=step_data,
+        ))
+
+    async def publish_llm_chunk(self, task_id: str, chunk_data: dict) -> None:
+        """由 Worker 调用：发布 LLM 推理过程中的 token chunks（打字机效果）"""
+        await self._publish_event(StreamEvent(
+            task_id=task_id,
+            event_type="llm_chunk",
+            data=chunk_data,
+        ))
+
+    async def publish_reasoning(self, task_id: str, reasoning_data: dict) -> None:
+        """由 Worker 调用：发布 LLM reasoning chain 片段"""
+        await self._publish_event(StreamEvent(
+            task_id=task_id,
+            event_type="reasoning",
+            data=reasoning_data,
+        ))
+
     def _cleanup_old_tasks(self) -> None:
         """清理超过 1 小时的已完成/失败/取消任务，防止内存泄漏"""
         cutoff = datetime.utcnow().timestamp() - 3600
@@ -208,6 +319,18 @@ class TaskQueue:
         task.pending_decision = asdict(decision)
         self._decisions[task_id] = None
         self._notify_progress(task_id)
+        # 发布决策请求事件
+        asyncio.create_task(self._publish_event(StreamEvent(
+            task_id=task_id,
+            event_type="decision_required",
+            data={
+                "task_id": task_id,
+                "decision_id": decision.decision_id,
+                "question": decision.question,
+                "options": decision.options,
+                "context": decision.context,
+            },
+        )))
 
     def submit_decision(self, task_id: str, decision_id: str, choice: str) -> bool:
         """用户提交决策。返回 True 表示成功接受。"""
