@@ -5,7 +5,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 
-async def handle_fallback(task: dict, llm: ChatOpenAI, _state: dict) -> dict:
+async def handle_fallback(task: dict, llm: ChatOpenAI, _state: dict, mcp_tools: list | None = None) -> dict:
     agent_type = task.get("agent_type", "Unknown")
     task_input = task.get("input", {})
 

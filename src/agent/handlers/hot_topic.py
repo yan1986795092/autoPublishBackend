@@ -8,7 +8,7 @@ from .trend_analysis import analyze_topics
 logger = logging.getLogger(__name__)
 
 
-async def handle_hot_topic(task_input: dict, llm: ChatOpenAI) -> dict:
+async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     platform = task_input.get("platform", "weibo")
     count = task_input.get("count", 10)
     topics = []
@@ -69,9 +69,9 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI) -> dict:
         },
         "tokens_used": 0,
         "thinking_steps": [{
-            "agent": "HotTopicAgent", "action": "fetch_trending",
-            "reasoning": f"Fetching hot topics from {platform}",
-            "output_summary": f"Got {len(topics)} topics via {source}, {trend.get('tag_count', 0)} categories",
+            "agent": "HotTopicAgent",             "action": "热点获取完成",
+            "reasoning": f"获取 {platform} 热点话题",
+            "output_summary": f"获取 {len(topics)} 个热点话题，{trend.get('tag_count', 0)} 个分类",
             "status": "done",
         }],
     }

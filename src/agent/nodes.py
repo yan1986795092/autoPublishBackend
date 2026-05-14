@@ -100,12 +100,33 @@ def _build_template_plan(user_request: str, complexity: str) -> dict:
 
 
 def _get_llm(state: AgentGraphState, agent_type: str) -> ChatOpenAI:
-    """从 state 中获取对应 agent 类型的 LLM 实例"""
+    """从 state 中获取对应 agent 类型的 LLM 实例（已绑定 MCP 工具）"""
     models = state.get("_llm_models", {})
     llm = models.get(agent_type, models.get("default"))
     if llm is None:
         logger.warning(f"No LLM configured for agent_type=%s, falling back to mock mode", agent_type)
     return llm
+
+
+def _get_llm_with_tools(state: AgentGraphState, agent_type: str) -> tuple[ChatOpenAI, list]:
+    """获取 LLM 实例及其绑定的 MCP 工具
+
+    Returns:
+        (llm, tools): LLM 和该 agent 可用的 MCP 工具列表
+    """
+    llm = _get_llm(state, agent_type)
+    mcp_tools = state.get("_mcp_tools", [])
+
+    # 哪些 Agent 类型可以使用 MCP 工具
+    tool_enabled_agents = {"WebSearch", "ManagerAgent", "WritingAgent", "SEOAgent", "ReviewAgent"}
+
+    if llm is not None and mcp_tools and agent_type in tool_enabled_agents:
+        from langchain_openai import ChatOpenAI
+        from typing import List
+        tool_llm = llm.bind_tools(mcp_tools)
+        return tool_llm, mcp_tools
+
+    return llm, []
 
 
 def _update_progress(state: AgentGraphState, progress: float, message: str = "", step: str = "") -> None:
@@ -114,6 +135,22 @@ def _update_progress(state: AgentGraphState, progress: float, message: str = "",
     task_id = state.get("_async_task_id", "")
     if task_queue and task_id:
         task_queue.update_task_progress(task_id, progress, message=message, step=step)
+
+
+async def _publish_streaming_event(state: AgentGraphState, event_type: str, data: dict) -> None:
+    """将事件发布到 EventBus（实时推送给 SSE/WebSocket 前端）"""
+    task_queue = state.get("_task_queue_ref")
+    task_id = state.get("_async_task_id", "")
+    if task_queue and task_id and state.get("_streaming_mode", False):
+        try:
+            if event_type == "thinking_step":
+                await task_queue.publish_thinking_step(task_id, data)
+            elif event_type == "llm_chunk":
+                await task_queue.publish_llm_chunk(task_id, data)
+            elif event_type == "reasoning":
+                await task_queue.publish_reasoning(task_id, data)
+        except Exception:
+            pass
 
 
 def _add_thinking_step(state: AgentGraphState, agent: str, action: str, reasoning: str = "",
@@ -158,10 +195,10 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
             "thinking_steps": [{
                 "step_number": 1,
                 "agent": "ManagerAgent",
-                "action": "decompose",
+                "action": "任务拆解完成",
                 "reasoning": "Using pre-computed plan from SSE endpoint",
                 "input_summary": user_request[:200],
-                "output_summary": f"Plan: {existing_plan.get('reasoning', '')[:80]}...",
+                "output_summary": f"执行计划：{existing_plan.get('reasoning', '')[:80]}...",
                 "tokens_used": 0,
                 "time_elapsed": 0,
                 "status": "done",
@@ -197,10 +234,10 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
         step = {
             "step_number": 1,
             "agent": "ManagerAgent",
-            "action": "decompose",
-            "reasoning": f"Simple task → template plan ({len(plan['tasks'])} steps)",
+            "action": "任务拆解完成",
+            "reasoning": f"简单任务，使用模板计划（{len(plan['tasks'])} 步）",
             "input_summary": user_request[:200],
-            "output_summary": f"Plan: {plan['reasoning'][:80]}...",
+            "output_summary": f"执行计划：{plan['reasoning'][:80]}...",
             "tokens_used": 0,
             "time_elapsed": 0,
             "status": "done",
@@ -330,8 +367,8 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
     results_list = await asyncio.gather(*[run_one(t) for t in ready_tasks])
 
     task_results = dict(state.get("task_results", {}))
-    completed = []
-    failed = []
+    completed = list(state.get("completed_task_ids", []))
+    failed = list(state.get("failed_task_ids", []))
     new_steps = []
 
     for task_id, result in results_list:
@@ -363,11 +400,14 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
     - Token Budget 上限控制
     - Agent Cache 缓存复用
     - 上下文隔离（只传 public 内容）
+    - 实时流式推送：任务开始、完成、LLM token 均实时推送给前端
     """
     agent_type = task.get("agent_type", "")
     llm = _get_llm(state, agent_type)
     task_input = task.get("input", {})
     start_time = time.time()
+    task_id = state.get("_async_task_id", "")
+    streaming_mode = state.get("_streaming_mode", False)
 
     # Mock 模式：无 LLM 可用时直接使用 fallback
     if not llm:
@@ -383,6 +423,11 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
             if dep_context:
                 t_input["_context"] = dep_context
 
+            # MCP 工具传递给支持的 handlers
+            mcp_tools = state.get("_mcp_tools", [])
+            if mcp_tools:
+                t_input["_mcp_tools"] = mcp_tools
+
             # 缓存检查：对非写作/分析类 Agent 启用缓存
             cacheable_types = {"SEOAgent", "ReviewAgent", "WebSearch", "HotTopicAgent", "PlatformAdapter"}
             use_cache = agent_type in cacheable_types and not t_input.get("_skip_cache")
@@ -392,7 +437,33 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                     elapsed = round(time.time() - start_time, 2)
                     cached["time_elapsed"] = elapsed
                     cached["_from_cache"] = True
+                    # 实时推送缓存命中
+                    await _publish_streaming_event(state, "thinking_step", {
+                        "step_number": len(state.get("thinking_steps", [])) + 1,
+                        "agent": agent_type,
+                        "action": task.get("config", {}).get("reasoning", "使用缓存"),
+                        "reasoning": f"命中缓存，agent={agent_type}",
+                        "input_summary": str(t_input)[:100],
+                        "output_summary": cached.get("output", {}).get("content", "")[:200],
+                        "tokens_used": cached.get("tokens_used", 0),
+                        "time_elapsed": elapsed,
+                        "status": "done",
+                        "_from_cache": True,
+                    })
                     return cached
+
+            # ── 任务开始：发布 thinking_step (running) ──
+            await _publish_streaming_event(state, "thinking_step", {
+                "step_number": len(state.get("thinking_steps", [])) + 1,
+                "agent": agent_type,
+                "action": "开始执行",
+                "reasoning": f"Agent {agent_type} 开始处理，input={str(t_input)[:150]}",
+                "input_summary": str(t_input)[:200],
+                "output_summary": "",
+                "tokens_used": 0,
+                "time_elapsed": 0,
+                "status": "running",
+            })
 
             # Token Budget 检查
             budget = AGENT_TOKEN_BUDGETS.get(agent_type, DEFAULT_TOKEN_BUDGET)
@@ -403,11 +474,37 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                 if max_tokens == 0 or max_tokens > budget:
                     pass  # 已通过 model config 控制
 
-            result = await handler(t_input, llm)
+            # ── 执行 handler（支持流式 LLM 回调）──
+            if streaming_mode and agent_type in {"WritingAgent", "SEOAgent", "ReviewAgent"}:
+                # 为支持流式的 Agent 注册 token 回调
+                t_input["_on_llm_chunk"] = lambda chunk: _publish_streaming_event(
+                    state, "llm_chunk",
+                    {"agent": agent_type, "content": chunk, "timestamp": time.time()}
+                )
+                t_input["_on_reasoning"] = lambda text: _publish_streaming_event(
+                    state, "reasoning",
+                    {"agent": agent_type, "content": text, "timestamp": time.time()}
+                )
+
+            result = await handler(t_input, llm, mcp_tools if mcp_tools else t_input.get("_mcp_tools"))
             elapsed = round(time.time() - start_time, 2)
             result["time_elapsed"] = elapsed
             if "thinking_steps" not in result:
                 result["thinking_steps"] = []
+
+            # ── 任务完成：发布 thinking_step (done) ──
+            output_content = result.get("output", {}).get("content", "")
+            await _publish_streaming_event(state, "thinking_step", {
+                "step_number": len(state.get("thinking_steps", [])) + 1,
+                "agent": agent_type,
+                "action": "完成",
+                "reasoning": f"Agent {agent_type} 执行完成",
+                "input_summary": str(t_input)[:200],
+                "output_summary": output_content[:300] if output_content else (result.get("error", "") or "完成"),
+                "tokens_used": result.get("tokens_used", 0),
+                "time_elapsed": elapsed,
+                "status": result.get("status", "completed"),
+            })
 
             # 缓存结果
             if use_cache and result.get("status") in ("completed", "partial"):
@@ -417,6 +514,18 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
         except Exception as e:
             elapsed = round(time.time() - start_time, 2)
             logger.error(f"Agent {agent_type} failed: {e}")
+            # ── 任务失败：发布 thinking_step (failed) ──
+            await _publish_streaming_event(state, "thinking_step", {
+                "step_number": len(state.get("thinking_steps", [])) + 1,
+                "agent": agent_type,
+                "action": "失败",
+                "reasoning": str(e),
+                "input_summary": str(task_input)[:200],
+                "output_summary": str(e),
+                "tokens_used": 0,
+                "time_elapsed": elapsed,
+                "status": "failed",
+            })
             return {
                 "status": "failed",
                 "agent_type": agent_type,
@@ -558,10 +667,24 @@ def _persist_results(state: AgentGraphState, sections: list, full_text_parts: li
 # ──────────────────────────────────────────────
 
 def should_continue(state: AgentGraphState) -> str:
-    """检查是否还有未完成的任务"""
+    """检查是否还有未完成的任务
+
+    停止条件（任一满足）：
+    1. 所有任务都已完成或失败
+    2. 没有 ready 的任务（依赖无法满足/死锁），直接结束
+    """
     task_queue = state.get("task_queue", [])
     completed = len(state.get("completed_task_ids", []))
     failed = len(state.get("failed_task_ids", []))
+    ready = state.get("ready_tasks", [])
+
+    # 保护：没有可执行的任务就停止，避免死锁无限循环
+    if not ready and completed + failed < len(task_queue):
+        logger.warning(
+            f"Deadlock: no ready tasks ({len(task_queue)} total, "
+            f"{completed} done, {failed} failed). Forcing exit."
+        )
+        return "done"
 
     if completed + failed >= len(task_queue):
         return "done"

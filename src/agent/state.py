@@ -41,3 +41,5 @@ class AgentGraphState(TypedDict):
     _async_task_id: str
     _task_queue_ref: Any          # TaskQueue 实例引用
     _llm_models: dict             # agent_type -> ChatOpenAI
+    _mcp_tools: list              # MCP Server 加载的工具（LangChain BaseTool 列表）
+    _streaming_mode: bool = False  # 是否开启实时流式推送（LLM token 级）

@@ -4,7 +4,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 
-async def handle_diagram(task_input: dict, llm: ChatOpenAI) -> dict:
+async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     topic = task_input.get("topic", "")
     diagram_type = task_input.get("diagram_type", "mindmap")
 
@@ -32,7 +32,7 @@ async def handle_diagram(task_input: dict, llm: ChatOpenAI) -> dict:
                 "status": "completed", "agent_type": "DiagramAgent",
                 "output": {"content": code, "diagram_type": diagram_type, "code": code, "rendered": True},
                 "tokens_used": len(code) // 4,
-                "thinking_steps": [{"agent": "DiagramAgent", "action": "generate_diagram", "reasoning": f"Generating {diagram_type} for: {topic}", "status": "done"}],
+                "thinking_steps": [{"agent": "DiagramAgent", "action": "图表生成完成", "reasoning": f"生成{diagram_type}图：{topic}", "status": "done"}],
             }
         except Exception:
             pass

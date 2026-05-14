@@ -8,6 +8,7 @@ from ..orchestrator import Orchestrator
 from ..persistence import save_agent_task, save_thinking_trace, cleanup_old_records
 from ..factory import create_orchestrator
 from ..cache import agent_cache
+from src.mcp.client import get_mcp_client, shutdown_mcp_client
 import time
 
 
@@ -21,10 +22,24 @@ class AgentWorker:
         self._orchestrator_factory = orchestrator_factory or (
             lambda **kw: create_orchestrator(**kw)
         )
+        self._mcp_client = None
+        self._mcp_tools = []
 
     async def start(self):
         self._running = True
         self._last_cleanup_time = time.monotonic()
+
+        # 启动 MCP WebSearch Client
+        try:
+            self._mcp_client = await get_mcp_client()
+            if self._mcp_client.is_started:
+                self._mcp_tools = self._mcp_client.get_tools()
+                print(f"[Worker] MCP WebSearch started with {len(self._mcp_tools)} tools")
+            else:
+                print("[Worker] MCP WebSearch not available (network/config issue)")
+        except Exception as e:
+            print(f"[Worker] Failed to start MCP WebSearch: {e}")
+
         self._task = asyncio.create_task(self._run_loop())
 
     async def stop(self):
@@ -32,6 +47,12 @@ class AgentWorker:
         if self._task:
             self._task.cancel()
             self._task = None
+
+        # 关闭 MCP Client
+        try:
+            await shutdown_mcp_client()
+        except Exception:
+            pass
 
     async def _run_loop(self):
         while self._running:
@@ -77,6 +98,7 @@ class AgentWorker:
                 orchestrator = self._orchestrator_factory(
                     async_task_id=async_task.id,
                     task_queue=task_queue,
+                    mcp_tools=self._mcp_tools,
                 )
 
                 task_queue.update_task_progress(

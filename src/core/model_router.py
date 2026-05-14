@@ -52,12 +52,22 @@ class ModelRouter:
         self._cache[role] = gateway
         return gateway
 
-    def get_chat_model(self, agent_type: str) -> ChatOpenAI:
-        """返回 LangChain ChatOpenAI 实例（供 LangGraph 节点直接使用）"""
-        role = ROLE_MAP.get(agent_type, "__default__")
-        if role in self._chat_cache:
-            return self._chat_cache[role]
+    def get_chat_model(
+        self,
+        agent_type: str,
+        tools: list | None = None,
+    ) -> ChatOpenAI:
+        """返回 LangChain ChatOpenAI 实例（供 LangGraph 节点直接使用）
 
+        Args:
+            agent_type: Agent 类型，决定使用哪个角色配置
+            tools: 可选的 MCP 工具列表，绑定后 LLM 可调用这些工具
+        """
+        cache_key = f"{agent_type}__tools={len(tools or [])}"
+        if cache_key in self._chat_cache:
+            return self._chat_cache[cache_key]
+
+        role = ROLE_MAP.get(agent_type, "__default__")
         if role == "__default__":
             cfg = self._build_default_config()
         else:
@@ -71,7 +81,12 @@ class ModelRouter:
             max_tokens=2000,
             streaming=True,
         )
-        self._chat_cache[role] = model
+
+        # 绑定 MCP 工具（如果有的话）
+        if tools:
+            model = model.bind_tools(tools)
+
+        self._chat_cache[cache_key] = model
         return model
 
     def get_all_models(self) -> dict[str, ChatOpenAI]:

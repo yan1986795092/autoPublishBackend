@@ -8,7 +8,7 @@ from langchain_openai import ChatOpenAI
 logger = logging.getLogger(__name__)
 
 
-async def handle_image(task_input: dict, llm: ChatOpenAI) -> dict:
+async def handle_image(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     topic = task_input.get("topic", task_input.get("query", ""))
     style = task_input.get("style", "vivid")
     size = task_input.get("size", "1024x1024")
@@ -31,7 +31,7 @@ async def handle_image(task_input: dict, llm: ChatOpenAI) -> dict:
                             "status": "completed", "agent_type": "ImageAgent",
                             "output": {"image_url": image_url, "alt": f"Illustration for {topic}", "provider": "openai"},
                             "tokens_used": 0,
-                            "thinking_steps": [{"agent": "ImageAgent", "action": "generate_image", "reasoning": f"DALL-E image for: {topic}", "output_summary": "DALL-E 3 generated", "status": "done"}],
+                            "thinking_steps": [{"agent": "ImageAgent", "action": "配图生成完成", "reasoning": f"DALL-E 3 为「{topic}」生成配图", "output_summary": "DALL-E 3 生成成功", "status": "done"}],
                         }
             except Exception as e:
                 logger.warning(f"DALL-E failed: {e}")
@@ -53,7 +53,7 @@ async def handle_image(task_input: dict, llm: ChatOpenAI) -> dict:
                             "status": "completed", "agent_type": "ImageAgent",
                             "output": {"image_url": f"data:image/png;base64,{image_b64}", "alt": f"Illustration for {topic}", "provider": "stability"},
                             "tokens_used": 0,
-                            "thinking_steps": [{"agent": "ImageAgent", "action": "generate_image", "reasoning": f"SDXL image for: {topic}", "output_summary": "Stable Diffusion generated", "status": "done"}],
+                            "thinking_steps": [{"agent": "ImageAgent", "action": "配图生成完成", "reasoning": f"SDXL 为「{topic}」生成配图", "output_summary": "Stable Diffusion 生成成功", "status": "done"}],
                         }
             except Exception as e:
                 logger.warning(f"Stability failed: {e}")
@@ -62,5 +62,5 @@ async def handle_image(task_input: dict, llm: ChatOpenAI) -> dict:
         "status": "completed", "agent_type": "ImageAgent",
         "output": {"image_url": "", "alt": f"Illustration for {topic}", "mock": True, "note": "未配置图片生成 API Key"},
         "tokens_used": 0,
-        "thinking_steps": [{"agent": "ImageAgent", "action": "generate_image", "reasoning": f"Image for: {topic}", "output_summary": "Mock (no API key)", "status": "done"}],
+        "thinking_steps": [{"agent": "ImageAgent", "action": "配图生成完成", "reasoning": f"为「{topic}」生成配图", "output_summary": "未配置图片 API，降级处理", "status": "done"}],
     }

@@ -30,7 +30,7 @@ Rules:
 - Output ONLY the translated content, no explanations"""
 
 
-async def handle_translation(task_input: dict, llm: ChatOpenAI) -> dict:
+async def handle_translation(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     content = task_input.get("content", "")
     target_lang = task_input.get("target_lang", "en")
     source_lang = task_input.get("source_lang", "auto")
@@ -75,9 +75,9 @@ async def handle_translation(task_input: dict, llm: ChatOpenAI) -> dict:
         "tokens_used": tokens,
         "thinking_steps": [{
             "agent": "TranslationAgent",
-            "action": "translate",
-            "reasoning": f"Translating to {lang_name}",
-            "output_summary": f"Translated {len(content)} → {len(translated)} chars ({lang_name})",
+            "action": "翻译完成",
+            "reasoning": f"翻译为 {lang_name}",
+            "output_summary": f"翻译完成：{len(content)} → {len(translated)} 字（{lang_name}）",
             "tokens_used": tokens,
             "status": "done",
         }],

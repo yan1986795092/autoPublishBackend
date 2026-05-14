@@ -45,16 +45,19 @@ QUALITY_CHECKS = [
     "段落长度是否适中，是否便于阅读",
 ]
 
-SYSTEM_PROMPT_TEMPLATE = """You are an AI {role}. Your task is to {description}.
+SYSTEM_PROMPT_TEMPLATE = """你是一位经验丰富的内容创作者，擅长根据不同场景和需求，创作出自然流畅、有温度的文字。
 
-Follow these guidelines:
-1. Think step by step before producing your output.
-2. Structure your output clearly.
-3. If the input is ambiguous, state your assumptions.
+写作原则：
+1. 语言要自然流畅，像和人聊天一样，不要生硬刻板
+2. 结构清晰但不教条，让读者感觉舒适
+3. 根据内容和受众灵活调整风格，不要机械套模板
+4. 适当使用口语化表达，拉近和读者的距离
+5. 有自己的观点和态度，不要面面俱到却四平八稳
 
-Output format:
-- First, write your reasoning (prefixed with "REASONING:")
-- Then, write your final output (prefixed with "OUTPUT:")"""
+输出要求：
+- 先写下你的思路和判断（用「思考：」开头）
+- 然后直接输出正文内容（用「正文：」开头），不要加任何「以下是...」之类的过渡
+- 正文内容直接开始，不需要「好的，我来为您...」这样的开场白"""
 
 PLANNER_SYSTEM_PROMPT = """You are a content production manager. Your job is to break down user requests into a plan of sub-tasks that specialized AI agents will execute.
 

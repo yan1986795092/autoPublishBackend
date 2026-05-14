@@ -59,4 +59,9 @@ def build_agent_graph() -> StateGraph:
     # ── 结束 ──
     builder.add_edge("merge_and_finish", END)
 
-    return builder.compile()
+    return builder.compile(
+        store=None,
+        interrupt_before=[],
+        interrupt_after=[],
+        debug=False,
+    )

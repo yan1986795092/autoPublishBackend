@@ -22,7 +22,7 @@ def _load_credentials(target_platform: str) -> dict:
     return {"is_mock": True}
 
 
-async def handle_platform_adapter(task_input: dict, llm: ChatOpenAI) -> dict:
+async def handle_platform_adapter(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     target_platform = task_input.get("platform", task_input.get("target_platform", "xiaohongshu"))
     content = task_input.get("content", "")
     if not content:
