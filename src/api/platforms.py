@@ -10,21 +10,46 @@ from src.services.hot_topic_service import hot_topic_service
 router = APIRouter(prefix="/platforms", tags=["平台"])
 
 
+DEFAULT_PLATFORMS = [
+    # 社交媒体
+    {"code": "xiaohongshu", "name": "小红书", "category": "social_media", "is_mock": True},
+    {"code": "wechat", "name": "微信公众号", "category": "social_media", "is_mock": True},
+    {"code": "zhihu", "name": "知乎", "category": "social_media", "is_mock": True},
+    # 创意写作
+    {"code": "fiction", "name": "小说创作", "category": "creative_writing", "is_mock": True},
+    {"code": "storyboard", "name": "分镜脚本", "category": "creative_writing", "is_mock": True},
+    {"code": "script", "name": "剧本创作", "category": "creative_writing", "is_mock": True},
+    # 营销内容
+    {"code": "copywriting", "name": "营销文案", "category": "marketing", "is_mock": True},
+    {"code": "newsletter", "name": "邮件通讯", "category": "marketing", "is_mock": True},
+    # 技术内容
+    {"code": "technical_doc", "name": "技术文档", "category": "technical", "is_mock": True},
+    {"code": "tutorial", "name": "教程指南", "category": "technical", "is_mock": True},
+]
+
+
+def _ensure_default_platforms(db: Session):
+    """确保所有默认平台都存在（upsert 逻辑，不覆盖已有修改）"""
+    defaults = {p["code"]: p for p in DEFAULT_PLATFORMS}
+    existing = {p.code: p for p in db.query(Platform).filter(Platform.code.in_(defaults.keys())).all()}
+
+    for code, data in defaults.items():
+        if code in existing:
+            # 更新分类（新加的字段可能为空）
+            if not existing[code].category and data.get("category"):
+                existing[code].category = data["category"]
+        else:
+            db.add(Platform(**data))
+
+    if len(existing) < len(defaults):
+        db.commit()
+
+
 @router.get("", response_model=dict)
 def list_platforms(db: Session = Depends(get_db)):
-    """获取支持的平台列表"""
+    """获取支持的内容类型/平台列表"""
+    _ensure_default_platforms(db)
     platforms = db.query(Platform).filter(Platform.is_active == True).all()
-
-    if not platforms:
-        default_platforms = [
-            Platform(code="xiaohongshu", name="小红书", is_mock=True),
-            Platform(code="wechat", name="微信公众号", is_mock=True),
-            Platform(code="zhihu", name="知乎", is_mock=True),
-        ]
-        for p in default_platforms:
-            db.add(p)
-        db.commit()
-        platforms = default_platforms
 
     return {
         "success": True,
@@ -33,6 +58,7 @@ def list_platforms(db: Session = Depends(get_db)):
                 "code": p.code,
                 "name": p.name,
                 "icon_url": p.icon_url,
+                "category": p.category or "social_media",
                 "is_mock": p.is_mock,
                 "is_active": p.is_active,
             }

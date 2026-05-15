@@ -46,12 +46,21 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
 **主要问题：** [列出发现的问题，如果没有就说"整体质量良好"]
 **改进建议：** [具体的改进方向，如果有的话]"""
 
-    response = await llm.ainvoke([
+    messages = [
         SystemMessage(content="你是一位资深内容编辑，擅长发现文章中的问题并给出切实可行的改进建议。回复请用中文，语气友好专业，像在和作者交流而不是打分评判。"),
         HumanMessage(content=prompt),
-    ])
+    ]
 
-    quality = response.content
+    # ── 流式 LLM 调用 ──
+    on_llm_chunk = task_input.get("_on_llm_chunk")
+    chunks: list[str] = []
+    async for chunk in llm.astream(messages):
+        if chunk.content:
+            chunks.append(chunk.content)
+            if on_llm_chunk:
+                await on_llm_chunk(chunk.content)
+
+    quality = "".join(chunks)
     passed = len(banned_found) == 0 and "需要修改" not in quality
     suggestions = [line.strip() for line in quality.split("\n") if any(kw in line for kw in ["建议", "问题", "修改", "不足"])]
 
@@ -64,7 +73,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             "suggestions": suggestions[:5],
             "content": quality,
         },
-        "tokens_used": len(response.content) // 4,
+        "tokens_used": len(quality) // 4,
         "thinking_steps": [{
             "agent": "ReviewAgent", "action": "审核完成",
             "reasoning": f"审核{content_type}内容质量",

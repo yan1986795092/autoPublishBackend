@@ -34,12 +34,21 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
 
 直接开始写吧，标题和正文都要。"""
 
-    response = await llm.ainvoke([
+    messages = [
         SystemMessage(content=SYSTEM_PROMPT_TEMPLATE),
         HumanMessage(content=prompt),
-    ])
+    ]
 
-    raw = response.content
+    # ── 流式 LLM 调用 ──
+    on_llm_chunk = task_input.get("_on_llm_chunk")
+    chunks: list[str] = []
+    async for chunk in llm.astream(messages):
+        if chunk.content:
+            chunks.append(chunk.content)
+            if on_llm_chunk:
+                await on_llm_chunk(chunk.content)
+
+    raw = "".join(chunks)
 
     # 提取正文：优先找「正文：」标记，否则找第一个标题后开始的内容
     if "正文：" in raw:
@@ -47,7 +56,7 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
     else:
         content = extract_output(raw)
 
-    tokens = len(response.content) // 4
+    tokens = len(raw) // 4
 
     return {
         "status": "completed", "agent_type": "WritingAgent",
