@@ -23,6 +23,7 @@ class PlatformInfo(BaseModel):
     code: str
     name: str
     icon_url: Optional[str] = None
+    category: str = 'social_media'
     is_mock: bool = True
     is_active: bool = True
 

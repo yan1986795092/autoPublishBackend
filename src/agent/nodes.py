@@ -69,7 +69,7 @@ def _build_template_plan(user_request: str, complexity: str) -> dict:
             "estimated_steps": 2,
             "tasks": [
                 {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": []},
+                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [0]},
             ],
         },
         "medium": {
@@ -78,9 +78,9 @@ def _build_template_plan(user_request: str, complexity: str) -> dict:
             "estimated_steps": 4,
             "tasks": [
                 {"id": str(uuid.uuid4()), "agent_type": "WebSearch", "input": {"query": user_request, "count": 5}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": []},
+                {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [0]},
+                {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": [1]},
+                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [1, 2]},
             ],
         },
         "complex": {
@@ -89,10 +89,10 @@ def _build_template_plan(user_request: str, complexity: str) -> dict:
             "estimated_steps": 6,
             "tasks": [
                 {"id": str(uuid.uuid4()), "agent_type": "WebSearch", "input": {"query": user_request, "count": 8}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "DiagramAgent", "input": {"topic": user_request, "diagram_type": "auto"}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": []},
+                {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [0]},
+                {"id": str(uuid.uuid4()), "agent_type": "DiagramAgent", "input": {"topic": user_request, "diagram_type": "auto"}, "dependencies": [1]},
+                {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": [1]},
+                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [1, 2, 3]},
             ],
         },
     }
@@ -477,16 +477,30 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
             # ── 执行 handler（支持流式 LLM 回调）──
             if streaming_mode and agent_type in {"WritingAgent", "SEOAgent", "ReviewAgent"}:
                 # 为支持流式的 Agent 注册 token 回调
-                t_input["_on_llm_chunk"] = lambda chunk: _publish_streaming_event(
-                    state, "llm_chunk",
-                    {"agent": agent_type, "content": chunk, "timestamp": time.time()}
-                )
-                t_input["_on_reasoning"] = lambda text: _publish_streaming_event(
-                    state, "reasoning",
-                    {"agent": agent_type, "content": text, "timestamp": time.time()}
-                )
+                # fire-and-forget: 用 create_task 让发布在后台进行，不阻塞 LLM 流
+                def _make_on_llm_chunk(agent: str):
+                    async def _on_llm_chunk(chunk: str) -> None:
+                        asyncio.create_task(_publish_streaming_event(
+                            state, "llm_chunk",
+                            {"agent": agent, "content": chunk, "timestamp": time.time()}
+                        ))
+                    return _on_llm_chunk
+                def _make_on_reasoning(agent: str):
+                    async def _on_reasoning(text: str) -> None:
+                        asyncio.create_task(_publish_streaming_event(
+                            state, "reasoning",
+                            {"agent": agent, "content": text, "timestamp": time.time()}
+                        ))
+                    return _on_reasoning
+                t_input["_on_llm_chunk"] = _make_on_llm_chunk(agent_type)
+                t_input["_on_reasoning"] = _make_on_reasoning(agent_type)
 
             result = await handler(t_input, llm, mcp_tools if mcp_tools else t_input.get("_mcp_tools"))
+
+            # 清理回调引用（不可 JSON 序列化），在后续操作前移除
+            t_input.pop("_on_llm_chunk", None)
+            t_input.pop("_on_reasoning", None)
+
             elapsed = round(time.time() - start_time, 2)
             result["time_elapsed"] = elapsed
             if "thinking_steps" not in result:
@@ -506,9 +520,13 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                 "status": result.get("status", "completed"),
             })
 
-            # 缓存结果
+            # 缓存结果（清理内部字段防止序列化失败）
             if use_cache and result.get("status") in ("completed", "partial"):
-                agent_cache.set(agent_type, t_input, result)
+                try:
+                    _cache_input = {k: v for k, v in t_input.items() if not k.startswith('_')}
+                    agent_cache.set(agent_type, _cache_input, result)
+                except Exception as e:
+                    logger.warning(f"Failed to cache result for {agent_type}: {e}")
 
             return result
         except Exception as e:
@@ -679,12 +697,17 @@ def should_continue(state: AgentGraphState) -> str:
     ready = state.get("ready_tasks", [])
 
     # 保护：没有可执行的任务就停止，避免死锁无限循环
+    # 注意：classify_and_decompose 之后 ready_tasks 尚未填充，
+    # 此时 completed + failed == 0，不应触发死锁检测
     if not ready and completed + failed < len(task_queue):
-        logger.warning(
-            f"Deadlock: no ready tasks ({len(task_queue)} total, "
-            f"{completed} done, {failed} failed). Forcing exit."
-        )
-        return "done"
+        if completed + failed > 0:
+            logger.warning(
+                f"Deadlock: no ready tasks ({len(task_queue)} total, "
+                f"{completed} done, {failed} failed). Forcing exit."
+            )
+            return "done"
+        # 首次执行，让 find_ready_tasks 填充 ready_tasks
+        return "continue"
 
     if completed + failed >= len(task_queue):
         return "done"

@@ -287,7 +287,7 @@ class Orchestrator:
                 estimated_steps=2,
                 tasks=[
                     AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[]),
+                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[0]),
                 ],
             ),
             "medium": ExecutionPlan(
@@ -296,21 +296,21 @@ class Orchestrator:
                 estimated_steps=4,
                 tasks=[
                     AgentTask(id=str(uuid.uuid4()), agent_type="WebSearch", input={"query": user_request, "count": 5}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[]),
+                    AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[0]),
+                    AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[1]),
+                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[1, 2]),
                 ],
             ),
             "complex": ExecutionPlan(
                 goal=goal,
                 reasoning="复杂任务：搜索 → 写作 → 图表 → SEO → 审核",
-                estimated_steps=6,
+                estimated_steps=5,
                 tasks=[
                     AgentTask(id=str(uuid.uuid4()), agent_type="WebSearch", input={"query": user_request, "count": 8}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="DiagramAgent", input={"topic": user_request, "diagram_type": "auto"}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[]),
+                    AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[0]),
+                    AgentTask(id=str(uuid.uuid4()), agent_type="DiagramAgent", input={"topic": user_request, "diagram_type": "auto"}, dependencies=[1]),
+                    AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[1]),
+                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[1, 3]),
                 ],
             ),
         }

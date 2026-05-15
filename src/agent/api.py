@@ -14,7 +14,7 @@ from sse_starlette.sse import EventSourceResponse
 from .schemas import AgentTask
 from .factory import create_orchestrator
 from .orchestrator import Orchestrator
-from .workflow.task_queue import task_queue, StreamEvent
+from .workflow.task_queue import task_queue, event_bus, StreamEvent
 from .workflow.worker import worker
 from src.api.auth import get_current_user
 from src.models import User
@@ -374,11 +374,12 @@ async def agent_stream(
     async def event_generator() -> AsyncGenerator[dict, None]:
         nonlocal task_id_placeholder
         try:
-            # 1. 生成执行计划
+            # 1. 快速生成执行计划（使用模板规划，避免 LLM 调用造成初始延迟）
             orchestrator = _create_orchestrator()
-            plan = await orchestrator._decompose(
+            complexity = orchestrator._classify_complexity(request.prompt)
+            plan = orchestrator._build_template_plan(
                 user_request=request.prompt,
-                context=request.context or {},
+                complexity=complexity,
             )
             yield {
                 "event": "plan",
@@ -436,7 +437,7 @@ async def agent_stream(
                 await evt_queue.put(event)
 
             # 订阅 EventBus
-            task_queue.subscribe(async_task.id, on_event)
+            event_bus.subscribe(async_task.id, on_event)
 
             try:
                 timeout_seconds = 600
@@ -455,11 +456,47 @@ async def agent_stream(
                     try:
                         event = await asyncio.wait_for(evt_queue.get(), timeout=1.0)
                     except asyncio.TimeoutError:
-                        # 超时检查：任务是否已自己结束
                         task = task_queue.get_task(async_task.id)
-                        if task and task.state.value in ("completed", "failed", "cancelled"):
+                        if not task:
                             break
-                        continue
+                        if task.state.value not in ("completed", "failed", "cancelled"):
+                            continue
+
+                        # ── 任务已结束：先排空事件队列（避免 _publish_event 延迟导致丢失事件）──
+                        remaining_events: list[StreamEvent] = []
+                        while True:
+                            try:
+                                remaining_events.append(evt_queue.get_nowait())
+                            except asyncio.QueueEmpty:
+                                break
+
+                        got_result = False
+                        for revt in remaining_events:
+                            if revt.event_type == "result":
+                                yield {"event": "result", "data": json.dumps(revt.data, ensure_ascii=False)}
+                                got_result = True
+                            elif revt.event_type == "error":
+                                yield {"event": "error", "data": json.dumps(revt.data, ensure_ascii=False)}
+                                got_result = True
+
+                        # ── 事件队列中没有 result/error，直接从 task 提取 ──
+                        if not got_result:
+                            if task.state.value == "completed" and task.result:
+                                yield {
+                                    "event": "result",
+                                    "data": json.dumps(task.result, ensure_ascii=False),
+                                }
+                            elif task.state.value == "failed":
+                                yield {
+                                    "event": "error",
+                                    "data": json.dumps({"message": task.error or "任务执行失败"}, ensure_ascii=False),
+                                }
+
+                        yield {
+                            "event": "done",
+                            "data": json.dumps({"task_id": async_task.id, "state": task.state.value}, ensure_ascii=False),
+                        }
+                        break
 
                     et = event.event_type
 
@@ -523,7 +560,7 @@ async def agent_stream(
 
             finally:
                 # 取消订阅 EventBus
-                task_queue.unsubscribe(async_task.id, on_event)
+                event_bus.unsubscribe(async_task.id, on_event)
 
         except Exception as e:
             yield {

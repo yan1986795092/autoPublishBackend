@@ -108,6 +108,7 @@ class Platform(Base):
     code = Column(String(50), unique=True, nullable=False)
     name = Column(String(100), nullable=False)
     icon_url = Column(String(255))
+    category = Column(String(50), default='social_media')
     is_active = Column(Boolean, default=True)
     is_mock = Column(Boolean, default=True)
 

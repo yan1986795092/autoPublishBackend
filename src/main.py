@@ -18,6 +18,20 @@ async def lifespan(app: FastAPI):
     # 启动时：创建表 + 启动 Worker
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: Base.metadata.create_all(bind=engine))
+
+    # 迁移：为已有数据库添加 category 列
+    def _migrate():
+        from sqlalchemy import inspect, text
+        from src.database import SessionLocal
+        inspector = inspect(engine)
+        columns = [c['name'] for c in inspector.get_columns('platforms')]
+        if 'category' not in columns:
+            with engine.connect() as conn:
+                conn.execute(text("ALTER TABLE platforms ADD COLUMN category VARCHAR(50) DEFAULT 'social_media'"))
+                conn.commit()
+            print("[Migration] Added 'category' column to platforms table")
+    await loop.run_in_executor(None, _migrate)
+
     await worker.start()
     print("[Agent Worker] Started")
     yield
