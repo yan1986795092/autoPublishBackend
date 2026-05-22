@@ -20,6 +20,11 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         if cdata.get("content"):
             context_str += f"\n[已有内容参考]\n{cdata['content'][:1000]}"
 
+    # ── 记忆注入 ──
+    memory_context = task_input.get("_memory_context", "")
+    if memory_context:
+        context_str += f"\n\n{memory_context}"
+
     prompt = f"""## 写作任务
 
 **主题：** {topic}

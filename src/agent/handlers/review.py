@@ -29,7 +29,11 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
     # 事实核查
     fc_report = factcheck_report(content, known_facts) if content else None
 
-    prompt = f"""## 审核任务
+    # ── 记忆注入：历史审核经验 ──
+    memory_context = task_input.get("_memory_context", "")
+    memory_section = f"\n\n{memory_context}" if memory_context else ""
+
+    prompt = f"""## 审核任务{memory_section}
 
 请对以下{content_type}内容进行审核，重点关注：
 - 内容是否完整，有没有虎头蛇尾

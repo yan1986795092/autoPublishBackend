@@ -17,6 +17,7 @@ from .handlers import HANDLER_MAP, handle_fallback
 
 from .cache import agent_cache
 from .retry import run_agent_with_retry, simple_quality_score
+from src.memory import memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -307,11 +308,18 @@ def _parse_plan(response: str, goal: str) -> dict:
         return plan
 
 # ──────────────────────────────────────────────
-# 2. find_ready_tasks 节点
+# 2. schedule_and_execute 节点（合并原 find_ready_tasks + check_task_results）
 # ──────────────────────────────────────────────
 
-async def find_ready_tasks(state: AgentGraphState) -> dict:
-    """检查 DAG 依赖，找出下一批可执行的任务"""
+async def schedule_and_execute(state: AgentGraphState) -> dict:
+    """调度节点：检查 DAG 依赖，找出下一批可执行的任务
+
+    合并了原 find_ready_tasks 和 check_task_results 的逻辑：
+    - 根据 DAG 依赖关系，找出依赖已满足的任务
+    - 如果有 ready 任务，触发 execute_task_batch
+    - 如果没有 ready 任务，进入 merge_and_finish
+    - 处理死锁检测
+    """
     task_queue = state.get("task_queue", [])
     completed_ids = set(state.get("completed_task_ids", []))
     failed_ids = set(state.get("failed_task_ids", []))
@@ -329,19 +337,32 @@ async def find_ready_tasks(state: AgentGraphState) -> dict:
                 return False
         return True
 
-    ready = [t for t in task_queue if t.get("id") not in completed_ids and t.get("id") not in failed_ids and deps_met(t)]
+    ready = [
+        t for t in task_queue
+        if t.get("id") not in completed_ids
+        and t.get("id") not in failed_ids
+        and deps_met(t)
+    ]
 
-    if not ready and len(completed_ids) + len(failed_ids) < len(task_queue):
-        # 死锁检测：检查停滞任务是否真的依赖未完成的任务
+    total_done = len(completed_ids) + len(failed_ids)
+    total_tasks = len(task_queue)
+
+    # 死锁检测
+    if not ready and total_done < total_tasks:
         stuck = [t for t in task_queue if t.get("id") not in completed_ids and t.get("id") not in failed_ids]
-        still_pending = [t for t in task_queue if t.get("id") not in completed_ids and t.get("id") not in failed_ids and t.get("id") not in {s["id"] for s in stuck}]
-        deps_unmet = sum(1 for t in stuck for d in t.get("dependencies", []) if _resolve_dep_id(d) not in completed_ids and _resolve_dep_id(d) not in failed_ids)
+        deps_unmet = sum(
+            1 for t in stuck
+            for d in t.get("dependencies", [])
+            if _resolve_dep_id(d) not in completed_ids and _resolve_dep_id(d) not in failed_ids
+        )
         if deps_unmet == 0:
-            # 没有依赖可等，确认为死锁
             logger.warning(f"Deadlock detected: {len(stuck)} tasks stuck with no unmet dependencies")
-            return {"ready_tasks": [], "failed_task_ids": [t["id"] for t in stuck]}
+            return {
+                "ready_tasks": [],
+                "failed_task_ids": list(state.get("failed_task_ids", [])) + [t["id"] for t in stuck],
+            }
         else:
-            logger.info(f"{len(stuck)} tasks not ready ({deps_unmet} unmet deps), waiting for next cycle")
+            logger.info(f"{len(stuck)} tasks not ready ({deps_unmet} unmet deps)")
             return {"ready_tasks": []}
 
     return {"ready_tasks": ready}
@@ -351,10 +372,11 @@ async def find_ready_tasks(state: AgentGraphState) -> dict:
 # ──────────────────────────────────────────────
 
 async def execute_task_batch(state: AgentGraphState) -> dict:
-    """并行执行当前批次的所有任务"""
+    """并行执行当前批次的所有任务
+
+    注意：此节点仅负责执行，ready_tasks 的检查由 schedule_and_execute 完成。
+    """
     ready_tasks = state.get("ready_tasks", [])
-    if not ready_tasks:
-        return {}
 
     concurrency = state.get("concurrency_limit", 3)
     semaphore = asyncio.Semaphore(concurrency)
@@ -390,7 +412,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
     }
 
 # ──────────────────────────────────────────────
-# 4. 单个 Agent 任务执行
+# 4. merge_and_finish 节点
 # ──────────────────────────────────────────────
 
 async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
@@ -495,6 +517,18 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                 t_input["_on_llm_chunk"] = _make_on_llm_chunk(agent_type)
                 t_input["_on_reasoning"] = _make_on_reasoning(agent_type)
 
+            # ── 记忆注入：从语义/情景/工作记忆构建增强上下文 ──
+            try:
+                memory_context = await memory_manager.build_agent_context(
+                    agent_type=agent_type,
+                    task_input=t_input,
+                    user_id=state.get("context", {}).get("user_id", ""),
+                )
+                if memory_context:
+                    t_input["_memory_context"] = memory_context
+            except Exception as e:
+                logger.warning(f"Memory context injection failed: {e}")
+
             result = await handler(t_input, llm, mcp_tools if mcp_tools else t_input.get("_mcp_tools"))
 
             # 清理回调引用（不可 JSON 序列化），在后续操作前移除
@@ -579,15 +613,7 @@ def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
 
 
 # ──────────────────────────────────────────────
-# 5. check_task_results 节点
-# ──────────────────────────────────────────────
-
-async def check_task_results(state: AgentGraphState) -> dict:
-    """检查批次执行结果，标记失败任务"""
-    return {}  # 目前不做额外处理，失败已在 execute_batch 中标记
-
-# ──────────────────────────────────────────────
-# 6. merge_and_finish 节点
+# 5. merge_and_finish 节点
 # ──────────────────────────────────────────────
 
 async def merge_and_finish(state: AgentGraphState) -> dict:
@@ -615,6 +641,17 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             content = result.get("output", {}).get("content", "")
             if content:
                 full_text_parts.append(f"\n\n--- {result.get('agent_type', task.get('agent_type', ''))} ---\n{content}")
+
+            # ── 记忆沉淀：执行完成后选择性写入 ──
+            try:
+                asyncio.create_task(memory_manager.remember(
+                    agent_type=result.get("agent_type", task.get("agent_type", "")),
+                    task_input=task.get("input", {}),
+                    result=result,
+                    user_id=state.get("context", {}).get("user_id", ""),
+                ))
+            except Exception:
+                pass
 
     completed = len(completed_ids)
     failed = len(failed_ids)
@@ -684,31 +721,39 @@ def _persist_results(state: AgentGraphState, sections: list, full_text_parts: li
 # 路由函数（用于条件边）
 # ──────────────────────────────────────────────
 
-def should_continue(state: AgentGraphState) -> str:
-    """检查是否还有未完成的任务
+def should_continue_or_finish(state: AgentGraphState) -> str:
+    """条件边路由函数：判断是否继续执行任务
 
-    停止条件（任一满足）：
-    1. 所有任务都已完成或失败
-    2. 没有 ready 的任务（依赖无法满足/死锁），直接结束
+    返回值：
+    - "execute": 有可执行的任务，继续执行
+    - "done": 所有任务已完成，或无可执行任务且无死锁
+
+    逻辑：
+    1. 如果 ready_tasks 有任务 → "execute"
+    2. 如果没有 ready_tasks 且还有未完成任务 → "done"（死锁或依赖阻塞）
+    3. 所有任务都已完成或失败 → "done"
     """
     task_queue = state.get("task_queue", [])
     completed = len(state.get("completed_task_ids", []))
     failed = len(state.get("failed_task_ids", []))
     ready = state.get("ready_tasks", [])
+    total_tasks = len(task_queue)
+    total_done = completed + failed
 
-    # 保护：没有可执行的任务就停止，避免死锁无限循环
-    # 注意：classify_and_decompose 之后 ready_tasks 尚未填充，
-    # 此时 completed + failed == 0，不应触发死锁检测
-    if not ready and completed + failed < len(task_queue):
-        if completed + failed > 0:
-            logger.warning(
-                f"Deadlock: no ready tasks ({len(task_queue)} total, "
-                f"{completed} done, {failed} failed). Forcing exit."
-            )
-            return "done"
-        # 首次执行，让 find_ready_tasks 填充 ready_tasks
-        return "continue"
+    # 情况1：有可执行的任务
+    if ready:
+        return "execute"
 
-    if completed + failed >= len(task_queue):
+    # 情况2：所有任务已完成或失败
+    if total_done >= total_tasks:
         return "done"
-    return "continue"
+
+    # 情况3：没有可执行的任务但还有未完成的任务（死锁）
+    if total_done < total_tasks:
+        logger.warning(
+            f"No ready tasks ({total_tasks} total, "
+            f"{total_done} done/failed). Forcing exit."
+        )
+        return "done"
+
+    return "done"
