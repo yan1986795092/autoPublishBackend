@@ -852,35 +852,29 @@ async def reflect_on_task_batch(state: AgentGraphState) -> dict:
 # ──────────────────────────────────────────────
 
 async def check_hitl_gates(state: AgentGraphState) -> dict:
-    """检查 HITL 门：在执行前检查是否有待处理的人类决策
+    """检查 HITL 门状态（观测节点）
 
-    如果有 pendig gates 且尚未被处理，将 ready_tasks 清空，
-    让 Graph 在 schedule_and_execute 中等待。
+    注意：此节点不阻塞执行。实际的 HITL 阻塞由 handler 内部通过
+    TaskQueue.set_decision_required / orchestrator.request_user_decision 处理。
+    此节点仅用于状态观测和日志记录，为未来 Graph 级 HITL 暂停预留接口。
     """
     if not state.get("enable_hitl"):
         return {}
 
     pending_gates = state.get("pending_gates", [])
-    if not pending_gates:
-        return {}
-
-    # 检查是否有 gate 已经被 resolve
-    hitl_mgr = state.get("_hitl_manager")
-    unresolved = []
-
-    if hitl_mgr:
-        for gate in pending_gates:
-            g = hitl_mgr.get_gate(gate.get("gate_id", ""))
-            if g and getattr(g, "state", "") != "resolved":
-                unresolved.append(gate)
-    else:
-        unresolved = pending_gates
-
-    if unresolved:
-        # 有未解决的 gate，阻止任务执行
-        return {
-            "pending_gates": unresolved,
-            "ready_tasks": [],  # 清空 ready_tasks 以阻止 execute
-        }
+    if pending_gates:
+        hitl_mgr = state.get("_hitl_manager")
+        unresolved = []
+        if hitl_mgr:
+            for gate in pending_gates:
+                g = hitl_mgr.get_gate(gate.get("gate_id", ""))
+                if g and getattr(g, "state", "") != "resolved":
+                    unresolved.append(gate)
+        if unresolved:
+            logger.info(
+                "HITL: %d pending gates (blocking handled at TaskQueue level)",
+                len(unresolved),
+            )
+            return {"pending_gates": unresolved}
 
     return {"pending_gates": []}

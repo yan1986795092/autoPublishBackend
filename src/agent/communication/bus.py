@@ -8,6 +8,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime
@@ -173,4 +174,3 @@ class MessageBus:
         return f"MessageBus({total_msgs} msgs, {len(self._outbox)} outboxes)"
 
 
-import asyncio  # noqa: E402 (must be after class definition that uses it)
