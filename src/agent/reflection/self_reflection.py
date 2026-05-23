@@ -9,7 +9,7 @@ from langchain_openai import ChatOpenAI
 from langchain_core.messages import SystemMessage, HumanMessage
 
 from .models import ReflectionResult
-from src.prompts import prompt_engine, PromptBuilder
+from src.prompts import PromptBuilder
 
 logger = logging.getLogger(__name__)
 
