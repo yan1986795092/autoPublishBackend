@@ -1,7 +1,11 @@
-"""DiagramAgent — 知识架构图、流程图、脑图生成"""
+"""DiagramAgent — 知识架构图、流程图、脑图生成
+
+使用 PromptEngine 构建 prompt。
+"""
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
+from src.prompts import PromptBuilder
 
 
 async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -19,10 +23,16 @@ async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
 
     if llm:
         try:
-            response = await llm.ainvoke([
-                SystemMessage(content="You are a Mermaid.js diagram expert. Output ONLY valid Mermaid code."),
-                HumanMessage(content=f'Generate a Mermaid.js {diagram_type} about "{topic}". Detail level: detailed'),
-            ])
+            composed = (PromptBuilder()
+                .system("system.diagram")
+                .instructions("diagram.task", {
+                    "topic": topic,
+                    "diagram_type": diagram_type,
+                })
+                .build())
+
+            lc_messages = composed.build_langchain()
+            response = await llm.ainvoke(lc_messages)
             code = response.content.strip()
             if "```mermaid" in code:
                 code = code.split("```mermaid")[1].split("```")[0].strip()
@@ -32,6 +42,7 @@ async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                 "status": "completed", "agent_type": "DiagramAgent",
                 "output": {"content": code, "diagram_type": diagram_type, "code": code, "rendered": True},
                 "tokens_used": len(code) // 4,
+                "prompt_versions": composed.used_templates,
                 "thinking_steps": [{"agent": "DiagramAgent", "action": "图表生成完成", "reasoning": f"生成{diagram_type}图：{topic}", "status": "done"}],
             }
         except Exception:
