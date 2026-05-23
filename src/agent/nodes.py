@@ -535,6 +535,19 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                 # 同时注入 AgentRegistry 供 handler 按名称查找 Agent
                 t_input["_agent_registry"] = state.get("_agent_registry")
 
+            # ── ToolRegistry 注入（Tool System）──
+            tool_registry = state.get("_tool_registry")
+            if tool_registry is not None:
+                t_input["_tool_registry"] = tool_registry
+                # 为启用了工具的 Agent 注入工具描述
+                from .agents import PREDEFINED_PROFILES
+                profile = PREDEFINED_PROFILES.get(agent_type)
+                if profile and profile.tools_enabled:
+                    from .tools import tool_prompt_section
+                    tool_desc = tool_prompt_section(agent_type, tool_registry)
+                    if tool_desc:
+                        t_input["_tool_descriptions"] = tool_desc
+
             result = await handler(t_input, llm, mcp_tools if mcp_tools else t_input.get("_mcp_tools"))
 
             # 清理回调引用（不可 JSON 序列化），在后续操作前移除

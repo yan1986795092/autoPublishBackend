@@ -29,6 +29,7 @@ class AgentProfile:
     token_budget: int = 2000
     memory_namespace: str = "general"
     tools_enabled: bool = False
+    available_tools: list[str] = field(default_factory=list)  # 允许使用的工具名称列表，空=全部
     cacheable: bool = False           # 是否可缓存（对应 cacheable_types）
     memory_enabled: bool = False      # 是否注入记忆上下文
     remember_enabled: bool = False    # 产出是否值得沉淀
@@ -73,6 +74,7 @@ PREDEFINED_PROFILES: dict[str, AgentProfile] = {
         memory_namespace="content",
         memory_enabled=True,
         remember_enabled=True,
+        tools_enabled=True,
     ),
     "ReviewAgent": AgentProfile(
         name="ReviewAgent",
@@ -85,6 +87,7 @@ PREDEFINED_PROFILES: dict[str, AgentProfile] = {
         memory_namespace="feedback",
         memory_enabled=True,
         cacheable=True,
+        tools_enabled=True,
     ),
     "SEOAgent": AgentProfile(
         name="SEOAgent",
@@ -98,6 +101,7 @@ PREDEFINED_PROFILES: dict[str, AgentProfile] = {
         memory_enabled=True,
         remember_enabled=True,
         cacheable=True,
+        tools_enabled=True,
     ),
     "DiagramAgent": AgentProfile(
         name="DiagramAgent",
@@ -121,6 +125,7 @@ PREDEFINED_PROFILES: dict[str, AgentProfile] = {
         token_budget=2000,
         memory_namespace="content",
         memory_enabled=True,
+        tools_enabled=True,
     ),
     "WebSearch": AgentProfile(
         name="WebSearch",
@@ -172,6 +177,7 @@ PREDEFINED_PROFILES: dict[str, AgentProfile] = {
         token_budget=1500,
         memory_namespace="content",
         memory_enabled=True,
+        tools_enabled=True,
     ),
     "URLCrawler": AgentProfile(
         name="URLCrawler",

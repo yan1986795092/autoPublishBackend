@@ -1,11 +1,12 @@
 """DiagramAgent — 知识架构图、流程图、脑图生成
 
-使用 PromptEngine 构建 prompt。
+使用 PromptEngine 构建 prompt，支持工具调用。
 """
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from src.prompts import PromptBuilder
+from .tool_utils import call_llm
 
 
 async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -32,8 +33,13 @@ async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                 .build())
 
             lc_messages = composed.build_langchain()
-            response = await llm.ainvoke(lc_messages)
-            code = response.content.strip()
+            response_text = await call_llm(
+                llm, lc_messages,
+                tool_registry=task_input.get("_tool_registry"),
+                agent_type="DiagramAgent",
+                stream=False,
+            )
+            code = response_text.strip()
             if "```mermaid" in code:
                 code = code.split("```mermaid")[1].split("```")[0].strip()
             elif "```" in code:

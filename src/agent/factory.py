@@ -1,9 +1,12 @@
 """共享工厂：创建带 ModelRouter + LangGraph 的 Orchestrator 实例。"""
 from __future__ import annotations
+import logging
 from typing import Any, Optional
 
 from src.core.model_router import ModelRouter
 from .orchestrator import Orchestrator
+
+logger = logging.getLogger(__name__)
 
 
 def create_orchestrator(
@@ -13,11 +16,12 @@ def create_orchestrator(
     enable_message_bus: bool = False,
     enable_reflection: bool = False,
     enable_hitl: bool = False,
+    enable_tools: bool = True,
     **kwargs,
 ) -> Orchestrator:
     """创建 Orchestrator 实例，用 ModelRouter 为各 Agent 分配独立 LLM 实例。
 
-    支持 Phase 1-5 所有组件（条件启用，默认关闭确保向后兼容）。
+    支持 Phase 1-5 所有组件 + Tool System（条件启用，默认关闭确保向后兼容）。
 
     Args:
         router: ModelRouter 实例，不传则自动创建
@@ -26,6 +30,7 @@ def create_orchestrator(
         enable_message_bus: 是否启用 P2P 通信（Phase 2）
         enable_reflection: 是否启用反思回路（Phase 3）
         enable_hitl: 是否启用 HITL（Phase 4）
+        enable_tools: 是否启用 ToolRegistry（Tool System）
         **kwargs: 传递给 Orchestrator 的额外参数
 
     Returns:
@@ -62,6 +67,22 @@ def create_orchestrator(
     # ── Phase 4: HITLManager ──
     hitl_manager = _build_hitl_manager(kwargs.get("task_queue")) if enable_hitl else None
 
+    # ── Tool System: ToolRegistry ──
+    tool_registry = _build_tool_registry(
+        agent_registry=agent_registry,
+        mcp_tools=mcp_tools,
+        message_bus=message_bus,
+        reflection_engine=reflection_engine,
+        hitl_manager=hitl_manager,
+    ) if enable_tools else None
+
+    # 如果 ToolRegistry 就绪且 AgentRegistry 就绪，为各 Agent LLM 绑定工具
+    if tool_registry and agent_registry:
+        for agent_type in agent_registry.list_types():
+            agent = agent_registry.get(agent_type)
+            if agent and agent.profile.tools_enabled:
+                agent.bind_tools(tool_registry)
+
     orchestrator = Orchestrator(
         llm_gateway=router.get_gateway("ManagerAgent"),
         chat_models=chat_models,
@@ -70,6 +91,7 @@ def create_orchestrator(
         message_bus=message_bus,
         reflection_engine=reflection_engine,
         hitl_manager=hitl_manager,
+        tool_registry=tool_registry,
         **kwargs,
     )
     return orchestrator
@@ -97,3 +119,62 @@ def _build_hitl_manager(task_queue: Any) -> Any:
     """构建 HITLManager"""
     from .hitl import HITLManager
     return HITLManager(task_queue=task_queue)
+
+
+def _build_tool_registry(
+    agent_registry: Any = None,
+    mcp_tools: Optional[list] = None,
+    message_bus: Any = None,
+    reflection_engine: Any = None,
+    hitl_manager: Any = None,
+) -> Any:
+    """构建 ToolRegistry 并注册所有工具
+
+    注册顺序：
+    1. 内置工具（memory / communication / reflection / hitl）
+    2. MCP 工具（如果提供了 mcp_tools）
+    """
+    from .tools import ToolRegistry, create_memory_tools
+
+    registry = ToolRegistry()
+
+    # 1. 记忆工具（始终可用，依赖 memory_manager 单例）
+    for tool in create_memory_tools():
+        registry.register(tool)
+
+    # 2. 通信工具（依赖 MessageBus 实例）
+    if message_bus is not None:
+        from .tools import create_communication_tools
+        for tool in create_communication_tools(message_bus):
+            registry.register(tool)
+
+    # 3. 反思工具（依赖 ReflectionEngine 实例）
+    if reflection_engine is not None:
+        from .tools import create_reflection_tools
+        for tool in create_reflection_tools(reflection_engine):
+            registry.register(tool)
+
+    # 4. HITL 工具（依赖 HITLManager 实例）
+    if hitl_manager is not None:
+        from .tools import create_hitl_tools
+        for tool in create_hitl_tools(hitl_manager):
+            registry.register(tool)
+
+    # 5. MCP 工具
+    if mcp_tools:
+        for lc_tool in mcp_tools:
+            from .tools import AgentToolMeta
+            registry.register_from_langchain(
+                lc_tool,
+                meta=AgentToolMeta(category="search", builtin=False),
+            )
+
+    logger.info(
+        "ToolRegistry: 已注册 %d 个工具（记忆=%s, 通信=%s, 反思=%s, HITL=%s, MCP=%d）",
+        registry.count,
+        "✓", "✓" if message_bus else "✗",
+        "✓" if reflection_engine else "✗",
+        "✓" if hitl_manager else "✗",
+        len(mcp_tools) if mcp_tools else 0,
+    )
+    return registry

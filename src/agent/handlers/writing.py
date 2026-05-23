@@ -1,12 +1,13 @@
 """WritingAgent — 多风格内容写作
 
-使用 PromptEngine 构建 prompt，支持记忆上下文注入。
+使用 PromptEngine 构建 prompt，支持记忆上下文注入和工具调用（memory_search 等）。
 """
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import extract_output
 from src.prompts import PromptBuilder, CONTENT_TYPE_PROMPTS, STYLE_GUIDES
+from .tool_utils import call_llm
 
 
 async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -44,6 +45,11 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         "type_guide": type_guide,
     })
 
+    # 注入工具描述
+    tool_descriptions = task_input.get("_tool_descriptions", "")
+    if tool_descriptions:
+        builder.context(f"\n\n可用工具：\n{tool_descriptions}")
+
     # 引用上下文
     if context_str_parts:
         builder.context(f"\n[已有内容参考]\n{chr(10).join(context_str_parts)}")
@@ -64,16 +70,14 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         else:
             lc_messages.append(HumanMessage(content=m["content"]))
 
-    # ── 流式 LLM 调用 ──
-    on_llm_chunk = task_input.get("_on_llm_chunk")
-    chunks: list[str] = []
-    async for chunk in llm.astream(lc_messages):
-        if chunk.content:
-            chunks.append(chunk.content)
-            if on_llm_chunk:
-                await on_llm_chunk(chunk.content)
-
-    raw = "".join(chunks)
+    # ── 工具感知的 LLM 调用 ──
+    raw = await call_llm(
+        llm, lc_messages,
+        tool_registry=task_input.get("_tool_registry"),
+        agent_type="WritingAgent",
+        stream=True,
+        on_chunk=task_input.get("_on_llm_chunk"),
+    )
 
     # 提取正文
     if "正文：" in raw:
