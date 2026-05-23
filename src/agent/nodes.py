@@ -529,6 +529,12 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
             except Exception as e:
                 logger.warning(f"Memory context injection failed: {e}")
 
+            # ── 消息总线注入（Phase 2 点对点通信）──
+            if state.get("use_message_bus") and state.get("_message_bus"):
+                t_input["_message_bus"] = state["_message_bus"]
+                # 同时注入 AgentRegistry 供 handler 按名称查找 Agent
+                t_input["_agent_registry"] = state.get("_agent_registry")
+
             result = await handler(t_input, llm, mcp_tools if mcp_tools else t_input.get("_mcp_tools"))
 
             # 清理回调引用（不可 JSON 序列化），在后续操作前移除
@@ -757,3 +763,124 @@ def should_continue_or_finish(state: AgentGraphState) -> str:
         return "done"
 
     return "done"
+
+
+# ──────────────────────────────────────────────
+# 6. reflect_on_task_batch 节点（Phase 3 反思）
+# ──────────────────────────────────────────────
+
+async def reflect_on_task_batch(state: AgentGraphState) -> dict:
+    """反思：对已完成批次进行自省和同行评审
+
+    只有在 enable_reflection=True 时生效。
+    对每个刚完成的任务运行 self-reflection。
+    """
+    if not state.get("enable_reflection"):
+        return {}
+
+    task_results = state.get("task_results", {})
+    completed_ids = set(state.get("completed_task_ids", []))
+    reflection_results = list(state.get("reflection_results", []))
+    reflection_rounds = dict(state.get("self_reflection_rounds", {}))
+    llm_models = state.get("_llm_models", {})
+    new_steps = list(state.get("thinking_steps", []))
+
+    # 收集需要重试的任务 ID
+    requeue_ids = set()
+    for task_id in completed_ids:
+        result = task_results.get(task_id, {})
+        agent_type = result.get("agent_type", "")
+
+        # 只对 Writing/Code/Translation 这类产出型 Agent 做自省
+        if agent_type not in {"WritingAgent", "CodeAgent", "TranslationAgent"}:
+            continue
+
+        # 检查是否已超过最大反思轮次
+        current_round = reflection_rounds.get(task_id, 0)
+        if current_round >= 2:
+            continue
+
+        # 执行自省
+        from .reflection import self_reflect as do_self_reflect
+        llm = llm_models.get(agent_type) or llm_models.get("default")
+        task_input = {"_task_id": task_id}
+
+        try:
+            ref_result = await do_self_reflect(agent_type, task_input, result, llm)
+            if ref_result:
+                ref_dict = ref_result.to_dict()
+                ref_dict["round"] = current_round + 1
+                reflection_results.append(ref_dict)
+                reflection_rounds[task_id] = current_round + 1
+
+                new_steps.append({
+                    "step_number": len(new_steps) + 1,
+                    "agent": agent_type,
+                    "action": "自省完成",
+                    "reasoning": f"自省评分 {ref_result.score}，{len(ref_result.issues)} 个问题",
+                    "output_summary": "; ".join(ref_result.suggestions[:3]) if ref_result.suggestions else "无需修改",
+                    "tokens_used": 0,
+                    "status": "done",
+                })
+
+                # 如果自省不通过且还有轮次，从 completed 移除使其重试
+                if not ref_result.passed and current_round < 2:
+                    requeue_ids.add(task_id)
+                    logger.info(
+                        "Reflection: %s task %s score=%.2f, re-queuing for retry",
+                        agent_type, task_id, ref_result.score,
+                    )
+        except Exception as e:
+            logger.warning("Reflection failed for %s: %s", agent_type, e)
+
+    # 从 completed_task_ids 移除需要重试的任务
+    updated_completed = [
+        tid for tid in completed_ids
+        if tid not in requeue_ids
+    ]
+
+    return {
+        "reflection_results": reflection_results,
+        "self_reflection_rounds": reflection_rounds,
+        "thinking_steps": new_steps,
+        "completed_task_ids": updated_completed,
+    }
+
+
+# ──────────────────────────────────────────────
+# 7. check_hitl_gates 节点（Phase 4 人机协同）
+# ──────────────────────────────────────────────
+
+async def check_hitl_gates(state: AgentGraphState) -> dict:
+    """检查 HITL 门：在执行前检查是否有待处理的人类决策
+
+    如果有 pendig gates 且尚未被处理，将 ready_tasks 清空，
+    让 Graph 在 schedule_and_execute 中等待。
+    """
+    if not state.get("enable_hitl"):
+        return {}
+
+    pending_gates = state.get("pending_gates", [])
+    if not pending_gates:
+        return {}
+
+    # 检查是否有 gate 已经被 resolve
+    hitl_mgr = state.get("_hitl_manager")
+    unresolved = []
+
+    if hitl_mgr:
+        for gate in pending_gates:
+            g = hitl_mgr.get_gate(gate.get("gate_id", ""))
+            if g and getattr(g, "state", "") != "resolved":
+                unresolved.append(gate)
+    else:
+        unresolved = pending_gates
+
+    if unresolved:
+        # 有未解决的 gate，阻止任务执行
+        return {
+            "pending_gates": unresolved,
+            "ready_tasks": [],  # 清空 ready_tasks 以阻止 execute
+        }
+
+    return {"pending_gates": []}

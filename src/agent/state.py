@@ -43,3 +43,21 @@ class AgentGraphState(TypedDict):
     _llm_models: dict             # agent_type -> ChatOpenAI
     _mcp_tools: list              # MCP Server 加载的工具（LangChain BaseTool 列表）
     _streaming_mode: bool = False  # 是否开启实时流式推送（LLM token 级）
+    _agent_registry: Any = None    # AgentRegistry 实例（Phase 1）
+
+    # === P2P 通信（Phase 2） ===
+    use_message_bus: bool = False
+    _message_bus: Any = None       # MessageBus 实例
+    _messages: list[dict] = []     # 消息日志（可序列化）
+
+    # === 反思（Phase 3） ===
+    enable_reflection: bool = False
+    reflection_config: Any = None  # ReflectionConfig dict
+    _reflection_engine: Any = None # ReflectionEngine 实例
+    reflection_results: list[dict] = []   # serialized ReflectionResult
+    self_reflection_rounds: dict = {}     # task_id -> round count
+
+    # === HITL（Phase 4） ===
+    enable_hitl: bool = False
+    _hitl_manager: Any = None      # HITLManager 实例
+    pending_gates: list[dict] = [] # 序列化的 pending gates

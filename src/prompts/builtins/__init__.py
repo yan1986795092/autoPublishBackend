@@ -14,6 +14,7 @@ def register_all():
     from .review import templates as review_templates
     from .code import templates as code_templates
     from .diagram import templates as diagram_templates
+    from .reflection import templates as reflection_templates
 
     all_templates = (
         sys_templates +
@@ -21,7 +22,8 @@ def register_all():
         manager_templates +
         review_templates +
         code_templates +
-        diagram_templates
+        diagram_templates +
+        reflection_templates
     )
 
     prompt_engine.register_many(all_templates)

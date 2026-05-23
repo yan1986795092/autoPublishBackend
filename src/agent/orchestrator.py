@@ -96,6 +96,9 @@ class Orchestrator:
         async_task_id: str = "",
         max_concurrent: int = 3,
         mcp_tools: list | None = None,
+        hitl_manager: Any | None = None,
+        message_bus: Any | None = None,
+        reflection_engine: Any | None = None,
     ):
         self.llm_gateway = llm_gateway
         self.chat_models = chat_models or {}
@@ -105,6 +108,10 @@ class Orchestrator:
         self.async_task_id = async_task_id
         self.max_concurrent = max_concurrent
         self.mcp_tools = mcp_tools or []
+        self.agent_registry = agent_registry
+        self.hitl_manager = hitl_manager
+        self.message_bus = message_bus
+        self.reflection_engine = reflection_engine
 
         self._graph = build_agent_graph()
 
@@ -118,7 +125,22 @@ class Orchestrator:
         options: list[dict],
         context: dict | None = None,
     ) -> str | None:
-        """暂停执行，等待用户决策。返回选择值或 None（超时/非异步模式）。"""
+        """暂停执行，等待用户决策。返回选择值或 None（超时/非异步模式）。
+
+        当启用了 HITLManager 时委托给 HITLManager。否则使用原有逻辑。
+        """
+        if self.hitl_manager:
+            from .hitl.gates import DecisionGate
+            gate = DecisionGate(
+                gate_id=str(uuid.uuid4()),
+                task_id=self.async_task_id,
+                question=question,
+                options=options,
+                context=context or {},
+            )
+            return await self.hitl_manager.request_decision(gate)
+
+        # 原有逻辑（向后兼容）
         if not self.async_task_id or not self.task_queue:
             return options[0]["value"] if options else None
 
@@ -175,6 +197,18 @@ class Orchestrator:
                     "_llm_models": self.chat_models,
                     "_mcp_tools": self.mcp_tools,
                     "_streaming_mode": True,  # 开启实时流式推送
+                    "_agent_registry": self.agent_registry,
+                    "use_message_bus": self.message_bus is not None,
+                    "_message_bus": self.message_bus,
+                    "_messages": [],
+                    "enable_reflection": self.reflection_engine is not None,
+                    "reflection_config": None,
+                    "_reflection_engine": self.reflection_engine,
+                    "reflection_results": [],
+                    "self_reflection_rounds": {},
+                    "enable_hitl": self.hitl_manager is not None,
+                    "_hitl_manager": self.hitl_manager,
+                    "pending_gates": [],
                 }
 
                 # ── 运行 Graph ──
