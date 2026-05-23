@@ -99,6 +99,7 @@ class Orchestrator:
         hitl_manager: Any | None = None,
         message_bus: Any | None = None,
         reflection_engine: Any | None = None,
+        tool_registry: Any | None = None,
     ):
         self.llm_gateway = llm_gateway
         self.chat_models = chat_models or {}
@@ -112,6 +113,7 @@ class Orchestrator:
         self.hitl_manager = hitl_manager
         self.message_bus = message_bus
         self.reflection_engine = reflection_engine
+        self.tool_registry = tool_registry
 
         self._graph = build_agent_graph()
 
@@ -209,6 +211,7 @@ class Orchestrator:
                     "enable_hitl": self.hitl_manager is not None,
                     "_hitl_manager": self.hitl_manager,
                     "pending_gates": [],
+                    "_tool_registry": self.tool_registry,
                 }
 
                 # ── 运行 Graph ──

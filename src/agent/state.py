@@ -44,6 +44,7 @@ class AgentGraphState(TypedDict):
     _mcp_tools: list              # MCP Server 加载的工具（LangChain BaseTool 列表）
     _streaming_mode: bool = False  # 是否开启实时流式推送（LLM token 级）
     _agent_registry: Any = None    # AgentRegistry 实例（Phase 1）
+    _tool_registry: Any = None     # ToolRegistry 实例（Tool System）
 
     # === P2P 通信（Phase 2） ===
     use_message_bus: bool = False

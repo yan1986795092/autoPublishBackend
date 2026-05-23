@@ -38,27 +38,32 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
     memory_section = f"\n\n{memory_context}" if memory_context else ""
 
     # ── 用 PromptBuilder 构建 ──
-    composed = (PromptBuilder()
-        .system("system.reviewer")
-        .instructions("review.task", {
-            "content": content[:3000],
-            "content_type": content_type,
-            "memory_section": memory_section,
-        })
-        .build())
+    builder = PromptBuilder()
+    builder.system("system.reviewer")
+    builder.instructions("review.task", {
+        "content": content[:3000],
+        "content_type": content_type,
+        "memory_section": memory_section,
+    })
 
+    # 注入工具描述
+    tool_descriptions = task_input.get("_tool_descriptions", "")
+    if tool_descriptions:
+        builder.context(f"\n可用工具：\n{tool_descriptions}")
+
+    composed = builder.build()
     lc_messages = composed.build_langchain()
 
-    # ── 流式 LLM 调用 ──
-    on_llm_chunk = task_input.get("_on_llm_chunk")
-    chunks: list[str] = []
-    async for chunk in llm.astream(lc_messages):
-        if chunk.content:
-            chunks.append(chunk.content)
-            if on_llm_chunk:
-                await on_llm_chunk(chunk.content)
+    # ── 工具感知的 LLM 调用 ──
+    from .tool_utils import call_llm
 
-    quality = "".join(chunks)
+    quality = await call_llm(
+        llm, lc_messages,
+        tool_registry=task_input.get("_tool_registry"),
+        agent_type="ReviewAgent",
+        stream=True,
+        on_chunk=task_input.get("_on_llm_chunk"),
+    )
     passed = len(banned_found) == 0 and "需要修改" not in quality
     suggestions = [
         line.strip() for line in quality.split("\n")

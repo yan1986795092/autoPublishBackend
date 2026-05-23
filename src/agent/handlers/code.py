@@ -1,6 +1,6 @@
 """CodeAgent — 代码示例生成、技术文档、沙箱执行
 
-使用 PromptEngine 构建 prompt。
+使用 PromptEngine 构建 prompt，支持工具调用。
 """
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -8,6 +8,7 @@ from langchain_openai import ChatOpenAI
 from ..agent_utils import extract_output
 from src.prompts import PromptBuilder
 from src.tools.code_runner import CodeRunner
+from .tool_utils import call_llm
 
 
 async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -16,17 +17,28 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
     run_code = task_input.get("run_code", False)
 
     # ── 用 PromptBuilder 构建 ──
-    composed = (PromptBuilder()
-        .system("system.role", {"role": "技术写作者", "description": f"生成{language}代码示例"})
-        .instructions("code.task", {"topic": topic, "language": language})
-        .build())
+    builder = PromptBuilder()
+    builder.system("system.role", {"role": "技术写作者", "description": f"生成{language}代码示例"})
+    builder.instructions("code.task", {"topic": topic, "language": language})
 
+    # 注入工具描述
+    tool_descriptions = task_input.get("_tool_descriptions", "")
+    if tool_descriptions:
+        builder.context(f"\n可用工具：\n{tool_descriptions}")
+
+    composed = builder.build()
     lc_messages = composed.build_langchain()
 
-    response = await llm.ainvoke(lc_messages)
+    # ── 工具感知的 LLM 调用 ──
+    response_text = await call_llm(
+        llm, lc_messages,
+        tool_registry=task_input.get("_tool_registry"),
+        agent_type="CodeAgent",
+        stream=False,
+    )
 
-    content = extract_output(response.content)
-    tokens = len(response.content) // 4
+    content = extract_output(response_text)
+    tokens = len(response_text) // 4
 
     output: dict = {
         "content": content,

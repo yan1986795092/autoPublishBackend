@@ -2,6 +2,7 @@
 
 包装现有 HANDLER_MAP 中的 handler 函数，注入角色身份信息。
 Handler 函数保持不变，BaseAgent 只是在其上包装一层 profile 上下文。
+新增 ToolRegistry 感知能力，支持为 LLM 绑定可见工具。
 """
 from __future__ import annotations
 
@@ -81,6 +82,30 @@ class BaseAgent:
         if memory_context:
             task_input = {**task_input, "_memory_context": memory_context}
         return await self.execute(task_input, mcp_tools)
+
+    # ── 工具绑定 ──
+
+    def bind_tools(self, tool_registry: Any) -> None:
+        """从 ToolRegistry 为 Agent 的 LLM 绑定可见的工具
+
+        调用后 self._llm 被替换为绑定了工具的 LLM。
+        生成工具描述并缓存到 self._tool_descriptions。
+        """
+        if self._llm is None or tool_registry is None:
+            return
+
+        from ..tools import bind_agent_tools, tool_prompt_section
+
+        bound = bind_agent_tools(self._llm, self.profile.name, tool_registry)
+        if bound is not self._llm:
+            self._llm = bound
+            self._tool_descriptions = tool_prompt_section(
+                self.profile.name, tool_registry,
+            )
+            logger.info(
+                "BaseAgent[%s]: 已绑定工具，可用工具描述: %s",
+                self.name, self._tool_descriptions[:100] if self._tool_descriptions else "无",
+            )
 
     # ── 内部 ──
 

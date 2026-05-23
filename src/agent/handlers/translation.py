@@ -1,8 +1,12 @@
-"""TranslationAgent — 多语言翻译，保留格式与语气"""
+"""TranslationAgent — 多语言翻译，保留格式与语气
+
+支持工具调用（self_reflect 等）。
+"""
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import extract_output
+from .tool_utils import call_llm
 
 LANG_NAMES: dict[str, str] = {
     "en": "English",
@@ -54,13 +58,26 @@ async def handle_translation(task_input: dict, llm: ChatOpenAI, mcp_tools: list 
 
     lang_name = LANG_NAMES.get(target_lang, target_lang)
 
-    response = await llm.ainvoke([
-        SystemMessage(content=TRANSLATION_SYSTEM.format(target_lang=lang_name)),
-        HumanMessage(content=content[:8000]),
-    ])
+    # 注入工具描述到系统提示
+    tool_descriptions = task_input.get("_tool_descriptions", "")
+    sys_prompt = TRANSLATION_SYSTEM.format(target_lang=lang_name)
+    if tool_descriptions:
+        sys_prompt += f"\n\n可用工具：\n{tool_descriptions}"
 
-    translated = extract_output(response.content)
-    tokens = len(response.content) // 4
+    lc_messages = [
+        SystemMessage(content=sys_prompt),
+        HumanMessage(content=content[:8000]),
+    ]
+
+    response_text = await call_llm(
+        llm, lc_messages,
+        tool_registry=task_input.get("_tool_registry"),
+        agent_type="TranslationAgent",
+        stream=False,
+    )
+
+    translated = extract_output(response_text)
+    tokens = len(response_text) // 4
 
     return {
         "status": "completed",
