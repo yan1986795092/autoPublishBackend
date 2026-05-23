@@ -2,6 +2,8 @@
 
 违禁词检查相关函数 (check_banned_words / BANNED_WORDS / 正则模式)
 统一由 src.utils.evaluator 维护，此处通过 import 引用避免重复。
+
+System Prompt 模板现在统一由 src.prompts 管理，此处保留引用以向后兼容。
 """
 
 from __future__ import annotations
@@ -14,28 +16,14 @@ from src.utils.evaluator import (
     seo_suggestions,
 )
 
-# ── 内容类型 Prompt 模板 ──
+# ── Prompt 模板（从 prompts 模块导入，保持向后兼容）──
+from src.prompts import (
+    CONTENT_TYPE_PROMPTS,
+    STYLE_GUIDES,
+)
 
-CONTENT_TYPE_PROMPTS = {
-    "blog": "写一篇技术博客文章。要求：有吸引力的标题、引言、2-4个主要章节、结论。使用专业但易懂的语言。",
-    "social_post": "写一篇社交媒体帖子。要求：吸引眼球的开头、简短有力、有互动引导。",
-    "copywriting": "写一篇营销文案。要求：抓住痛点的标题、价值主张、行动号召。",
-    "script": "写一个视频脚本。要求：口播自然、有开场钩子、分镜描述。",
-    "newsletter": "写一封邮件Newsletter。要求：友好的问候语、2-3个核心内容。",
-    "report": "写一份分析报告。要求：数据驱动、结构化、有结论和建议。",
-    "weibo_post": "写一条微博/即刻短帖。要求：140字以内、一针见血、有话题标签、适合快速传播。",
-    "twitter_thread": "写一条 Twitter/X Thread。要求：英文为主、开头hook吸引点击、每条推文独立可读、有逻辑递进、结尾带CTA和话题标签。",
-    "podcast_script": "写一期播客脚本。要求：有开场介绍、嘉宾引入（如适用）、2-3个讨论环节、收尾总结和预告。",
-}
-
-STYLE_GUIDES = {
-    "技术": "使用专业术语但解释清楚，代码示例要完整可运行。",
-    "种草": "第一人称体验分享，突出真实感和代入感。",
-    "干货": "信息密度高，条理清晰，每个观点都有论据支持。",
-    "幽默": "轻松诙谐的语气，适当使用比喻和夸张。",
-    "深度": "系统全面，有独特见解，引用研究和数据。",
-    "教程": "步骤清晰，从零开始，每个步骤都有预期结果说明。",
-}
+# ── 这些常量将逐步迁移到 prompts/builtins/ 中 ──
+# 保留在此处确保现有 import 不中断
 
 QUALITY_CHECKS = [
     "内容是否完整，有开头和结尾",
@@ -92,5 +80,4 @@ Output format:
       "reasoning": "why this task is needed"
     }
   ]
-}
-```"""
+}```"""

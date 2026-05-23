@@ -1,8 +1,12 @@
-"""CodeAgent — 代码示例生成、技术文档、沙箱执行"""
+"""CodeAgent — 代码示例生成、技术文档、沙箱执行
+
+使用 PromptEngine 构建 prompt。
+"""
 
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
-from ..agent_utils import SYSTEM_PROMPT_TEMPLATE, extract_output
+from ..agent_utils import extract_output
+from src.prompts import PromptBuilder
 from src.tools.code_runner import CodeRunner
 
 
@@ -11,20 +15,15 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
     language = task_input.get("language", "python")
     run_code = task_input.get("run_code", False)
 
-    prompt = f"""## 技术内容创作
+    # ── 用 PromptBuilder 构建 ──
+    composed = (PromptBuilder()
+        .system("system.role", {"role": "技术写作者", "description": f"生成{language}代码示例"})
+        .instructions("code.task", {"topic": topic, "language": language})
+        .build())
 
-主题：{topic}
-语言：{language}
+    lc_messages = composed.build_langchain()
 
-要求：
-- 代码可运行
-- 添加中文注释
-- 考虑边界情况"""
-
-    response = await llm.ainvoke([
-        SystemMessage(content=SYSTEM_PROMPT_TEMPLATE.format(role="技术写作者", description=f"生成{language}代码示例")),
-        HumanMessage(content=prompt),
-    ])
+    response = await llm.ainvoke(lc_messages)
 
     content = extract_output(response.content)
     tokens = len(response.content) // 4
@@ -62,6 +61,7 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
         "agent_type": "CodeAgent",
         "output": output,
         "tokens_used": tokens,
+        "prompt_versions": composed.used_templates,
         "thinking_steps": [{
             "agent": "CodeAgent",
             "action": "代码执行完成" if run_code else "代码生成完成",
@@ -93,5 +93,4 @@ def _extract_code_block(text: str, language: str) -> str:
                 if "```" in after:
                     return after.split("```", 1)[0].strip()
 
-    # 无 markdown 标记时返回全部内容
     return text.strip()
