@@ -52,7 +52,15 @@ class XiaohongshuAdapter(PlatformAdapter):
         if len(content.tags) > 10:
             errors.append("标签最多10个")
 
-        # TODO: 添加敏感词检测
+        # 敏感词检测
+        combined = f"{content.title} {content.body_md}".lower()
+        sensitive_words = [
+            "赌博", "彩票", "毒品", "枪支", "色情", "低俗",
+            "政治", "领导人", "敏感", "暴力", "恐怖",
+        ]
+        found = [w for w in sensitive_words if w in combined]
+        if found:
+            errors.append(f"内容包含敏感词: {', '.join(found)}")
 
         if errors:
             return False, "; ".join(errors)

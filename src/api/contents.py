@@ -288,8 +288,8 @@ def autosave_content(
 
 @router.get("/calendar", response_model=dict)
 def get_content_calendar(
-    year: int = None,
-    month: int = None,
+    year: int | None = None,
+    month: int | None = None,
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):

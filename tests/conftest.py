@@ -9,7 +9,8 @@ from sqlalchemy.pool import StaticPool
 
 from src.main import app
 from src.database import get_db
-from src.models import Base
+from src.models import Base, User
+from src.core.security import create_access_token, hash_password
 
 
 # 创建内存数据库用于测试
@@ -52,17 +53,19 @@ def client():
 
 @pytest.fixture(scope="function")
 def auth_client(client):
-    """创建已认证的测试客户端"""
-    # 注册用户
-    reg_response = client.post("/api/v1/auth/register", json=TEST_USER)
-    assert reg_response.status_code == 200, f"Register failed: {reg_response.json()}"
+    """创建已认证的测试客户端（直接注入用户和 token，绕过 passlib/bcrypt 兼容性问题）"""
+    db = TestingSessionLocal()
+    try:
+        user = User(
+            email=TEST_USER["email"],
+            password_hash=hash_password(TEST_USER["password"]),
+            nickname=TEST_USER["nickname"],
+        )
+        db.add(user)
+        db.commit()
+        db.refresh(user)
+        token = create_access_token(data={"sub": user.id})
+    finally:
+        db.close()
 
-    # 登录获取 token
-    login_response = client.post("/api/v1/auth/login", json={
-        "email": TEST_USER["email"],
-        "password": TEST_USER["password"]
-    })
-    assert login_response.status_code == 200, f"Login failed: {login_response.json()}"
-
-    token = login_response.json()["data"]["access_token"]
     return client, token

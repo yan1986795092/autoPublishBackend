@@ -20,8 +20,7 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-3.5-turbo-16k"
     openai_base_url: str = "https://api.openai.com/v1"
 
-    anthropic_api_key: Optional[str] = None
-    anthropic_model: str = "claude-3-haiku-20240307"
+    # anthropic config removed — was never used at runtime
 
     # 阿里通义千问 — 兼容 QWEN_API_KEY / DASHSCOPE_API_KEY 两种环境变量名
     qwen_api_key: Optional[str] = Field(default=None, validation_alias=AliasChoices("qwen_api_key", "QWEN_API_KEY", "DASHSCOPE_API_KEY"))
@@ -30,7 +29,7 @@ class Settings(BaseSettings):
 
     zhipu_api_key: Optional[str] = None
     zhipu_model: str = "glm-4-flash"
-    zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+    zhipu_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4"
 
     default_llm_provider: str = "zhipu"
     default_temperature: float = 0.7
@@ -94,6 +93,49 @@ class Settings(BaseSettings):
             "api_key": api_key or "",
             "base_url": base_url or "",
         }
+
+    # ========== Logging configuration ==========
+    log_level: str = "INFO"
+    log_json_format: bool = False
+
+    # ========== Agent feature flags ==========
+    enable_reflection: bool = False
+    enable_message_bus: bool = False
+    enable_hitl: bool = False
+    enable_tools: bool = True
+    enable_agent_registry: bool = True
+
+    # ========== MCP (Model Context Protocol) ==========
+    # MCP Server 总开关
+    mcp_enabled: bool = True
+    # 各 MCP Server 独立开关（留空则从环境变量读取）
+    mcp_enable_search: bool = True
+    mcp_enable_brave: bool = False
+    mcp_enable_jina: bool = True
+    mcp_enable_tavily: bool = False
+    mcp_enable_pexels: bool = False
+    mcp_enable_github: bool = False
+
+    # ========== Worker / orchestration ==========
+    worker_max_retries: int = 3
+    orchestrator_timeout: float = 180.0
+    task_concurrency: int = 3
+
+    # ========== Agent token budgets ==========
+    agent_token_budgets: dict = {
+        "ManagerAgent": 4000,
+        "WritingAgent": 4000,
+        "SEOAgent": 1000,
+        "ReviewAgent": 1500,
+        "DiagramAgent": 1500,
+        "ImageAgent": 500,
+        "HotTopicAgent": 500,
+        "CodeAgent": 2000,
+        "WebSearch": 500,
+        "PlatformAdapter": 1000,
+        "TranslationAgent": 1500,
+        "URLCrawler": 0,
+    }
 
     class Config:
         env_file = ".env"

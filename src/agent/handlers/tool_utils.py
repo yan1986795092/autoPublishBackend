@@ -73,10 +73,23 @@ async def execute_tool_calls(
     Returns:
         追加了 ToolMessage 后的消息列表
     """
+    import json as _json
+
     for tc in tool_calls:
         tool_name = tc.get("name", "")
-        tool_args = tc.get("args", {})
+        raw_args = tc.get("args", {})
         tool_id = tc.get("id", "") or tc.get("tool_call_id", "")
+
+        # args 可能是 dict 或 JSON 字符串，统一转为 dict
+        if isinstance(raw_args, str):
+            try:
+                tool_args = _json.loads(raw_args)
+            except _json.JSONDecodeError:
+                tool_args = {"_raw": raw_args}
+        elif isinstance(raw_args, dict):
+            tool_args = raw_args
+        else:
+            tool_args = {"_raw": str(raw_args)}
 
         if tool_registry is None:
             result_text = f"错误: 工具系统未启用"

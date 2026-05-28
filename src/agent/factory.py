@@ -12,33 +12,41 @@ logger = logging.getLogger(__name__)
 def create_orchestrator(
     router: Optional[ModelRouter] = None,
     mcp_tools: Optional[list] = None,
-    enable_agent_registry: bool = True,
-    enable_message_bus: bool = False,
-    enable_reflection: bool = False,
-    enable_hitl: bool = False,
-    enable_tools: bool = True,
+    enable_agent_registry: Optional[bool] = None,
+    enable_message_bus: Optional[bool] = None,
+    enable_reflection: Optional[bool] = None,
+    enable_hitl: Optional[bool] = None,
+    enable_tools: Optional[bool] = None,
     **kwargs,
 ) -> Orchestrator:
     """创建 Orchestrator 实例，用 ModelRouter 为各 Agent 分配独立 LLM 实例。
 
-    支持 Phase 1-5 所有组件 + Tool System（条件启用，默认关闭确保向后兼容）。
+    支持 Phase 1-5 所有组件 + Tool System（条件启用，默认从 Settings 读取）。
 
     Args:
         router: ModelRouter 实例，不传则自动创建
         mcp_tools: 可选的 MCP 工具列表
-        enable_agent_registry: 是否启用 AgentRegistry（Phase 1）
-        enable_message_bus: 是否启用 P2P 通信（Phase 2）
-        enable_reflection: 是否启用反思回路（Phase 3）
-        enable_hitl: 是否启用 HITL（Phase 4）
-        enable_tools: 是否启用 ToolRegistry（Tool System）
+        enable_agent_registry: 是否启用 AgentRegistry，默认读取 settings.enable_agent_registry
+        enable_message_bus: 是否启用 P2P 通信，默认读取 settings.enable_message_bus
+        enable_reflection: 是否启用反思回路，默认读取 settings.enable_reflection
+        enable_hitl: 是否启用 HITL，默认读取 settings.enable_hitl
+        enable_tools: 是否启用 ToolRegistry，默认读取 settings.enable_tools
         **kwargs: 传递给 Orchestrator 的额外参数
 
     Returns:
         已就绪的 Orchestrator 实例
     """
+    from src.config import get_settings
+    _settings = get_settings()
+    enable_agent_registry = enable_agent_registry if enable_agent_registry is not None else _settings.enable_agent_registry
+    enable_message_bus = enable_message_bus if enable_message_bus is not None else _settings.enable_message_bus
+    enable_reflection = enable_reflection if enable_reflection is not None else _settings.enable_reflection
+    enable_hitl = enable_hitl if enable_hitl is not None else _settings.enable_hitl
+    enable_tools = enable_tools if enable_tools is not None else _settings.enable_tools
+
     router = router or ModelRouter()
 
-    # 按 Agent 类型获取已绑定 MCP 工具的 LLM
+    # 按 Agent 类型获取 LLM（工具绑定统一由 ToolRegistry 处理）
     chat_models = {}
     for agent_type in [
         "ManagerAgent", "WritingAgent", "SEOAgent", "ReviewAgent",
@@ -46,12 +54,7 @@ def create_orchestrator(
         "PlatformAdapter", "TranslationAgent",
     ]:
         try:
-            # WebSearch/ManagerAgent 始终绑定 MCP 工具
-            needs_tools = agent_type in ("WebSearch", "ManagerAgent")
-            chat_models[agent_type] = router.get_chat_model(
-                agent_type,
-                tools=mcp_tools if needs_tools and mcp_tools else None,
-            )
+            chat_models[agent_type] = router.get_chat_model(agent_type)
         except Exception:
             pass
 

@@ -9,9 +9,9 @@ from src.agent.schemas import AgentTask, ExecutionPlan, TaskStatus, UsageInfo
 from src.agent.state import AgentGraphState
 from src.agent.nodes import (
     classify_and_decompose,
-    find_ready_tasks,
+    schedule_and_execute,
     merge_and_finish,
-    should_continue,
+    should_continue_or_finish,
 )
 
 
@@ -134,7 +134,7 @@ class TestGraphNodes:
             "_task_queue_ref": None,
             "_llm_models": {},
         }
-        result = await find_ready_tasks(state)
+        result = await schedule_and_execute(state)
         assert len(result["ready_tasks"]) == 2
 
     @pytest.mark.asyncio
@@ -168,7 +168,7 @@ class TestGraphNodes:
             "_task_queue_ref": None,
             "_llm_models": {},
         }
-        result = await find_ready_tasks(state)
+        result = await schedule_and_execute(state)
         assert len(result["ready_tasks"]) == 1
         assert result["ready_tasks"][0]["id"] == "b"
 
@@ -246,20 +246,20 @@ class TestGraphNodes:
 
 class TestShouldContinue:
     def test_should_continue_with_tasks(self):
-        """还有待执行任务 → continue"""
+        """有可执行的任务 → execute"""
         state: AgentGraphState = {
             "user_request": "test", "context": {},
             "plan": None, "plan_reasoning": "",
             "task_queue": [{"id": "a"}],
             "completed_task_ids": [], "failed_task_ids": [],
-            "task_results": {}, "ready_tasks": [],
+            "task_results": {}, "ready_tasks": [{"id": "a"}],
             "concurrency_limit": 3,
             "thinking_steps": [], "trace_task_id": "test", "start_time": time.time(),
             "pending_decision": None, "decision_result": None,
             "final_output": None, "error": None, "status": "running",
             "_async_task_id": "", "_task_queue_ref": None, "_llm_models": {},
         }
-        assert should_continue(state) == "continue"
+        assert should_continue_or_finish(state) == "execute"
 
     def test_should_continue_all_done(self):
         """所有任务完成 → done"""
@@ -279,7 +279,7 @@ class TestShouldContinue:
             "final_output": None, "error": None, "status": "running",
             "_async_task_id": "", "_task_queue_ref": None, "_llm_models": {},
         }
-        assert should_continue(state) == "done"
+        assert should_continue_or_finish(state) == "done"
 
 
 # ─────────────────────────────

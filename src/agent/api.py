@@ -4,7 +4,10 @@ from pydantic import BaseModel, ValidationError
 from typing import Optional, AsyncGenerator
 import asyncio
 import json
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 # ===================== SSE 流式接口 =====================
 
@@ -16,10 +19,12 @@ from .factory import create_orchestrator
 from .orchestrator import Orchestrator
 from .workflow.task_queue import task_queue, event_bus, StreamEvent
 from .workflow.worker import worker
+from .cache import agent_cache, llm_cache
 from src.api.auth import get_current_user
 from src.models import User
 from src.tools.vector_search import vector_search
 from src.tools.langchain import CrawlerTool
+from src.config import get_settings
 
 router = APIRouter(tags=["agent"])
 
@@ -369,10 +374,10 @@ async def agent_stream(
     支持事件类型：plan, task_created, thinking_step, llm_chunk, reasoning, progress, result, error, done
     """
 
-    task_id_placeholder = None  # 将在 enqueue 后填充
+    task_id_str = ""  # actual task_id set after enqueue
 
     async def event_generator() -> AsyncGenerator[dict, None]:
-        nonlocal task_id_placeholder
+        nonlocal task_id_str
         try:
             # 1. 快速生成执行计划（使用模板规划，避免 LLM 调用造成初始延迟）
             orchestrator = _create_orchestrator()
@@ -389,6 +394,7 @@ async def agent_stream(
                     "estimated_steps": plan.estimated_steps,
                     "tasks": [
                         {
+                            "id": t.id,
                             "agent_type": t.agent_type,
                             "input": t.input,
                             "dependencies": t.dependencies,
@@ -398,7 +404,14 @@ async def agent_stream(
                 }, ensure_ascii=False),
             }
 
-            # 2. 提交异步任务（传递预计算计划）
+            # 2. 创建 EventBus 订阅队列（线程安全队列用于跨协程传递事件）
+            evt_queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
+
+            async def on_event(event: StreamEvent) -> None:
+                """EventBus 回调：将事件放入队列"""
+                await evt_queue.put(event)
+
+            # 3. 提交异步任务（传递预计算计划）
             plan_dict = {
                 "goal": plan.goal,
                 "reasoning": plan.reasoning,
@@ -419,25 +432,18 @@ async def agent_stream(
                 user_id=current_user.id,
                 plan=plan_dict,
             )
-            task_id_placeholder = async_task.id
+            task_id_str = async_task.id
+
+            # 4. 订阅 EventBus（在 enqueue 之后，使用正确的 task_id）
+            event_bus.subscribe(task_id_str, on_event)
 
             yield {
                 "event": "task_created",
-                "data": json.dumps({"task_id": async_task.id}, ensure_ascii=False),
+                "data": json.dumps({"task_id": task_id_str}, ensure_ascii=False),
             }
 
-            # 3. 收集已完成推送的步骤索引（防止重复）
+            # 5. 收集已完成推送的步骤索引（防止重复）
             seen_step_count = 0
-
-            # 4. 创建 EventBus 订阅队列（线程安全队列用于跨协程传递事件）
-            evt_queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
-
-            async def on_event(event: StreamEvent) -> None:
-                """EventBus 回调：将事件放入队列"""
-                await evt_queue.put(event)
-
-            # 订阅 EventBus
-            event_bus.subscribe(async_task.id, on_event)
 
             try:
                 timeout_seconds = 600
@@ -456,7 +462,7 @@ async def agent_stream(
                     try:
                         event = await asyncio.wait_for(evt_queue.get(), timeout=1.0)
                     except asyncio.TimeoutError:
-                        task = task_queue.get_task(async_task.id)
+                        task = task_queue.get_task(task_id_str)
                         if not task:
                             break
                         if task.state.value not in ("completed", "failed", "cancelled"):
@@ -494,7 +500,7 @@ async def agent_stream(
 
                         yield {
                             "event": "done",
-                            "data": json.dumps({"task_id": async_task.id, "state": task.state.value}, ensure_ascii=False),
+                            "data": json.dumps({"task_id": task_id_str, "state": task.state.value}, ensure_ascii=False),
                         }
                         break
 
@@ -523,13 +529,13 @@ async def agent_stream(
                             "data": json.dumps(event.data, ensure_ascii=False),
                         }
                     elif et == "decision_required":
-                        task = task_queue.get_task(async_task.id)
+                        task = task_queue.get_task(task_id_str)
                         if task and task.pending_decision:
                             pd = task.pending_decision
                             yield {
                                 "event": "decision_required",
                                 "data": json.dumps({
-                                    "task_id": async_task.id,
+                                    "task_id": task_id_str,
                                     "decision_id": pd.get("decision_id"),
                                     "question": pd.get("question", ""),
                                     "options": pd.get("options", []),
@@ -544,7 +550,7 @@ async def agent_stream(
                         }
                         yield {
                             "event": "done",
-                            "data": json.dumps({"task_id": async_task.id, "state": "completed"}, ensure_ascii=False),
+                            "data": json.dumps({"task_id": task_id_str, "state": "completed"}, ensure_ascii=False),
                         }
                         break
                     elif et == "error":
@@ -554,13 +560,14 @@ async def agent_stream(
                         }
                         yield {
                             "event": "done",
-                            "data": json.dumps({"task_id": async_task.id, "state": "failed"}, ensure_ascii=False),
+                            "data": json.dumps({"task_id": task_id_str, "state": "failed"}, ensure_ascii=False),
                         }
                         break
 
             finally:
-                # 取消订阅 EventBus
-                event_bus.unsubscribe(async_task.id, on_event)
+                # 取消订阅 EventBus（task_id_str 已在 enqueue 后赋值）
+                if task_id_str:
+                    event_bus.unsubscribe(task_id_str, on_event)
 
         except Exception as e:
             yield {
@@ -577,10 +584,46 @@ async def agent_stream(
 class URLCrawlRequest(BaseModel):
     url: str
     max_length: int = 3000
-    analyze: bool = False  # 是否进一步用 Agent 分析抓取内容
+    analyze: bool = False
 
 
 @router.post("/agent/crawl", response_model=AgentRunResponse)
+async def crawl_url(
+    request: URLCrawlRequest,
+    current_user: User = Depends(get_current_user),
+):
+    """抓取并分析指定 URL 的内容
+
+    如果 analyze=True，会进一步用 Agent 对抓取结果进行分析总结。
+    适用于长文阅读、竞品分析等场景。
+    """
+    try:
+        from .handlers.web_search import handle_url_crawl
+        crawl_result = await handle_url_crawl({
+            "url": request.url,
+            "max_length": request.max_length,
+        }, llm=None)
+
+        if crawl_result.get("status") == "failed":
+            return AgentRunResponse(success=False, error=crawl_result.get("error", "Crawl failed"))
+
+        if not request.analyze:
+            return AgentRunResponse(success=True, data=crawl_result)
+
+        orchestrator = _create_orchestrator()
+        content_text = crawl_result.get("output", {}).get("content", "")
+        result = await orchestrator.run(
+            user_request=f"分析以下从 {request.url} 抓取的内容，提取核心观点和关键信息：\n\n{content_text[:8000]}",
+            context={"force_template": "simple"},
+            timeout=120.0,
+        )
+        return AgentRunResponse(
+            success=result.status.value in ("completed", "partial"),
+            data={"crawl": crawl_result, "analysis": result.to_dict()},
+        )
+    except Exception as e:
+        logger.error(f"crawl_url failed: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ===================== 死信队列管理 =====================
@@ -667,44 +710,42 @@ async def invalidate_cache(
         llm_cache.invalidate()
     return AgentRunResponse(success=True, data={"message": "Cache invalidated"})
 
-async def crawl_url(
-    request: URLCrawlRequest,
-    current_user: User = Depends(get_current_user),
-):
-    """抓取并分析指定 URL 的内容
 
-    如果 analyze=True，会进一步用 Agent 对抓取结果进行分析总结。
-    适用于长文阅读、竞品分析等场景。
-    """
-    try:
-        from .handlers.web_search import handle_url_crawl
-        # URLCrawler 不需要 LLM，传 None
-        crawl_result = await handle_url_crawl({
-            "url": request.url,
-            "max_length": request.max_length,
-        }, llm=None)
+@router.get("/agent/metrics")
+async def agent_metrics():
+    """Agent 系统监控指标"""
+    settings = get_settings()
 
-        if crawl_result.get("status") == "failed":
-            return AgentRunResponse(success=False, error=crawl_result.get("error", "Crawl failed"))
+    active_tasks = sum(
+        1 for t in task_queue._tasks.values()
+        if t.state.value in ("pending", "running", "awaiting_input")
+    )
 
-        if not request.analyze:
-            return AgentRunResponse(success=True, data=crawl_result)
-
-        # analyze=True：用 WritingAgent 对抓取内容进行分析
-        orchestrator = _create_orchestrator()
-        content_text = crawl_result.get("output", {}).get("content", "")
-        result = await orchestrator.run(
-            user_request=f"分析以下从 {request.url} 抓取的内容，提取核心观点和关键信息：\n\n{content_text[:8000]}",
-            context={"force_template": "simple"},
-            timeout=120.0,
-        )
-        return AgentRunResponse(
-            success=result.status.value in ("completed", "partial"),
-            data={"crawl": crawl_result, "analysis": result.to_dict()},
-        )
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
+    return {
+        "success": True,
+        "data": {
+            "cache": {
+                "agent_cache": agent_cache.stats,
+                "llm_cache": llm_cache.stats,
+            },
+            "tasks": {
+                "active": active_tasks,
+                "dlq_size": len(task_queue._dead_letter_queue),
+            },
+            "worker": {
+                "running": worker._running,
+            },
+            "config": {
+                "debug": settings.debug,
+                "log_level": settings.log_level,
+                "default_llm_provider": settings.default_llm_provider,
+                "enable_reflection": settings.enable_reflection,
+                "enable_message_bus": settings.enable_message_bus,
+                "enable_hitl": settings.enable_hitl,
+                "worker_max_retries": settings.worker_max_retries,
+            },
+        },
+    }
 
 # ===================== WebSocket =====================
 

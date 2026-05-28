@@ -6,6 +6,7 @@ import asyncio
 
 from src.models import Content, ContentVersion, User, ContentStatus, Persona
 from src.schemas.content import GenerateRequest
+from src.utils.tokenizer import estimate_tokens
 
 
 # 预设系统模板
@@ -629,10 +630,15 @@ class ContentService:
         # 获取模板（优先 DB，回退硬编码）
         system_tmpl, db_template = self._get_template(request.platform_code)
 
+        length_pref = request.parameters.get("length", "medium") if request.parameters else "medium"
+        length_map = {"short": 500, "medium": 1500, "long": 3000}
+        length_words = length_map.get(length_pref, 1500)
+
         variables = {
             "topic": request.topic,
             "platform_code": request.platform_code,
-            "length": request.parameters.get("length", "medium") if request.parameters else "medium",
+            "length": length_pref,
+            "length_words": length_words,
             "creativity": request.parameters.get("creativity", 0.7) if request.parameters else 0.7,
             "tone": request.parameters.get("tone", "friendly") if request.parameters else "friendly",
         }
@@ -744,7 +750,7 @@ class ContentService:
             "content_html": content.content_html,
             "metadata": {
                 "model": model_name,
-                "tokens_used": len(result["content_md"]) // 4,
+                "tokens_used": estimate_tokens(result["content_md"]),
                 "tokens_cost_usd": 0,
                 "generation_time_ms": generation_time_ms,
             }
@@ -764,10 +770,15 @@ class ContentService:
         # 获取模板（优先 DB，回退硬编码）
         system_tmpl, db_template = self._get_template(request.platform_code)
 
+        length_pref = request.parameters.get("length", "medium") if request.parameters else "medium"
+        length_map = {"short": 500, "medium": 1500, "long": 3000}
+        length_words = length_map.get(length_pref, 1500)
+
         variables = {
             "topic": request.topic,
             "platform_code": request.platform_code,
-            "length": request.parameters.get("length", "medium") if request.parameters else "medium",
+            "length": length_pref,
+            "length_words": length_words,
             "creativity": request.parameters.get("creativity", 0.7) if request.parameters else 0.7,
             "tone": request.parameters.get("tone", "friendly") if request.parameters else "friendly",
         }
@@ -886,7 +897,7 @@ class ContentService:
                 'title': title,
                 'metadata': {
                     'model': model_name,
-                    'tokens_used': len(full_content) // 4,
+                    'tokens_used': estimate_tokens(full_content),
                     'tokens_cost_usd': 0,
                     'generation_time_ms': generation_time_ms,
                 }
@@ -896,7 +907,8 @@ class ContentService:
         except (Exception, asyncio.CancelledError) as e:
             import traceback
             traceback.print_exc()
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+            err_payload = {'type': 'error', 'message': str(e)}
+            yield f"data: {json.dumps(err_payload)}\n\n"
 
     def suggest_best_time(self, platform_code: str) -> dict:
         """基于预设规则建议最佳发布时间"""

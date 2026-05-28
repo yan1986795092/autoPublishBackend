@@ -6,7 +6,11 @@
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from src.prompts import PromptBuilder
+from src.utils.tokenizer import estimate_tokens
 from .tool_utils import call_llm
+import logging
+
+logger = logging.getLogger(__name__)
 
 
 async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -24,15 +28,14 @@ async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
 
     if llm:
         try:
-            composed = (PromptBuilder()
-                .system("system.diagram")
-                .instructions("diagram.task", {
-                    "topic": topic,
-                    "diagram_type": diagram_type,
-                })
-                .build())
-
-            lc_messages = composed.build_langchain()
+            builder = PromptBuilder()
+            builder.system("system.diagram")
+            builder.instructions("diagram.task", {
+                "topic": topic,
+                "diagram_type": diagram_type,
+            })
+            composed = builder.build()
+            lc_messages = builder.build_langchain()
             response_text = await call_llm(
                 llm, lc_messages,
                 tool_registry=task_input.get("_tool_registry"),
@@ -47,12 +50,12 @@ async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             return {
                 "status": "completed", "agent_type": "DiagramAgent",
                 "output": {"content": code, "diagram_type": diagram_type, "code": code, "rendered": True},
-                "tokens_used": len(code) // 4,
+                "tokens_used": estimate_tokens(code),
                 "prompt_versions": composed.used_templates,
                 "thinking_steps": [{"agent": "DiagramAgent", "action": "图表生成完成", "reasoning": f"生成{diagram_type}图：{topic}", "status": "done"}],
             }
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("DiagramAgent LLM call failed, falling back to template: %s", e)
 
     code = f"mindmap\n  root(({topic}))\n    核心概念\n      定义\n    关键技术\n      技术A\n    应用场景"
     return {

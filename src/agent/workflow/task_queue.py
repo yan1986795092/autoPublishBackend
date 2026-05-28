@@ -4,7 +4,10 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable, Awaitable, Optional
 import asyncio
+import logging
 import uuid
+
+logger = logging.getLogger(__name__)
 
 
 class TaskState(str, Enum):
@@ -32,7 +35,7 @@ class AsyncTask:
     id: str
     user_id: str
     prompt: str
-    plan: Optional[dict] = None         # 预生成的执行计划（SSE 传递到 Worker）
+    plan: Optional[dict] = None
     state: TaskState = TaskState.PENDING
     progress: float = 0.0
     progress_message: str = ""
@@ -45,6 +48,7 @@ class AsyncTask:
     completed_at: Optional[str] = None
     metadata: dict = field(default_factory=dict)
     pending_decision: Optional[dict] = None
+    retry_count: int = 0
 
     def to_dict(self) -> dict:
         d: dict[str, Any] = {
@@ -122,14 +126,14 @@ class EventBus:
             for cb in self._subscribers[event.task_id]:
                 try:
                     await cb(event)
-                except Exception:
-                    pass
+                except Exception as e:
+                    logger.warning("EventBus subscriber failed for task %s: %s", event.task_id, e)
         # 发送给全局订阅者
         for cb in self._all_subscribers:
             try:
                 await cb(event)
-            except Exception:
-                pass
+            except Exception as e:
+                logger.warning("EventBus global subscriber failed for task %s: %s", event.task_id, e)
 
 # 全局单例
 event_bus = EventBus()
@@ -233,8 +237,8 @@ class TaskQueue:
         """发布事件到 EventBus，异步执行不阻塞主流程"""
         try:
             await event_bus.publish(event)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("_publish_event failed: %s", e)
 
     def list_tasks(self, user_id: Optional[str] = None, limit: int = 20) -> list[AsyncTask]:
         self._cleanup_old_tasks()
@@ -257,7 +261,7 @@ class TaskQueue:
         """获取死信队列中的任务列表"""
         return sorted(self._dead_letter_queue.values(), key=lambda t: t.created_at, reverse=True)[:limit]
 
-    def retry_from_dlq(self, task_id: str) -> Optional[AsyncTask]:
+    async def retry_from_dlq(self, task_id: str) -> Optional[AsyncTask]:
         """从死信队列中取出任务重新入队重试"""
         task = self._dead_letter_queue.pop(task_id, None)
         if task:
@@ -266,7 +270,7 @@ class TaskQueue:
             task.completed_at = None
             task.retry_count = (task.retry_count or 0) + 1
             self._tasks[task_id] = task
-            self._queue.put_nowait(task)
+            await self._queue.put(task)
         return task
 
     async def publish_thinking_step(self, task_id: str, step_data: dict) -> None:

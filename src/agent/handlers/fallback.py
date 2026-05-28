@@ -7,20 +7,22 @@ import json
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from .tool_utils import call_llm
+from src.utils.tokenizer import estimate_tokens
 
 
-async def handle_fallback(task: dict, llm: ChatOpenAI, _state: dict, mcp_tools: list | None = None) -> dict:
+async def handle_fallback(task: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     agent_type = task.get("agent_type", "Unknown")
     task_input = task.get("input", {})
 
     if not llm:
         return {
-            "status": "completed", "agent_type": agent_type,
-            "output": {"content": f"[Mock] {agent_type} completed", "type": "text"},
+            "status": "partial", "agent_type": agent_type,
+            "output": {"content": f"[Mock] {agent_type} completed (no LLM available)", "type": "text"},
             "tokens_used": 0, "thinking_steps": [],
+            "warning": f"No LLM configured for {agent_type}, returning mock result",
         }
 
-    tool_registry = _state.get("_tool_registry") if isinstance(_state, dict) else None
+    tool_registry = task.get("_tool_registry")
 
     try:
         lc_messages = [
@@ -36,7 +38,7 @@ async def handle_fallback(task: dict, llm: ChatOpenAI, _state: dict, mcp_tools: 
         return {
             "status": "completed", "agent_type": agent_type,
             "output": {"content": response_text, "type": "text"},
-            "tokens_used": len(response_text) // 4, "thinking_steps": [],
+            "tokens_used": estimate_tokens(response_text), "thinking_steps": [],
         }
     except Exception as e:
         return {

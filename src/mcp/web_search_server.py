@@ -186,7 +186,7 @@ async def fetch_page(
         result = f"**{title or url}**\n\n"
         if meta_desc:
             result += f"📝 {meta_desc[:200]}\n\n"
-        result += f"**正文内容：**\n{content}"
+        result += f"**正文内容：**\n\n{content}"
 
         if len(content) >= max_length:
             result += f"\n\n_(内容已被截断至 {max_length} 字)_"

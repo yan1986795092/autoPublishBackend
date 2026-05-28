@@ -127,11 +127,9 @@ def factcheck_report(text: str, known_facts: Optional[dict] = None) -> dict:
     return {
         "total_claims_checked": total_issues,
         "claims_without_citation": sum(1 for c in claims if c.get("needs_citation")),
-        "date_issues": len(date_issues),
-        "fact_mismatches": len(fact_issues),
+        "date_issues": date_issues,
+        "fact_mismatches": fact_issues,
         "severity_summary": severity_count,
         "claims": claims[:10],
-        "date_issues": date_issues,
-        "fact_issues": fact_issues,
         "passed": severity_count.get("error", 0) == 0 and severity_count.get("warning", 0) == 0,
     }

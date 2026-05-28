@@ -21,29 +21,30 @@ from src.memory import memory_manager
 
 logger = logging.getLogger(__name__)
 
-# Agent 级别的 Token Budget 配置
-AGENT_TOKEN_BUDGETS: dict[str, int] = {
-    "ManagerAgent": 4000,
-    "WritingAgent": 4000,
-    "SEOAgent": 1000,
-    "ReviewAgent": 1500,
-    "DiagramAgent": 1500,
-    "ImageAgent": 500,
-    "HotTopicAgent": 500,
-    "CodeAgent": 2000,
-    "WebSearch": 500,
-    "PlatformAdapter": 1000,
-    "TranslationAgent": 1500,
-    "URLCrawler": 0,  # 不需要 LLM
-}
-
-DEFAULT_TOKEN_BUDGET = 2000
+# Token Budget 配置 — 已迁移至 Settings.agent_token_budgets
 
 # 常量/模板已迁移至 agent_utils.py 和各 Agent 模块
 
 # ──────────────────────────────────────────────
 # 辅助函数
 # ──────────────────────────────────────────────
+
+def _resolve_dep_id(dep: str | int, task_queue: list[dict]) -> str | None:
+    """将依赖引用统一解析为 task_id（支持数字索引和字符串 ID）
+
+    - 数字索引：取 task_queue[dep] 的 id 字段
+    - 字符串 ID：在 task_queue 中查找对应 id 的任务，返回其 id
+    - 找不到时返回 None（表示依赖引用无效，应视为未满足）
+    """
+    if isinstance(dep, int):
+        if 0 <= dep < len(task_queue):
+            return task_queue[dep].get("id")
+        return None
+    dep_str = str(dep)
+    for t in task_queue:
+        if t.get("id") == dep_str:
+            return dep_str
+    return None
 
 def _classify_complexity(user_request: str) -> str:
     """对用户需求进行复杂度分类"""
@@ -101,33 +102,12 @@ def _build_template_plan(user_request: str, complexity: str) -> dict:
 
 
 def _get_llm(state: AgentGraphState, agent_type: str) -> ChatOpenAI:
-    """从 state 中获取对应 agent 类型的 LLM 实例（已绑定 MCP 工具）"""
+    """从 state 中获取对应 agent 类型的 LLM 实例"""
     models = state.get("_llm_models", {})
     llm = models.get(agent_type, models.get("default"))
     if llm is None:
         logger.warning(f"No LLM configured for agent_type=%s, falling back to mock mode", agent_type)
     return llm
-
-
-def _get_llm_with_tools(state: AgentGraphState, agent_type: str) -> tuple[ChatOpenAI, list]:
-    """获取 LLM 实例及其绑定的 MCP 工具
-
-    Returns:
-        (llm, tools): LLM 和该 agent 可用的 MCP 工具列表
-    """
-    llm = _get_llm(state, agent_type)
-    mcp_tools = state.get("_mcp_tools", [])
-
-    # 哪些 Agent 类型可以使用 MCP 工具
-    tool_enabled_agents = {"WebSearch", "ManagerAgent", "WritingAgent", "SEOAgent", "ReviewAgent"}
-
-    if llm is not None and mcp_tools and agent_type in tool_enabled_agents:
-        from langchain_openai import ChatOpenAI
-        from typing import List
-        tool_llm = llm.bind_tools(mcp_tools)
-        return tool_llm, mcp_tools
-
-    return llm, []
 
 
 def _update_progress(state: AgentGraphState, progress: float, message: str = "", step: str = "") -> None:
@@ -150,8 +130,8 @@ async def _publish_streaming_event(state: AgentGraphState, event_type: str, data
                 await task_queue.publish_llm_chunk(task_id, data)
             elif event_type == "reasoning":
                 await task_queue.publish_reasoning(task_id, data)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Failed to publish streaming event (%s): %s", event_type, e)
 
 
 def _add_thinking_step(state: AgentGraphState, agent: str, action: str, reasoning: str = "",
@@ -324,15 +304,12 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
     completed_ids = set(state.get("completed_task_ids", []))
     failed_ids = set(state.get("failed_task_ids", []))
 
-    def _resolve_dep_id(dep: str | int) -> str:
-        """将依赖引用统一解析为 task_id（支持数字索引和字符串 ID）"""
-        if isinstance(dep, int) and 0 <= dep < len(task_queue):
-            return task_queue[dep].get("id", str(dep))
-        return str(dep)
-
-    def deps_met(task: dict) -> bool:
+    def deps_met(task: dict, task_queue: list[dict], completed_ids: set, failed_ids: set) -> bool:
         for dep in task.get("dependencies", []):
-            dep_id = _resolve_dep_id(dep)
+            dep_id = _resolve_dep_id(dep, task_queue)
+            # None = 依赖引用无效（索引越界或 ID 不存在），视为未满足
+            if dep_id is None:
+                return False
             if dep_id not in completed_ids and dep_id not in failed_ids:
                 return False
         return True
@@ -341,7 +318,7 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
         t for t in task_queue
         if t.get("id") not in completed_ids
         and t.get("id") not in failed_ids
-        and deps_met(t)
+        and deps_met(t, task_queue, completed_ids, failed_ids)
     ]
 
     total_done = len(completed_ids) + len(failed_ids)
@@ -350,11 +327,13 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
     # 死锁检测
     if not ready and total_done < total_tasks:
         stuck = [t for t in task_queue if t.get("id") not in completed_ids and t.get("id") not in failed_ids]
-        deps_unmet = sum(
-            1 for t in stuck
-            for d in t.get("dependencies", [])
-            if _resolve_dep_id(d) not in completed_ids and _resolve_dep_id(d) not in failed_ids
-        )
+        deps_unmet = 0
+        for t in stuck:
+            for d in t.get("dependencies", []):
+                resolved = _resolve_dep_id(d, task_queue)
+                # 只有有效依赖才计入未满足数；无效引用本身不阻塞死锁检测
+                if resolved is not None and resolved not in completed_ids and resolved not in failed_ids:
+                    deps_unmet += 1
         if deps_unmet == 0:
             logger.warning(f"Deadlock detected: {len(stuck)} tasks stuck with no unmet dependencies")
             return {
@@ -375,18 +354,29 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
     """并行执行当前批次的所有任务
 
     注意：此节点仅负责执行，ready_tasks 的检查由 schedule_and_execute 完成。
+
+    重要：step_number 在任务开始前预先分配，防止并行执行时竞态导致编号重复。
     """
     ready_tasks = state.get("ready_tasks", [])
+    existing_steps = state.get("thinking_steps", [])
+    base_step = len(existing_steps)
 
     concurrency = state.get("concurrency_limit", 3)
     semaphore = asyncio.Semaphore(concurrency)
 
-    async def run_one(task: dict) -> tuple[str, dict]:
+    async def run_one(task: dict, task_step_number: int) -> tuple[str, dict]:
         async with semaphore:
-            result = await _run_single_agent_task(task, state)
+            result = await _run_single_agent_task(task, state, task_step_number=task_step_number)
             return task["id"], result
 
-    results_list = await asyncio.gather(*[run_one(t) for t in ready_tasks])
+    tasks_with_steps = [
+        (t, base_step + i + 1)
+        for i, t in enumerate(ready_tasks)
+    ]
+    results_list = await asyncio.gather(
+        *[run_one(t, sn) for t, sn in tasks_with_steps],
+        return_exceptions=True,
+    )
 
     task_results = dict(state.get("task_results", {}))
     completed = list(state.get("completed_task_ids", []))
@@ -394,6 +384,17 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
     new_steps = []
 
     for task_id, result in results_list:
+        # 防御：一个 Agent 抛异常不应导致整批失败；其余继续
+        if isinstance(result, Exception):
+            logger.error("Agent task %s raised exception: %s", task_id, result)
+            failed.append(task_id)
+            task_results[task_id] = {
+                "status": "failed",
+                "error": str(result),
+                "thinking_steps": [],
+            }
+            continue
+
         task_results[task_id] = result
         if result.get("status") in ("completed", "partial"):
             completed.append(task_id)
@@ -415,7 +416,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
 # 4. merge_and_finish 节点
 # ──────────────────────────────────────────────
 
-async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
+async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_number: int = 0) -> dict:
     """根据 agent_type 路由到对应的处理函数
 
     功能集成：
@@ -423,6 +424,12 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
     - Agent Cache 缓存复用
     - 上下文隔离（只传 public 内容）
     - 实时流式推送：任务开始、完成、LLM token 均实时推送给前端
+
+    Args:
+        task: 待执行的任务 dict
+        state: LangGraph 状态（读取用，不直接修改）
+        task_step_number: 预先分配的步骤编号（由 execute_task_batch 批量预分配，
+                          防止并行执行时竞态导致编号重复）
     """
     agent_type = task.get("agent_type", "")
     llm = _get_llm(state, agent_type)
@@ -431,9 +438,19 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
     task_id = state.get("_async_task_id", "")
     streaming_mode = state.get("_streaming_mode", False)
 
-    # Mock 模式：无 LLM 可用时直接使用 fallback
+    # Mock 模式：无 LLM 可用时使用 fallback（有明确的警告日志）
     if not llm:
-        return await handle_fallback(task, llm, state)
+        logger.warning(
+            "Agent %s: no LLM configured (all providers failed). "
+            "Returning mock result. Set API keys in .env to enable real generation.",
+            agent_type,
+        )
+        fallback_task = {
+            "agent_type": agent_type,
+            "input": task_input,
+            "_tool_registry": state.get("_tool_registry"),
+        }
+        return await handle_fallback(fallback_task, llm, None)
 
     handler = HANDLER_MAP.get(agent_type)
     if handler:
@@ -459,9 +476,9 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                     elapsed = round(time.time() - start_time, 2)
                     cached["time_elapsed"] = elapsed
                     cached["_from_cache"] = True
-                    # 实时推送缓存命中
+                    # 实时推送缓存命中（使用预分配的步骤编号）
                     await _publish_streaming_event(state, "thinking_step", {
-                        "step_number": len(state.get("thinking_steps", [])) + 1,
+                        "step_number": task_step_number,
                         "agent": agent_type,
                         "action": task.get("config", {}).get("reasoning", "使用缓存"),
                         "reasoning": f"命中缓存，agent={agent_type}",
@@ -474,9 +491,9 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                     })
                     return cached
 
-            # ── 任务开始：发布 thinking_step (running) ──
+            # ── 任务开始：发布 thinking_step (running，使用预分配编号) ──
             await _publish_streaming_event(state, "thinking_step", {
-                "step_number": len(state.get("thinking_steps", [])) + 1,
+                "step_number": task_step_number,
                 "agent": agent_type,
                 "action": "开始执行",
                 "reasoning": f"Agent {agent_type} 开始处理，input={str(t_input)[:150]}",
@@ -488,18 +505,20 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
             })
 
             # Token Budget 检查
-            budget = AGENT_TOKEN_BUDGETS.get(agent_type, DEFAULT_TOKEN_BUDGET)
-            if budget > 0 and hasattr(llm, 'model'):
-                from src.config import get_settings
-                settings = get_settings()
+            from src.config import get_settings
+            settings = get_settings()
+            budget = settings.agent_token_budgets.get(agent_type, 2000)
+            if budget > 0:
                 max_tokens = getattr(llm, 'max_tokens', None) or 0
-                if max_tokens == 0 or max_tokens > budget:
-                    pass  # 已通过 model config 控制
+                if max_tokens and max_tokens > budget:
+                    logger.warning(
+                        "Token budget exceeded for %s: max_tokens=%d > budget=%d",
+                        agent_type, max_tokens, budget,
+                    )
 
             # ── 执行 handler（支持流式 LLM 回调）──
             if streaming_mode and agent_type in {"WritingAgent", "SEOAgent", "ReviewAgent"}:
-                # 为支持流式的 Agent 注册 token 回调
-                # fire-and-forget: 用 create_task 让发布在后台进行，不阻塞 LLM 流
+                # 流式 LLM token 推送用 fire-and-forget：LLM 流是主干，不应被推送阻塞
                 def _make_on_llm_chunk(agent: str):
                     async def _on_llm_chunk(chunk: str) -> None:
                         asyncio.create_task(_publish_streaming_event(
@@ -548,7 +567,33 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                     if tool_desc:
                         t_input["_tool_descriptions"] = tool_desc
 
-            result = await handler(t_input, llm, mcp_tools if mcp_tools else t_input.get("_mcp_tools"))
+            # 使用 retry wrapper 执行 handler（对产出型 Agent 启用质量检查与重试）
+            # 注意：这里有两个质量保障机制：
+            #   1. run_agent_with_retry — 基于浅层指标（长度/结构/占位符），快速反馈
+            #   2. reflect_on_task_batch — 基于 LLM 自省，深度评估
+            # 两者不会同时生效：reflection 启用时跳过 retry 的质量重试，
+            # 否则同一个任务可能被两套机制各重试一次。
+            retry_types = {"WritingAgent", "ReviewAgent", "CodeAgent", "TranslationAgent", "SEOAgent", "DiagramAgent"}
+            _mcp = mcp_tools if mcp_tools else t_input.get("_mcp_tools")
+            _handler = handler
+            if agent_type in retry_types:
+                if state.get("enable_reflection"):
+                    # Reflection 模式下跳过 retry 的质量评分，直接执行
+                    # 质量判断由 reflect_on_task_batch 统一负责
+                    result = await _handler(t_input, llm, _mcp)
+                else:
+                    # 无 Reflection 时，retry 负责浅层质量检查和重试
+                    _adapter = lambda ti, llm, _st: _handler(ti, llm, _mcp)
+                    result = await run_agent_with_retry(
+                        agent_func=_adapter,
+                        task_input=t_input,
+                        llm=llm,
+                        state=state,
+                        max_retries=2,
+                        agent_type=agent_type,
+                    )
+            else:
+                result = await _handler(t_input, llm, _mcp)
 
             # 清理回调引用（不可 JSON 序列化），在后续操作前移除
             t_input.pop("_on_llm_chunk", None)
@@ -562,7 +607,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
             # ── 任务完成：发布 thinking_step (done) ──
             output_content = result.get("output", {}).get("content", "")
             await _publish_streaming_event(state, "thinking_step", {
-                "step_number": len(state.get("thinking_steps", [])) + 1,
+                "step_number": task_step_number,
                 "agent": agent_type,
                 "action": "完成",
                 "reasoning": f"Agent {agent_type} 执行完成",
@@ -587,7 +632,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
             logger.error(f"Agent {agent_type} failed: {e}")
             # ── 任务失败：发布 thinking_step (failed) ──
             await _publish_streaming_event(state, "thinking_step", {
-                "step_number": len(state.get("thinking_steps", [])) + 1,
+                "step_number": task_step_number,
                 "agent": agent_type,
                 "action": "失败",
                 "reasoning": str(e),
@@ -605,7 +650,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState) -> dict:
                 "thinking_steps": [{"agent": agent_type, "action": "error", "reasoning": str(e), "status": "failed"}],
             }
 
-    return await handle_fallback(task, llm, state)
+    return await handle_fallback({"agent_type": agent_type, "input": task_input, "_tool_registry": state.get("_tool_registry")}, llm, None)
 
 
 def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
@@ -618,14 +663,24 @@ def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
     task_queue = state.get("task_queue", [])
     task_results = state.get("task_results", {})
     context = {}
+
     for dep in task.get("dependencies", []):
-        dep_id = task_queue[dep].get("id", str(dep)) if isinstance(dep, int) and 0 <= dep < len(task_queue) else str(dep)
+        dep_id = _resolve_dep_id(dep, task_queue)
+        # 跳过无效的依赖引用（索引越界或 ID 不存在）
+        if dep_id is None:
+            continue
         if dep_id in task_results:
             prev = task_results[dep_id]
-            # 只提取 public content，不传递内部元数据
             output = prev.get("output", {})
+            # output 可能是字符串（fallback handler）也可能是 dict，统一提取 content
+            if isinstance(output, dict):
+                content = output.get("content", "")
+            elif isinstance(output, str):
+                content = output
+            else:
+                content = str(output) if output else ""
             context[dep_id] = {
-                "content": output.get("content", ""),
+                "content": content,
                 "agent": prev.get("agent_type", ""),
             }
     return context if context else {}
@@ -662,15 +717,17 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 full_text_parts.append(f"\n\n--- {result.get('agent_type', task.get('agent_type', ''))} ---\n{content}")
 
             # ── 记忆沉淀：执行完成后选择性写入 ──
+            # 改为 await 而非 fire-and-forget，确保失败时至少有日志记录
             try:
-                asyncio.create_task(memory_manager.remember(
+                await memory_manager.remember(
                     agent_type=result.get("agent_type", task.get("agent_type", "")),
                     task_input=task.get("input", {}),
                     result=result,
                     user_id=state.get("context", {}).get("user_id", ""),
-                ))
-            except Exception:
-                pass
+                )
+            except Exception as e:
+                logger.warning("Memory remember failed for %s: %s",
+                               result.get("agent_type", "unknown"), e)
 
     completed = len(completed_ids)
     failed = len(failed_ids)
@@ -681,8 +738,8 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
     elif failed > 0:
         status = "partial"
 
-    # 持久化
-    _persist_results(state, sections, full_text_parts, status)
+    # 持久化（异步，不阻塞）
+    asyncio.create_task(_persist_results_async(state, sections, full_text_parts, status))
 
     return {
         "final_output": {
@@ -695,8 +752,8 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
     }
 
 
-def _persist_results(state: AgentGraphState, sections: list, full_text_parts: list, status: str) -> None:
-    """持久化执行结果到数据库"""
+def _persist_results_sync(state: AgentGraphState, sections: list, full_text_parts: list, status: str) -> None:
+    """同步持久化执行结果到数据库"""
     try:
         from .persistence import save_agent_task, save_subtask
 
@@ -734,6 +791,14 @@ def _persist_results(state: AgentGraphState, sections: list, full_text_parts: li
                 )
     except Exception as e:
         logger.warning(f"Persistence failed: {e}")
+
+
+async def _persist_results_async(state: AgentGraphState, sections: list, full_text_parts: list, status: str) -> None:
+    """异步持久化执行结果到数据库（避免阻塞 LangGraph 流程）"""
+    try:
+        await asyncio.to_thread(_persist_results_sync, state, sections, full_text_parts, status)
+    except Exception as e:
+        logger.warning(f"Async persistence failed: {e}")
 
 
 # ──────────────────────────────────────────────
@@ -852,11 +917,19 @@ async def reflect_on_task_batch(state: AgentGraphState) -> dict:
         if tid not in requeue_ids
     ]
 
+    # 同时移除需要重试任务的 task_results（否则 _run_single_agent_task
+    # 的缓存检查会返回旧结果，导致重试变成空操作）
+    updated_task_results = {
+        tid: res for tid, res in task_results.items()
+        if tid not in requeue_ids
+    }
+
     return {
         "reflection_results": reflection_results,
         "self_reflection_rounds": reflection_rounds,
         "thinking_steps": new_steps,
         "completed_task_ids": updated_completed,
+        "task_results": updated_task_results,
     }
 
 
