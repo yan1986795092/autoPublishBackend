@@ -65,6 +65,11 @@ async def handle_translation(task_input: dict, llm: ChatOpenAI, mcp_tools: list 
     if tool_descriptions:
         sys_prompt += "\n\n可用工具：\n\n" + tool_descriptions
 
+    # ── Skill system prompt injection ──
+    skill_system_prompt = task_input.get("_skill_system_prompt", "")
+    if skill_system_prompt:
+        sys_prompt += f"\n\n=== 创作指导 (Skill: {task_input.get('_skill_name', 'Custom')}) ===\n{skill_system_prompt}\n==="
+
     lc_messages = [
         SystemMessage(content=sys_prompt),
         HumanMessage(content=content[:8000]),

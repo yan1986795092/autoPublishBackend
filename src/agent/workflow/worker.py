@@ -115,6 +115,8 @@ class AgentWorker:
                 context: dict = {"async_task_id": async_task.id, "user_id": async_task.user_id}
                 if async_task.plan:
                     context["precomputed_plan"] = async_task.plan
+                if async_task.skill_context:
+                    context.update(async_task.skill_context)
                 result = await orchestrator.run(
                     user_request=async_task.prompt,
                     context=context,

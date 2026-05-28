@@ -268,3 +268,133 @@ class ToolCall(Base):
     tokens_used = Column(Integer, default=0)
     time_elapsed = Column(Float, default=0.0)
     created_at = Column(DateTime, default=func.now())
+
+
+class SkillCategory(str, enum.Enum):
+    WRITING = "writing"
+    ANALYSIS = "analysis"
+    CODING = "coding"
+    RESEARCH = "research"
+    DESIGN = "design"
+    SOCIAL = "social"
+    CUSTOM = "custom"
+
+
+class SkillSource(str, enum.Enum):
+    BUILTIN = "builtin"
+    USER = "user"
+    IMPORTED = "imported"
+
+
+class Skill(Base):
+    """用户自定义/导入的创作 Skill
+
+    支持外部导入 SKILL.md 解析后的结构，
+    用于在 Agent 执行时注入特定的 system_prompt 和 plan 配置。
+    """
+    __tablename__ = "skills"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+
+    # 元信息
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    category = Column(SQLEnum(SkillCategory), default=SkillCategory.WRITING)
+    icon = Column(String(10), default="✍️")
+    source = Column(SQLEnum(SkillSource), default=SkillSource.USER)
+    author = Column(String(100))
+    version = Column(String(20))
+    tags = Column(String(500))          # comma-separated
+    is_enabled = Column(Boolean, default=True)
+    use_count = Column(Integer, default=0)
+
+    # 执行相关
+    system_prompt = Column(Text, nullable=False)
+    user_prompt_template = Column(Text)  # Optional: template with {topic} {content} placeholders
+    preset_plan_json = Column(Text)      # JSON: { complexity, agent_sequence }
+    content_types_json = Column(Text)    # JSON: ["blog", "social_post"]
+
+    # 配置 schema（用户可在 UI 上覆盖的字段）
+    config_schema_json = Column(Text)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    user = relationship("User", backref="skills")
+
+    @property
+    def tags_list(self) -> list[str]:
+        if not self.tags:
+            return []
+        return [t.strip() for t in self.tags.split(",") if t.strip()]
+
+    @property
+    def preset_plan(self) -> dict | None:
+        if not self.preset_plan_json:
+            return None
+        import json
+        try:
+            return json.loads(self.preset_plan_json)
+        except Exception:
+            return None
+
+    @property
+    def content_types(self) -> list[str]:
+        if not self.content_types_json:
+            return []
+        import json
+        try:
+            return json.loads(self.content_types_json)
+        except Exception:
+            return []
+
+    @property
+    def config_schema(self) -> dict | None:
+        if not self.config_schema_json:
+            return None
+        import json
+        try:
+            return json.loads(self.config_schema_json)
+        except Exception:
+            return None
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description or "",
+            "category": self.category.value,
+            "icon": self.icon,
+            "source": self.source.value,
+            "author": self.author,
+            "version": self.version,
+            "tags": self.tags_list,
+            "is_enabled": self.is_enabled,
+            "use_count": self.use_count,
+            "system_prompt": self.system_prompt,
+            "user_prompt_template": self.user_prompt_template,
+            "preset_plan": self.preset_plan,
+            "content_types": self.content_types,
+            "config_schema": self.config_schema,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+    def to_meta_dict(self) -> dict:
+        """List view — excludes system_prompt & config_schema"""
+        return {
+            "id": self.id,
+            "name": self.name,
+            "description": self.description or "",
+            "category": self.category.value,
+            "icon": self.icon,
+            "source": self.source.value,
+            "author": self.author,
+            "version": self.version,
+            "tags": self.tags_list,
+            "is_enabled": self.is_enabled,
+            "use_count": self.use_count,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

@@ -13,6 +13,7 @@ from src.config import get_settings
 from src.database import engine
 from src.models import Base
 from src.api import auth, contents, publish, platforms, templates, presets, ai_editor, personas
+from src.api.skills import router as skills_router
 from src.agent.api import router as agent_router
 from src.agent.workflow.worker import worker
 import src.migrations  # noqa: F401 — register migrations
@@ -120,6 +121,7 @@ app.include_router(presets.router, prefix="/api/v1")
 app.include_router(templates.router, prefix="/api/v1")
 app.include_router(ai_editor.router, prefix="/api/v1")
 app.include_router(personas.router, prefix="/api/v1")
+app.include_router(skills_router)
 app.include_router(agent_router, prefix="/api/v1")
 
 

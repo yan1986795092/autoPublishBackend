@@ -145,9 +145,13 @@ class Orchestrator:
             async with asyncio.timeout(timeout) if hasattr(asyncio, 'timeout') else _AsyncioTimeout(timeout):
                 # ── 构建初始 state（支持预计算计划，避免 SSE plan ≠ 执行计划）──
                 precomputed = (context or {}).get("precomputed_plan")
+                skill_system_prompt = (context or {}).get("skill_system_prompt", "")
+                skill_name = (context or {}).get("skill_name", "")
                 initial_state: AgentGraphState = {
                     "user_request": user_request,
                     "context": context or {},
+                    "skill_system_prompt": skill_system_prompt,
+                    "skill_name": skill_name,
                     "plan": precomputed,
                     "plan_reasoning": (precomputed or {}).get("reasoning", ""),
                     "task_queue": [],

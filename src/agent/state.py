@@ -9,6 +9,10 @@ class AgentGraphState(TypedDict):
     user_request: str
     context: dict
 
+    # === Skill 上下文 ===
+    skill_system_prompt: str       # Skill 的 system prompt 指令
+    skill_name: str               # Skill 名称
+
     # === 计划 ===
     plan: Optional[dict]          # ExecutionPlan 的 dict 形式
     plan_reasoning: str

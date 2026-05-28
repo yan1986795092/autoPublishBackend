@@ -32,6 +32,7 @@ router = APIRouter(tags=["agent"])
 class AgentRunRequest(BaseModel):
     prompt: str
     context: Optional[dict] = None
+    skill_id: Optional[str] = None  # 应用指定的 Skill ID
 
 
 class AgentRunResponse(BaseModel):
@@ -42,6 +43,7 @@ class AgentRunResponse(BaseModel):
 
 class AgentAsyncSubmitRequest(BaseModel):
     prompt: str
+    skill_id: Optional[str] = None
 
 
 class AgentAsyncStatusResponse(BaseModel):
@@ -70,10 +72,42 @@ async def run_agent(
 ):
     """运行 Agent 编排：输入需求，返回 Multi-Agent 协作结果"""
     try:
+        context = request.context or {}
+
+        # Skill 注入（与 /stream 端点保持一致）
+        if request.skill_id:
+            from src.api.skills import load_skill_full
+            from src.database import SessionLocal
+            db = SessionLocal()
+            try:
+                skill_data = load_skill_full(request.skill_id, db)
+                if skill_data:
+                    context.update({
+                        "skill_id": request.skill_id,
+                        "skill_name": skill_data.get("name", ""),
+                        "skill_system_prompt": skill_data.get("system_prompt", ""),
+                        "skill_preset_plan": skill_data.get("preset_plan"),
+                        "skill_user_template": skill_data.get("user_prompt_template", ""),
+                    })
+                    # Skill template 转换
+                    if skill_data.get("user_prompt_template"):
+                        template = skill_data["user_prompt_template"]
+                        template = template.replace("{topic}", request.prompt.split("\n")[0])
+                        template = template.replace("{content}", request.prompt)
+                        prompt_to_use = template
+                    else:
+                        prompt_to_use = request.prompt
+                else:
+                    prompt_to_use = request.prompt
+            finally:
+                db.close()
+        else:
+            prompt_to_use = request.prompt
+
         orchestrator = _create_orchestrator()
         result = await orchestrator.run(
-            user_request=request.prompt,
-            context=request.context or {},
+            user_request=prompt_to_use,
+            context=context,
             timeout=240.0,  # 4 分钟全局超时
         )
         return AgentRunResponse(
@@ -95,10 +129,41 @@ async def preview_plan(
 ):
     """预览 Agent 执行计划（不实际执行，只展示拆解结果）"""
     try:
+        context = request.context or {}
+
+        # Skill 注入
+        if request.skill_id:
+            from src.api.skills import load_skill_full
+            from src.database import SessionLocal
+            db = SessionLocal()
+            try:
+                skill_data = load_skill_full(request.skill_id, db)
+                if skill_data:
+                    context.update({
+                        "skill_id": request.skill_id,
+                        "skill_name": skill_data.get("name", ""),
+                        "skill_system_prompt": skill_data.get("system_prompt", ""),
+                        "skill_preset_plan": skill_data.get("preset_plan"),
+                        "skill_user_template": skill_data.get("user_prompt_template", ""),
+                    })
+                    if skill_data.get("user_prompt_template"):
+                        template = skill_data["user_prompt_template"]
+                        template = template.replace("{topic}", request.prompt.split("\n")[0])
+                        template = template.replace("{content}", request.prompt)
+                        prompt_to_use = template
+                    else:
+                        prompt_to_use = request.prompt
+                else:
+                    prompt_to_use = request.prompt
+            finally:
+                db.close()
+        else:
+            prompt_to_use = request.prompt
+
         orchestrator = _create_orchestrator()
         plan = await orchestrator._decompose(
-            user_request=request.prompt,
-            context=request.context or {},
+            user_request=prompt_to_use,
+            context=context,
         )
         return AgentRunResponse(
             success=True,
@@ -267,9 +332,39 @@ async def submit_agent_task(
     current_user: User = Depends(get_current_user),
 ):
     """提交异步 Agent 任务（适合长时间执行）"""
+    skill_context: dict = {}
+    if request.skill_id:
+        from src.api.skills import load_skill_full
+        from src.database import SessionLocal
+        db = SessionLocal()
+        try:
+            skill_data = load_skill_full(request.skill_id, db)
+            if skill_data:
+                skill_context = {
+                    "skill_id": request.skill_id,
+                    "skill_name": skill_data.get("name", ""),
+                    "skill_system_prompt": skill_data.get("system_prompt", ""),
+                    "skill_preset_plan": skill_data.get("preset_plan"),
+                    "skill_user_template": skill_data.get("user_prompt_template", ""),
+                }
+                if skill_data.get("user_prompt_template"):
+                    template = skill_data["user_prompt_template"]
+                    template = template.replace("{topic}", request.prompt.split("\n")[0])
+                    template = template.replace("{content}", request.prompt)
+                    prompt_to_use = template
+                else:
+                    prompt_to_use = request.prompt
+            else:
+                prompt_to_use = request.prompt
+        finally:
+            db.close()
+    else:
+        prompt_to_use = request.prompt
+
     async_task = await task_queue.enqueue(
-        prompt=request.prompt,
+        prompt=prompt_to_use,
         user_id=current_user.id,
+        skill_context=skill_context if skill_context else None,
     )
     return {"success": True, "data": {"task_id": async_task.id}}
 
@@ -361,6 +456,7 @@ async def submit_decision(
 class AgentStreamRequest(BaseModel):
     prompt: str
     context: Optional[dict] = None
+    skill_id: Optional[str] = None  # 应用指定的 Skill ID
 
 
 @router.post("/agent/stream")
@@ -379,13 +475,52 @@ async def agent_stream(
     async def event_generator() -> AsyncGenerator[dict, None]:
         nonlocal task_id_str
         try:
-            # 1. 快速生成执行计划（使用模板规划，避免 LLM 调用造成初始延迟）
+            # 0. 加载 Skill（如果指定了 skill_id）
+            skill_context: dict = {}
+            if request.skill_id:
+                from src.api.skills import load_skill_full
+                from src.database import SessionLocal
+                db = SessionLocal()
+                try:
+                    skill_data = load_skill_full(request.skill_id, db)
+                    if skill_data:
+                        skill_context = {
+                            "skill_id": request.skill_id,
+                            "skill_name": skill_data.get("name", ""),
+                            "skill_system_prompt": skill_data.get("system_prompt", ""),
+                            "skill_preset_plan": skill_data.get("preset_plan"),
+                            "skill_preset_complexity": skill_data.get("preset_plan", {}).get("complexity", "medium"),
+                            "skill_user_template": skill_data.get("user_prompt_template", ""),
+                        }
+                    else:
+                        logger.warning(f"Skill not found: {request.skill_id}")
+                finally:
+                    db.close()
+
+            # 应用 Skill 的 user_prompt_template 转换
+            user_prompt = request.prompt
+            if skill_context.get("skill_user_template"):
+                template = skill_context["skill_user_template"]
+                template = template.replace("{topic}", user_prompt.split("\n")[0])
+                template = template.replace("{content}", user_prompt)
+                user_prompt = template
+
+            # 1. 生成执行计划（支持 Skill preset_plan 覆盖）
             orchestrator = _create_orchestrator()
-            complexity = orchestrator._classify_complexity(request.prompt)
-            plan = orchestrator._build_template_plan(
-                user_request=request.prompt,
-                complexity=complexity,
-            )
+
+            # 优先使用 skill preset_plan
+            if skill_context.get("skill_preset_plan"):
+                preset = skill_context["skill_preset_plan"]
+                plan = orchestrator._build_template_plan(
+                    user_request=user_prompt,
+                    complexity=preset.get("complexity", "medium"),
+                )
+            else:
+                complexity = orchestrator._classify_complexity(user_prompt)
+                plan = orchestrator._build_template_plan(
+                    user_request=user_prompt,
+                    complexity=complexity,
+                )
             yield {
                 "event": "plan",
                 "data": json.dumps({
@@ -411,7 +546,7 @@ async def agent_stream(
                 """EventBus 回调：将事件放入队列"""
                 await evt_queue.put(event)
 
-            # 3. 提交异步任务（传递预计算计划）
+            # 3. 提交异步任务（传递预计算计划 + Skill 上下文）
             plan_dict = {
                 "goal": plan.goal,
                 "reasoning": plan.reasoning,
@@ -428,9 +563,10 @@ async def agent_stream(
                 ],
             }
             async_task = await task_queue.enqueue(
-                prompt=request.prompt,
+                prompt=user_prompt,
                 user_id=current_user.id,
                 plan=plan_dict,
+                skill_context=skill_context if skill_context else None,
             )
             task_id_str = async_task.id
 

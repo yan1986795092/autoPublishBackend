@@ -25,8 +25,10 @@ async def handle_fallback(task: dict, llm: ChatOpenAI, mcp_tools: list | None = 
     tool_registry = task.get("_tool_registry")
 
     try:
+        skill_system_prompt = task_input.get("_skill_system_prompt", "")
+        skill_note = f"\n\n=== 创作指导 (Skill: {task_input.get('_skill_name', 'Custom')}) ===\n{skill_system_prompt}\n===" if skill_system_prompt else ""
         lc_messages = [
-            SystemMessage(content=f"You are acting as a {agent_type}. Complete the assigned task."),
+            SystemMessage(content=f"You are acting as a {agent_type}. Complete the assigned task.{skill_note}"),
             HumanMessage(content=json.dumps(task_input, ensure_ascii=False)),
         ]
         response_text = await call_llm(
