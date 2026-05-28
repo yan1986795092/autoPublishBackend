@@ -28,7 +28,8 @@ class AgentRegistry:
         profiles: Optional[dict[str, AgentProfile]] = None,
         llm_models: Optional[dict[str, ChatOpenAI]] = None,
     ):
-        profiles = profiles or PREDEFINED_PROFILES
+        if profiles is None:
+            profiles = PREDEFINED_PROFILES
         llm_models = llm_models or {}
 
         self._agents: dict[str, BaseAgent] = {}

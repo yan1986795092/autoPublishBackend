@@ -32,39 +32,82 @@ QUALITY_THRESHOLD = 60.0  # 百分制
 def simple_quality_score(output: dict) -> float:
     """对 Agent 输出做简单的质量评分
 
-    基于内容长度、丰富度等浅层指标。
-    返回 0-100 的分数。
+    基于内容长度、丰富度、结构等指标，返回 0-100 的分数。
+    适用于无 LLM 场景的降级评估。真实质量判断由 Reflection 机制负责。
     """
     content = output.get("content", "")
     if not content:
         return 0.0
 
-    score = 60.0  # base
+    score = 50.0  # base
 
-    # 长度加分
-    if len(content) > 500:
+    # 长度检查（核心指标）：按区间加分，上限封顶
+    length = len(content)
+    if length < 50:
+        return max(0.0, score - 20)
+    elif length < 200:
         score += 10
-    if len(content) > 2000:
+    elif length < 1000:
+        score += 20
+    elif length < 3000:
+        score += 30
+    elif length < 8000:
+        score += 40
+    else:
+        score += 40
+
+    # 结构完整性：段落数量加分
+    paragraphs = [p.strip() for p in content.split("\n\n") if p.strip()]
+    if len(paragraphs) >= 3:
         score += 10
-    if len(content) > 5000:
+    elif len(paragraphs) >= 1:
         score += 5
 
-    # 结构加分
-    if content.count("\n##") >= 2:
+    # Markdown 结构：标题加分
+    heading_count = content.count("\n##") + content.count("\n#")
+    if heading_count >= 2:
         score += 5
-    if "。" in content:
-        paragraphs = content.split("\n\n")
-        if 3 <= len(paragraphs) <= 20:
-            score += 5
 
-    # 扣分
-    if content.count("```") % 2 != 0:
-        score -= 10  # 未闭合的代码块
-    placeholder_words = ["TODO", "待补充", "这里应该", "placeholder"]
-    for pw in placeholder_words:
-        if pw in content:
-            score -= 10
-            break
+    # 代码块：统计完整对（``` 开 + ``` 闭），奇数对 = 有未闭合块
+    triple_backtick_count = content.count("```")
+    complete_pairs = triple_backtick_count // 2
+    if complete_pairs >= 2:
+        score += 5
+    if triple_backtick_count % 2 != 0:
+        score -= 15  # 未闭合的代码块（影响可读性）
+
+    # 扣分项：占位符检测
+    import re
+    placeholder_patterns = [
+        (re.compile(r'\bTODO\b', re.I), "TODO keyword"),
+        ("待补充", "待补充"),
+        ("这里应该", "这里应该"),
+        ("placeholder", "placeholder"),
+        ("xxx", "xxx"),
+        ("TBD", "TBD"),
+        ("此处应填", "此处应填"),
+        ("稍后补充", "稍后补充"),
+        ("内容待定", "内容待定"),
+        ("【】", "空括号标记"),
+        ("「」", "空引号标记"),
+        ("_____", "下划线占位"),
+    ]
+    for pattern in placeholder_patterns:
+        if isinstance(pattern, re.Pattern):
+            if pattern.search(content):
+                score -= 10
+                break
+        else:
+            if pattern.lower() in content.lower():
+                score -= 10
+                break
+
+    # 过度重复检测：唯一行占比低于阈值说明内容大量重复
+    lines = [ln.strip() for ln in content.split("\n") if ln.strip()]
+    if len(lines) > 10:
+        unique_lines = len(set(lines))
+        if unique_lines / len(lines) < 0.5:
+            score -= 20
 
     return max(0.0, min(100.0, score))
 
@@ -110,11 +153,12 @@ async def run_agent_with_retry(
                 logger.info(f"[Retry] {agent_type} 第 {attempt + 1}/{max_retries} 次尝试，等待 {wait}s")
                 await asyncio.sleep(wait)
 
-            # 如果有反馈历史，追加到 task_input
+            # 构建每次重试的输入（不修改原始 task_input）
+            retry_input = dict(task_input)
             if feedback_history:
-                task_input = {**task_input, "_feedback": feedback_history[-1]}
+                retry_input["_feedback"] = feedback_history[-1]
 
-            result = await agent_func(task_input, llm, state)
+            result = await agent_func(retry_input, llm, state)
             output = result.get("output", {})
 
             # 检查是否失败
@@ -143,6 +187,7 @@ async def run_agent_with_retry(
         except (asyncio.TimeoutError, ConnectionError, OSError) as e:
             last_error = str(e)
             logger.warning(f"[Retry] {agent_type} 网络/超时错误 (尝试 {attempt + 1}): {e}")
+            feedback_history.append(f"网络/超时错误: {last_error}, 请重试")
             await asyncio.sleep(2 ** attempt)
 
         except QualityError as e:

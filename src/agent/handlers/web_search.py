@@ -1,5 +1,6 @@
 """WebSearch Agent — 实时搜索 (MCP Server → DuckDuckGo → Bing/SerpAPI)"""
 
+import asyncio
 import os
 import re
 import logging
@@ -13,36 +14,65 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
     """网络搜索 — 支持通过 MCP 工具或直接调用
 
     优先级：
-    1. MCP 工具（web_search）— 支持多引擎自动降级
-    2. 直接 DuckDuckGo 调用
-    3. 有 API Key 时使用 Bing / SerpAPI
+    1. ToolRegistry 中的 search 工具（web_search）
+    2. MCP 工具列表（向后兼容）
+    3. 直接 DuckDuckGo 调用
+    4. 有 API Key 时使用 Bing / SerpAPI
     """
     query = task_input.get("query", "")
     count = task_input.get("count", 5)
 
-    # 优先：从 task_input._mcp_tools 获取（MCP 工具由 nodes.py 注入）
+    # 优先：通过 ToolRegistry 查找 search 工具（统一工具入口）
+    tool_registry = task_input.get("_tool_registry")
+    if tool_registry is not None:
+        search_tool = tool_registry.get("web_search")
+        if search_tool is None:
+            # 也尝试通过 category 查找
+            search_tools = tool_registry.get_by_category("search")
+            search_tool = search_tools[0] if search_tools else None
+
+        if search_tool is not None:
+            try:
+                result = await search_tool.execute(query=query, max_results=count)
+                return {
+                    "status": "completed",
+                    "agent_type": "WebSearch",
+                    "output": {"content": result, "results": [], "source": "mcp"},
+                    "tokens_used": 0,
+                    "thinking_steps": [{
+                        "agent": "WebSearch",
+                        "action": "搜索完成",
+                        "reasoning": f"ToolRegistry 搜索：{query}",
+                        "output_summary": f"通过工具「{search_tool.name}」搜索到结果",
+                        "status": "done",
+                    }],
+                }
+            except Exception as e:
+                logger.warning(f"ToolRegistry search failed, falling back: {e}")
+
+    # 兜底：从原始 mcp_tools 列表中查找（向后兼容）
     if mcp_tools is None:
         mcp_tools = task_input.get("_mcp_tools", [])
-        for tool in mcp_tools:
-            tool_name = getattr(tool, "name", None) or str(tool)
-            if "web_search" in tool_name or "search" in tool_name:
-                try:
-                    result = await tool._arun(query=query, max_results=count)
-                    return {
-                        "status": "completed",
-                        "agent_type": "WebSearch",
-                        "output": {"content": result, "results": [], "source": "mcp"},
-                        "tokens_used": 0,
-                        "thinking_steps": [{
-                            "agent": "WebSearch",
-                            "action": "搜索完成",
-                            "reasoning": f"MCP 搜索：{query}",
-                            "output_summary": f"通过 MCP 工具「{tool_name}」搜索到结果",
-                            "status": "done",
-                        }],
-                    }
-                except Exception as e:
-                    logger.warning(f"MCP tool {tool_name} failed, falling back to direct search: {e}")
+    for tool in mcp_tools:
+        tool_name = getattr(tool, "name", None) or str(tool)
+        if "web_search" in tool_name or "search" in tool_name:
+            try:
+                result = await tool._arun(query=query, max_results=count)
+                return {
+                    "status": "completed",
+                    "agent_type": "WebSearch",
+                    "output": {"content": result, "results": [], "source": "mcp"},
+                    "tokens_used": 0,
+                    "thinking_steps": [{
+                        "agent": "WebSearch",
+                        "action": "搜索完成",
+                        "reasoning": f"MCP 搜索：{query}",
+                        "output_summary": f"通过 MCP 工具「{tool_name}」搜索到结果",
+                        "status": "done",
+                    }],
+                }
+            except Exception as e:
+                logger.warning(f"MCP tool {tool_name} failed, falling back to direct search: {e}")
 
     # ── 兜底：直接 DuckDuckGo ──
     results = []
@@ -55,7 +85,8 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
             async with httpx.AsyncClient(timeout=15.0) as client:
                 resp = await client.get(
                     "https://serpapi.com/search",
-                    params={"q": query, "api_key": serpapi_key, "num": count},
+                    params={"q": query, "num": count},
+                    headers={"Authorization": f"Bearer {serpapi_key}"},
                 )
                 data = resp.json()
                 results = [
@@ -70,8 +101,9 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
     if not results:
         try:
             from duckduckgo_search import DDGS
-            with DDGS(timeout=20) as ddgs:
-                raw_results = list(ddgs.text(query, max_results=count))
+            raw_results = await asyncio.to_thread(
+                lambda: list(DDGS(timeout=20).text(query, max_results=count))
+            )
             results = [
                 {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", ""), "source": "duckduckgo"}
                 for r in raw_results

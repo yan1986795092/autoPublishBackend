@@ -19,6 +19,7 @@ class _AsyncioTimeout:
     def __init__(self, timeout: float):
         self._timeout = timeout
         self._task: asyncio.Task | None = None
+        self._cancelled = False
 
     async def __aenter__(self) -> "_AsyncioTimeout":
         self._task = asyncio.current_task()
@@ -28,6 +29,10 @@ class _AsyncioTimeout:
     async def __aexit__(self, exc_type, exc_val, exc_tb):
         if exc_type is asyncio.CancelledError:
             self._cancelled = True
+            if self._task and not self._task.done():
+                self._task.cancel()
+            # 与 asyncio.timeout (3.11+) 行为对齐：抛 TimeoutError 而非传播 CancelledError
+            raise TimeoutError(f"async operation timed out after {self._timeout}s")
         return False
 
 from langchain_openai import ChatOpenAI
@@ -37,45 +42,9 @@ from .state import AgentGraphState
 from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
 from .thinking_trace import ThinkingTrace
 from src.core.llm_gateway import LLMGateway
+from .agent_utils import PLANNER_SYSTEM_PROMPT
 
 logger = logging.getLogger(__name__)
-
-# Manager Agent 用于拆解任务的 System Prompt（保留给 _decompose）
-PLANNER_SYSTEM_PROMPT = """You are a content production manager. Your job is to break down user requests into a plan of sub-tasks that specialized AI agents will execute.
-
-Available agents and their capabilities:
-- WebSearch: Searches the internet for up-to-date information on a topic
-- WritingAgent: Writes articles, copy, scripts in various styles and tones
-- SEOAgent: Optimizes content for search engines, researches keywords
-- DiagramAgent: Creates knowledge architecture diagrams, flowcharts, mind maps
-- ReviewAgent: Reviews content for quality, banned words, factual accuracy
-- PlatformAdapter: Converts content format for specific platforms (WeChat, Xiaohongshu, Zhihu)
-- ImageAgent: Generates images and cover art
-- HotTopicAgent: Analyzes trending topics and hot searches from social platforms
-- CodeAgent: Generates code examples, tutorials, and technical documentation
-
-Rules:
-1. Break complex requests into sequential sub-tasks with clear dependencies
-2. Tasks that can run in parallel should have no dependency on each other
-3. For simple requests, a single WritingAgent task may be sufficient
-4. Always include a ReviewAgent task for quality assurance
-5. Response must be valid JSON
-
-Output format:
-```json
-{
-  "goal": "summary of the user's goal",
-  "reasoning": "why you chose this plan",
-  "tasks": [
-    {
-      "agent_type": "WebSearch",
-      "input": {"query": "search query", "focus": "what to look for"},
-      "dependencies": [],
-      "reasoning": "why this task is needed"
-    }
-  ]
-}
-```"""
 
 
 class Orchestrator:

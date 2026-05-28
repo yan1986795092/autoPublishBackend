@@ -34,7 +34,7 @@ def suggest_related_keywords(topic: str, content: Optional[str] = None) -> list[
     """
     suggestions = [topic]
 
-    prefixes = ["什么是", "如何", "最佳", "2025"]
+    prefixes = ["什么是", "如何", "最佳", "2026"]
     for p in prefixes:
         suggestions.append(f"{p}{topic}")
 

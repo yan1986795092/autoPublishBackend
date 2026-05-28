@@ -22,7 +22,16 @@ def should_reflect_or_continue(state: AgentGraphState) -> str:
     - "done": 全部完成
     """
     if not state.get("enable_reflection"):
-        return should_continue_or_finish(state)
+        # 注意：不使用 should_continue_or_finish，因为它可能返回 "execute"，
+        # 而本条件边的有效返回值为 "reflect"/"schedule"/"done"
+        task_queue = state.get("task_queue", [])
+        completed = len(state.get("completed_task_ids", []))
+        failed = len(state.get("failed_task_ids", []))
+        total_done = completed + failed
+        total_tasks = len(task_queue)
+        if total_done >= total_tasks:
+            return "done"
+        return "schedule"
 
     reflection_results = state.get("reflection_results", [])
     recent_results = state.get("task_results", {})
@@ -36,9 +45,13 @@ def should_reflect_or_continue(state: AgentGraphState) -> str:
 
     # 检查是否有未通过自省且还有重试次数的任务
     reflection_rounds = state.get("self_reflection_rounds", {})
+    task_results = state.get("task_results", {})
     for r in reflection_results:
         if r.get("reflection_type") == "self" and not r.get("passed", True):
             task_id = r.get("target_task_id", "")
+            # task_id 必须仍在 task_results 中才可能重试
+            if task_id not in task_results:
+                continue
             current_round = reflection_rounds.get(task_id, 0)
             if current_round < 2:
                 return "reflect"
@@ -55,10 +68,14 @@ def should_retry_after_reflection(state: AgentGraphState) -> str:
     """
     reflection_results = state.get("reflection_results", [])
     reflection_rounds = state.get("self_reflection_rounds", {})
+    task_results = state.get("task_results", {})
 
     for r in reflection_results:
         if r.get("reflection_type") == "self" and not r.get("passed", True):
             task_id = r.get("target_task_id", "")
+            # 只有 task_results 中仍存在的任务才重试（已被移除的不再重试）
+            if task_id not in task_results:
+                continue
             current_round = reflection_rounds.get(task_id, 0)
             if current_round < 2:
                 return "execute"

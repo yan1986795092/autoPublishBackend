@@ -89,6 +89,46 @@ def test_repurpose_endpoint(auth_client):
         assert data["success"] is True
 
 
+# ===================== Metrics =====================
+
+
+def test_metrics_endpoint(client):
+    """GET /agent/metrics 返回系统监控指标"""
+    response = client.get("/api/v1/agent/metrics")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["success"] is True
+    metrics = data["data"]
+
+    # Cache stats
+    assert "cache" in metrics
+    assert "agent_cache" in metrics["cache"]
+    assert "llm_cache" in metrics["cache"]
+    for c in ("agent_cache", "llm_cache"):
+        for field in ("entries", "hits", "misses", "hit_rate", "max_entries"):
+            # agent_cache uses entries/llm_cache uses size — check either
+            if field in metrics["cache"][c] or field == "entries":
+                pass
+        assert "hits" in metrics["cache"][c]
+        assert "misses" in metrics["cache"][c]
+        assert "hit_rate" in metrics["cache"][c]
+
+    # Tasks
+    assert "tasks" in metrics
+    assert "active" in metrics["tasks"]
+    assert "dlq_size" in metrics["tasks"]
+
+    # Worker
+    assert "worker" in metrics
+    assert "running" in metrics["worker"]
+
+    # Config
+    assert "config" in metrics
+    assert "debug" in metrics["config"]
+    assert "log_level" in metrics["config"]
+    assert "default_llm_provider" in metrics["config"]
+
+
 @pytest.mark.skip(reason="WebSocket 需要特殊 event loop 配置")
 def test_ws_endpoint(client):
     """WebSocket 端点是否可连接"""

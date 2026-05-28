@@ -33,10 +33,10 @@ async def handle_platform_adapter(task_input: dict, llm: ChatOpenAI, mcp_tools: 
                 break
 
     try:
-        from ...adapters.xiaohongshu import XiaohongshuAdapter
-        from ...adapters.wechat import WechatAdapter
-        from ...adapters.zhihu import ZhihuAdapter
-        from ...adapters.base import PlatformContent
+        from src.adapters.xiaohongshu import XiaohongshuAdapter
+        from src.adapters.wechat import WechatAdapter
+        from src.adapters.zhihu import ZhihuAdapter
+        from src.adapters.base import PlatformContent
 
         PLATFORM_ADAPTERS = {
             "xiaohongshu": XiaohongshuAdapter,

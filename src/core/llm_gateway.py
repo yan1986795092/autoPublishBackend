@@ -15,21 +15,26 @@ class LLMGateway:
         "zhipu": "https://open.bigmodel.cn/api/coding/paas/v4",
     }
 
-    def __init__(self, api_key: str, provider: str = "openai", model: str = "", base_url: str = ""):
+    def __init__(self, api_key: str, provider: str = "openai", model: str = "", base_url: str = "",
+                 default_temperature: Optional[float] = None, default_max_tokens: Optional[int] = None):
         self.api_key = api_key
         self.provider = provider
         self.model = model
         self.base_url = base_url or self.PROVIDERS.get(provider, self.PROVIDERS["openai"])
+        from src.config import get_settings
+        _settings = get_settings()
+        self.default_temperature = default_temperature if default_temperature is not None else _settings.default_temperature
+        self.default_max_tokens = default_max_tokens if default_max_tokens is not None else _settings.default_max_tokens
         self._llm: Optional[ChatOpenAI] = None
 
-    def _get_llm(self, temperature: float = 0.7, max_tokens: int = 2000) -> ChatOpenAI:
+    def _get_llm(self, temperature: Optional[float] = None, max_tokens: Optional[int] = None) -> ChatOpenAI:
         """延迟创建 ChatOpenAI 实例，支持每次调用自定义参数"""
         return ChatOpenAI(
             api_key=self.api_key,
             model=self.model or "gpt-3.5-turbo",
             base_url=self.base_url,
-            temperature=temperature,
-            max_tokens=max_tokens,
+            temperature=temperature if temperature is not None else self.default_temperature,
+            max_tokens=max_tokens if max_tokens is not None else self.default_max_tokens,
             streaming=True,
         )
 
@@ -51,8 +56,8 @@ class LLMGateway:
     async def generate(
         self,
         messages: list[dict],
-        temperature: float = 0.7,
-        max_tokens: int = 2000,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
         stream: bool = True,
     ) -> AsyncGenerator[str, None]:
         """流式生成 — 保持原名和签名
@@ -60,7 +65,9 @@ class LLMGateway:
         Yields:
             文本块，与原始 httpx SSE 实现行为一致
         """
-        llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
+        t = temperature if temperature is not None else self.default_temperature
+        mt = max_tokens if max_tokens is not None else self.default_max_tokens
+        llm = self._get_llm(temperature=t, max_tokens=mt)
         lc_messages = self._to_langchain_messages(messages)
 
         if stream:
@@ -74,11 +81,13 @@ class LLMGateway:
     async def generate_sync(
         self,
         messages: list[dict],
-        temperature: float = 0.7,
-        max_tokens: int = 2000,
+        temperature: Optional[float] = None,
+        max_tokens: Optional[int] = None,
     ) -> str:
         """同步生成 — 收集完整响应后返回"""
-        llm = self._get_llm(temperature=temperature, max_tokens=max_tokens)
+        t = temperature if temperature is not None else self.default_temperature
+        mt = max_tokens if max_tokens is not None else self.default_max_tokens
+        llm = self._get_llm(temperature=t, max_tokens=mt)
         lc_messages = self._to_langchain_messages(messages)
         response = await llm.ainvoke(lc_messages)
         return response.content

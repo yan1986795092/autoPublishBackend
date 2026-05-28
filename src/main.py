@@ -1,3 +1,4 @@
+import logging
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -6,44 +7,44 @@ from datetime import datetime
 import asyncio
 
 from src.core.exceptions import GenerateError
+from src.core.logging import configure_logging
+from src.core.migrations import migration_manager
+from src.config import get_settings
 from src.database import engine
 from src.models import Base
 from src.api import auth, contents, publish, platforms, templates, presets, ai_editor, personas
 from src.agent.api import router as agent_router
 from src.agent.workflow.worker import worker
+import src.migrations  # noqa: F401 — register migrations
+
+logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # 初始化日志
+    settings = get_settings()
+    configure_logging(debug=settings.debug)
+
     # 启动时：创建表 + 启动 Worker
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: Base.metadata.create_all(bind=engine))
 
-    # 迁移：为已有数据库添加 category 列
-    def _migrate():
-        from sqlalchemy import inspect, text
-        from src.database import SessionLocal
-        inspector = inspect(engine)
-        columns = [c['name'] for c in inspector.get_columns('platforms')]
-        if 'category' not in columns:
-            with engine.connect() as conn:
-                conn.execute(text("ALTER TABLE platforms ADD COLUMN category VARCHAR(50) DEFAULT 'social_media'"))
-                conn.commit()
-            print("[Migration] Added 'category' column to platforms table")
-    await loop.run_in_executor(None, _migrate)
+    # 运行数据库迁移
+    await loop.run_in_executor(None, lambda: migration_manager.run_all(engine))
 
     await worker.start()
-    print("[Agent Worker] Started")
+    logger.info("Agent Worker started")
     yield
     # 关闭时：停止 Worker
     await worker.stop()
-    print("[Agent Worker] Stopped")
+    logger.info("Agent Worker stopped")
 
 
 app = FastAPI(
     title="AutoPublish API",
     description="AI 内容生产与发布工具 API",
-    version="2.0.0",  # Agent 架构升级
+    version="2.0.0",
     docs_url="/docs",
     redoc_url="/redoc",
     lifespan=lifespan,
@@ -73,7 +74,7 @@ def _get_cors_origin(request: Request) -> str:
 
 @app.exception_handler(GenerateError)
 async def generate_error_handler(request: Request, exc: GenerateError) -> JSONResponse:
-    print(f"[ERROR] GenerateError: {exc.message}")
+    logger.error("GenerateError: %s", exc.message)
     return JSONResponse(
         status_code=exc.status_code,
         content={"success": False, "error": {"message": exc.message, "type": "GenerateError"}},
@@ -86,9 +87,7 @@ async def generate_error_handler(request: Request, exc: GenerateError) -> JSONRe
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    import traceback
-    print(f"[ERROR] Unhandled exception: {exc}")
-    traceback.print_exc()
+    logger.error("Unhandled exception: %s", exc, exc_info=True)
     return JSONResponse(
         status_code=500,
         content={
@@ -130,8 +129,37 @@ def root():
 
 
 @app.get("/health")
-def health_check():
-    return {"status": "healthy", "timestamp": datetime.utcnow().isoformat()}
+async def health_check():
+    """Health check with subsystem verification."""
+    from src.database import SessionLocal
+
+    db_healthy = False
+    try:
+        def _ping():
+            from sqlalchemy import text
+            db = SessionLocal()
+            try:
+                db.execute(text("SELECT 1"))
+                return True
+            finally:
+                db.close()
+        db_healthy = await asyncio.get_running_loop().run_in_executor(None, _ping)
+    except Exception as e:
+        logger.warning("Health check DB ping failed: %s", e)
+
+    worker_healthy = worker._running if hasattr(worker, '_running') else False
+
+    all_healthy = db_healthy and worker_healthy
+    status = "healthy" if all_healthy else "degraded"
+
+    return {
+        "status": status,
+        "timestamp": datetime.utcnow().isoformat(),
+        "checks": {
+            "database": "passed" if db_healthy else "failed",
+            "worker": "running" if worker_healthy else "stopped",
+        },
+    }
 
 
 if __name__ == "__main__":

@@ -55,15 +55,16 @@ class ModelRouter:
     def get_chat_model(
         self,
         agent_type: str,
-        tools: list | None = None,
     ) -> ChatOpenAI:
         """返回 LangChain ChatOpenAI 实例（供 LangGraph 节点直接使用）
 
+        注：工具绑定（bind_tools）统一由 ToolRegistry 处理，
+        不再在此处绑定 MCP 工具，避免重复绑定。
+
         Args:
             agent_type: Agent 类型，决定使用哪个角色配置
-            tools: 可选的 MCP 工具列表，绑定后 LLM 可调用这些工具
         """
-        cache_key = f"{agent_type}__tools={len(tools or [])}"
+        cache_key = agent_type
         if cache_key in self._chat_cache:
             return self._chat_cache[cache_key]
 
@@ -77,14 +78,10 @@ class ModelRouter:
             api_key=cfg["api_key"],
             model=cfg["model"] or "gpt-3.5-turbo",
             base_url=cfg["base_url"],
-            temperature=0.7,
-            max_tokens=2000,
+            temperature=self._settings.default_temperature,
+            max_tokens=self._settings.default_max_tokens,
             streaming=True,
         )
-
-        # 绑定 MCP 工具（如果有的话）
-        if tools:
-            model = model.bind_tools(tools)
 
         self._chat_cache[cache_key] = model
         return model

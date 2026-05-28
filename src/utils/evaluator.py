@@ -6,7 +6,7 @@ import re
 BANNED_WORDS = ["首个", "独家", "唯一", "绝对", "顶级", "百分百", "100%", "全网", "国家级", "最佳"]
 
 _BANNED_PATTERNS = [
-    re.compile(r'(?:排名|销量|口碑|销量|业绩|行业|全国|全球|全网)\s*第一'),
+    re.compile(r'(?:排名|销量|口碑|行业|全国|全球|全网)\s*第一'),
     re.compile(r'第一\s*(?:品牌|名|好|大)'),
     re.compile(r'第\s*一\s*(?:位|名)'),
 ]
@@ -15,10 +15,56 @@ for w in BANNED_WORDS:
 
 
 def extract_output(response: str) -> str:
-    """从 LLM 响应中提取 OUTPUT: 后面的内容"""
+    """从 LLM 响应中提取正文内容（支持多种分隔符，按优先级依次尝试）
+
+    1. "正文：" —— WritingAgent 的中文输出格式
+    2. "OUTPUT:" —— 英文输出格式
+    3. "### OUTPUT" / "```output" —— Markdown 代码块格式
+    4. 整体返回原始内容（strip 后）
+
+    即使没有任何分隔符也返回有效内容，不返回空字符串。
+    """
+    if not response:
+        return ""
+
+    # 1. 尝试中文分隔符
+    if "正文：" in response:
+        return response.split("正文：", 1)[1].strip()
+    if "正文:" in response:
+        return response.split("正文:", 1)[1].strip()
+
+    # 2. 尝试英文分隔符
     if "OUTPUT:" in response:
-        return response[response.index("OUTPUT:") + len("OUTPUT:"):].strip()
-    return response.strip()
+        return response.split("OUTPUT:", 1)[1].strip()
+    if "Output:" in response:
+        return response.split("Output:", 1)[1].strip()
+
+    # 3. 尝试 Markdown 代码块（```output ... ```）
+    if "```output" in response:
+        parts = response.split("```output", 1)
+        if len(parts) > 1 and "```" in parts[1]:
+            return parts[1].split("```", 1)[0].strip()
+    if "```json" in response:
+        # 尝试解析 JSON
+        import json
+        json_str = response.split("```json", 1)[1].split("```", 1)[0].strip()
+        try:
+            data = json.loads(json_str)
+            return data.get("content", data.get("output", json.dumps(data, ensure_ascii=False, indent=2)))
+        except (json.JSONDecodeError, Exception):
+            return response.strip()
+
+    # 4. 去掉推理前缀后返回
+    stripped = response.strip()
+    for prefix in ["思考：", "思考:", "Reasoning:", "reasoning:"]:
+        if prefix.lower() in stripped.lower():
+            idx = stripped.lower().index(prefix.lower())
+            # 只在 prefix 出现在开头时裁剪
+            if idx == 0:
+                stripped = stripped[len(prefix):].strip()
+                break
+
+    return stripped if stripped else ""
 
 
 def check_banned_words(content: str) -> list[dict]:

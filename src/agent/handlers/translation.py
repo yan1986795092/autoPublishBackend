@@ -7,6 +7,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import extract_output
 from .tool_utils import call_llm
+from src.utils.tokenizer import estimate_tokens
 
 LANG_NAMES: dict[str, str] = {
     "en": "English",
@@ -62,7 +63,7 @@ async def handle_translation(task_input: dict, llm: ChatOpenAI, mcp_tools: list 
     tool_descriptions = task_input.get("_tool_descriptions", "")
     sys_prompt = TRANSLATION_SYSTEM.format(target_lang=lang_name)
     if tool_descriptions:
-        sys_prompt += f"\n\n可用工具：\n{tool_descriptions}"
+        sys_prompt += "\n\n可用工具：\n\n" + tool_descriptions
 
     lc_messages = [
         SystemMessage(content=sys_prompt),
@@ -77,7 +78,7 @@ async def handle_translation(task_input: dict, llm: ChatOpenAI, mcp_tools: list 
     )
 
     translated = extract_output(response_text)
-    tokens = len(response_text) // 4
+    tokens = estimate_tokens(response_text)
 
     return {
         "status": "completed",

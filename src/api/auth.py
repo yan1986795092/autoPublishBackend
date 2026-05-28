@@ -64,12 +64,21 @@ def register(request: RegisterRequest, db: Session = Depends(get_db)):
     db.commit()
     db.refresh(user)
 
+    access_token = create_access_token(data={"sub": user.id})
+    refresh_token = create_refresh_token(data={"sub": user.id})
+
     return {
         "success": True,
         "data": {
-            "user_id": user.id,
-            "email": user.email,
-            "nickname": user.nickname,
+            "access_token": access_token,
+            "refresh_token": refresh_token,
+            "token_type": "bearer",
+            "expires_in": settings.access_token_expire_minutes * 60,
+            "user": {
+                "id": user.id,
+                "email": user.email,
+                "nickname": user.nickname,
+            }
         }
     }
 
