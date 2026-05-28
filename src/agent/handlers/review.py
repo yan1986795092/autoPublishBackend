@@ -43,6 +43,10 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         # 记忆上下文
         memory_context = task_input.get("_memory_context", "")
         memory_section = f"\n\n{memory_context}" if memory_context else ""
+        # 创作上下文（CreativeAnchors 等）
+        extra_context = task_input.get("_extra_context", "")
+        if extra_context:
+            memory_section += f"\n\n{extra_context}"
 
         # ── 用 PromptBuilder 构建 ──
         builder = PromptBuilder()

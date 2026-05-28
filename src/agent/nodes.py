@@ -18,6 +18,17 @@ from .handlers import HANDLER_MAP, handle_fallback
 from .cache import agent_cache
 from .retry import run_agent_with_retry, simple_quality_score
 from src.memory import memory_manager
+from src.memory.agent_scoped_view import (
+    build_agent_context,
+    write_to_context,
+    log_creative_decision,
+    update_creative_anchors,
+    check_anchor_drift_from_review,
+    ContentBlock,
+    ReviewBlock,
+    SEOBlock,
+    WriteResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +161,128 @@ def _add_thinking_step(state: AgentGraphState, agent: str, action: str, reasonin
         "status": status,
     }
     return {"thinking_steps": [step]}  # list reducer will append
+
+
+def _post_process_context(
+    agent_type: str,
+    result: dict,
+    store: Any,
+    state: AgentGraphState,
+) -> None:
+    """
+    Post-processing after handler execution:
+    1. Log creative decision (WritingAgent only)
+    2. Write output to context store via permission system
+    3. Extract and update creative anchors (WritingAgent only)
+    4. Check anchor drift (ReviewAgent only)
+    """
+    try:
+        if agent_type == "WritingAgent":
+            output = result.get("output", {})
+            content = output.get("content", "") if isinstance(output, dict) else ""
+
+            # 1. Log creative decision
+            decision = content[:200] + ("..." if len(content) > 200 else "")
+            log_creative_decision(
+                decision_text=decision,
+                tags=["writing_output"],
+                agent=agent_type,
+                store=store,
+            )
+
+            # 2. Write content to store via permission system
+            if content:
+                content_block = ContentBlock(text=content, agent=agent_type)
+                write_result = write_to_context(
+                    agent_name=agent_type,
+                    field_path="task.writing_content",
+                    value=content_block,
+                    store=store,
+                )
+                if write_result != WriteResult.ACCEPTED:
+                    logger.warning(
+                        "WritingAgent content write was not accepted: %s", write_result
+                    )
+
+            # 3. Extract and update creative anchors
+            updated = update_creative_anchors(result, store)
+            if updated:
+                logger.info("WritingAgent: updated creative anchors from output")
+
+        elif agent_type == "ReviewAgent":
+            # Check anchor drift from review output
+            drifts = check_anchor_drift_from_review(result, store)
+            if drifts > 0:
+                logger.info(
+                    "ReviewAgent: detected %d anchor drift signals", drifts
+                )
+
+            # Write review feedback to store
+            output = result.get("output", {})
+            if isinstance(output, dict):
+                feedback_text = output.get("content", "")
+                passed = output.get("passed", False)
+                review_block = ReviewBlock(
+                    text=feedback_text,
+                    approved=passed,
+                )
+                write_to_context(
+                    agent_name=agent_type,
+                    field_path="task.review_feedback",
+                    value=review_block,
+                    store=store,
+                )
+
+    except Exception as e:
+        logger.warning("Post-processing context failed for %s: %s", agent_type, e)
+
+
+def _serialize_context_for_prompt(ctx: dict, agent_type: str) -> str:
+    """Serialize a permission-scoped context view into a prompt string."""
+    parts = ["[Context]"]
+
+    system = ctx.get("system", {})
+    if system.get("project_manifest"):
+        pm = system["project_manifest"]
+        if hasattr(pm, "title"):
+            parts.append(f"Project: {pm.title} | Stage: {pm.stage.value if hasattr(pm.stage, 'value') else pm.stage}")
+
+    if system.get("creative_log"):
+        parts.append("\n[Creative Decision History]")
+        for d in system["creative_log"][-3:]:
+            parts.append(f"  - [{d.agent}] {d.decision_text}")
+
+    task = ctx.get("task", {})
+    if task.get("creative_anchors"):
+        anchors = task["creative_anchors"]
+        if hasattr(anchors, "story_outline") and anchors.story_outline:
+            parts.append(f"\n[Story Outline]: {anchors.story_outline}")
+        if hasattr(anchors, "character_profiles") and anchors.character_profiles:
+            parts.append("[Characters]:")
+            for name, profile in anchors.character_profiles.items():
+                parts.append(f"  - {name}: {profile}")
+        if hasattr(anchors, "world_setting") and anchors.world_setting:
+            parts.append(f"\n[World Setting]: {anchors.world_setting}")
+        if hasattr(anchors, "plot_milestones") and anchors.plot_milestones:
+            parts.append("[Plot Milestones]:")
+            for m in anchors.plot_milestones:
+                parts.append(f"  - {m}")
+        if hasattr(anchors, "style_guide") and anchors.style_guide:
+            parts.append(f"\n[Style Guide]: {anchors.style_guide}")
+
+    if agent_type == "WritingAgent" and "creative_view" in ctx:
+        cv = ctx["creative_view"]
+        if cv.get("active_feedback", {}).get("review"):
+            review = cv["active_feedback"]["review"]
+            parts.append(f"\n[Review Feedback]: {review.text}")
+        if cv.get("recent_content"):
+            for content in cv["recent_content"][-2:]:
+                text = getattr(content, "text", str(content))
+                parts.append(f"\n[Recent Content]: {text[-300:]}")
+
+    parts.append("[/Context]")
+    return "\n".join(parts)
+
 
 # ──────────────────────────────────────────────
 # 1. classify_and_decompose 节点
@@ -467,6 +600,16 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             if mcp_tools:
                 t_input["_mcp_tools"] = mcp_tools
 
+            # ── Context management: inject permission-scoped context ──
+            context_store = state.get("_context_store")
+            if context_store is not None:
+                try:
+                    ctx = build_agent_context(agent_type, context_store)
+                    context_str = _serialize_context_for_prompt(ctx, agent_type)
+                    t_input["_extra_context"] = context_str
+                except Exception as e:
+                    logger.warning("Failed to build agent context: %s", e)
+
             # 缓存检查：对非写作/分析类 Agent 启用缓存
             cacheable_types = {"SEOAgent", "ReviewAgent", "WebSearch", "HotTopicAgent", "PlatformAdapter"}
             use_cache = agent_type in cacheable_types and not t_input.get("_skip_cache")
@@ -594,6 +737,11 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     )
             else:
                 result = await _handler(t_input, llm, _mcp)
+
+            # ── Context management: post-processing after handler ──
+            context_store = state.get("_context_store")
+            if context_store is not None and result.get("status") in ("completed", "partial"):
+                _post_process_context(agent_type, result, context_store, state)
 
             # 清理回调引用（不可 JSON 序列化），在后续操作前移除
             t_input.pop("_on_llm_chunk", None)
@@ -740,6 +888,21 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
 
     # 持久化（异步，不阻塞）
     asyncio.create_task(_persist_results_async(state, sections, full_text_parts, status))
+
+    # ── Context management: finalize session via ConsolidatorNode ──
+    enable_ctx = state.get("enable_context_management", False)
+    context_store = state.get("_context_store")
+    if enable_ctx and context_store is not None:
+        try:
+            from src.memory.consolidator import ConsolidatorNode
+            consolidator = ConsolidatorNode()
+            result = consolidator.finalize(context_store)
+            logger.info(
+                "ConsolidatorNode finalized: status=%s, drifts=%d, entities=%d",
+                result.status, len(result.anchor_drifts), len(result.new_memory_entries),
+            )
+        except Exception as e:
+            logger.warning("ConsolidatorNode.finalize failed: %s", e)
 
     return {
         "final_output": {

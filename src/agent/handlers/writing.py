@@ -65,6 +65,11 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         if memory_context:
             builder.memory(f"\n\n{memory_context}")
 
+        # 创作上下文（CreativeAnchors、反馈、最近内容等）
+        extra_context = task_input.get("_extra_context", "")
+        if extra_context:
+            builder.memory(f"\n\n{extra_context}")
+
         # ── 构建消息 ──
         composed = builder.build()
         messages = composed.messages
