@@ -595,6 +595,12 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             if dep_context:
                 t_input["_context"] = dep_context
 
+            # ── Skill context injection: prepend skill system prompt ──
+            skill_system_prompt = state.get("skill_system_prompt", "")
+            if skill_system_prompt:
+                t_input["_skill_system_prompt"] = skill_system_prompt
+                t_input["_skill_name"] = state.get("skill_name", "")
+
             # MCP 工具传递给支持的 handlers
             mcp_tools = state.get("_mcp_tools", [])
             if mcp_tools:

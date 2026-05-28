@@ -36,6 +36,7 @@ class AsyncTask:
     user_id: str
     prompt: str
     plan: Optional[dict] = None
+    skill_context: Optional[dict] = None  # Skill 系统提示词和配置
     state: TaskState = TaskState.PENDING
     progress: float = 0.0
     progress_message: str = ""
@@ -154,12 +155,13 @@ class TaskQueue:
         # 死信队列：重试耗尽后仍然失败的任务
         self._dead_letter_queue: dict[str, AsyncTask] = {}
 
-    async def enqueue(self, prompt: str, user_id: str, metadata: Optional[dict] = None, plan: Optional[dict] = None) -> AsyncTask:
+    async def enqueue(self, prompt: str, user_id: str, metadata: Optional[dict] = None, plan: Optional[dict] = None, skill_context: Optional[dict] = None) -> AsyncTask:
         task = AsyncTask(
             id=str(uuid.uuid4()),
             user_id=user_id,
             prompt=prompt,
             plan=plan,
+            skill_context=skill_context,
             metadata=metadata or {},
         )
         self._tasks[task.id] = task

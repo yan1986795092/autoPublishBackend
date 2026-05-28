@@ -39,6 +39,11 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         # system prompt
         builder.system("system.base")
 
+        # ── Skill system prompt injection ──
+        skill_system_prompt = task_input.get("_skill_system_prompt", "")
+        if skill_system_prompt:
+            builder.context(f"\n\n=== 创作指导 (Skill: {task_input.get('_skill_name', 'Custom')}) ===\n{skill_system_prompt}\n===")
+
         # 任务指令
         type_guide = CONTENT_TYPE_PROMPTS.get(content_type, CONTENT_TYPE_PROMPTS["blog"])
         style_guide = STYLE_GUIDES.get(style, "自然流畅，有自己的观点和态度")

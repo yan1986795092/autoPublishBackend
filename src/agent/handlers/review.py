@@ -51,6 +51,12 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         # ── 用 PromptBuilder 构建 ──
         builder = PromptBuilder()
         builder.system("system.reviewer")
+
+        # ── Skill system prompt injection ──
+        skill_system_prompt = task_input.get("_skill_system_prompt", "")
+        if skill_system_prompt:
+            builder.context(f"\n\n=== 创作指导 (Skill: {task_input.get('_skill_name', 'Custom')}) ===\n{skill_system_prompt}\n===")
+
         builder.instructions("review.task", {
             "content": content[:3000],
             "content_type": content_type,
