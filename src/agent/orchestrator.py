@@ -83,8 +83,9 @@ class Orchestrator:
         self.message_bus = message_bus
         self.reflection_engine = reflection_engine
         self.tool_registry = tool_registry
-
         self._graph = build_agent_graph()
+        self._context_manager = None
+        self._context_store = None
 
     def register_agent(self, agent_type: str, agent: Any) -> None:
         """No-op — agents are now registered via chat_models dict."""
@@ -181,11 +182,29 @@ class Orchestrator:
                     "_hitl_manager": self.hitl_manager,
                     "pending_gates": [],
                     "_tool_registry": self.tool_registry,
+                    # Context management (layered multi-agent system)
+                    "enable_context_management": True,
+                    "_context_store": None,
+                    "_context_manager": None,
                 }
+
+                # ── Initialize context management ──
+                from src.memory import ContextManager, SharedContextStore
+                self._context_manager = ContextManager()
+                conversation_id = (context or {}).get("conversation_id", "default")
+                self._context_store = self._context_manager.handle_message(
+                    user_message=user_request,
+                    conversation_id=conversation_id,
+                    project_id=(context or {}).get("project_id"),
+                    project_directive=(context or {}).get("project_directive"),
+                )
+                initial_state["_context_manager"] = self._context_manager
+                initial_state["_context_store"] = self._context_store
 
                 # ── 运行 Graph ──
                 config = {"recursion_limit": 200}
                 final_state = await self._graph.ainvoke(initial_state, config=config)
+                # Note: ConsolidatorNode.finalize() is now called inside merge_and_finish node
 
                 elapsed = round(time.time() - start_time, 2)
                 status = final_state.get("status", "completed")

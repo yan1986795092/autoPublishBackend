@@ -22,7 +22,50 @@ from .semantic_memory import SemanticMemory
 from .episodic_memory import EpisodicMemory
 from .schemas import MemoryItem, Episode
 
+# Context management (multi-agent layered system)
+from .context_store import (
+    SharedContextStore,
+    CreativeAnchors,
+    CreativeDecision,
+    StructuredMemoryEntry,
+    ProjectManifest,
+    ProjectStage,
+    AnchorDrift,
+    ThinkingStep,
+    ContentBlock,
+    ReviewBlock,
+    SEOBlock,
+    AgentPrivateState,
+    AGENT_PERMISSIONS,
+    VALID_TRANSITIONS,
+    WriteResult,
+)
+from .context_manager import ContextManager
+from .agent_scoped_view import (
+    build_agent_context,
+    write_to_context,
+    log_creative_decision,
+    get_context_for_writing_agent,
+    filter_task_fields,
+    log_review_anchor_drift,
+    extract_anchors_from_content,
+    update_creative_anchors,
+    check_anchor_drift_from_review,
+)
+from .consolidator import (
+    ConsolidatorNode,
+    AnchorConsistencyChecker,
+    ConsolidationResult,
+)
+from .structured_memory import (
+    EntityMemory,
+    PlotMemory,
+    ProjectIndex,
+    CreativeSummaryMemory,
+)
+
 __all__ = [
+    # Existing
     "MemoryManager",
     "memory_manager",
     "WorkingMemory",
@@ -30,4 +73,40 @@ __all__ = [
     "EpisodicMemory",
     "MemoryItem",
     "Episode",
+    # Context store
+    "SharedContextStore",
+    "CreativeAnchors",
+    "CreativeDecision",
+    "StructuredMemoryEntry",
+    "ProjectManifest",
+    "ProjectStage",
+    "AnchorDrift",
+    "ThinkingStep",
+    "ContentBlock",
+    "ReviewBlock",
+    "SEOBlock",
+    "AgentPrivateState",
+    "AGENT_PERMISSIONS",
+    "VALID_TRANSITIONS",
+    "WriteResult",
+    # Context management
+    "ContextManager",
+    "build_agent_context",
+    "write_to_context",
+    "log_creative_decision",
+    "get_context_for_writing_agent",
+    "filter_task_fields",
+    "log_review_anchor_drift",
+    "extract_anchors_from_content",
+    "update_creative_anchors",
+    "check_anchor_drift_from_review",
+    # Consolidator
+    "ConsolidatorNode",
+    "AnchorConsistencyChecker",
+    "ConsolidationResult",
+    # Structured memory
+    "EntityMemory",
+    "PlotMemory",
+    "ProjectIndex",
+    "CreativeSummaryMemory",
 ]

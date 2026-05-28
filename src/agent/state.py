@@ -62,3 +62,8 @@ class AgentGraphState(TypedDict):
     enable_hitl: bool = False
     _hitl_manager: Any = None      # HITLManager 实例
     pending_gates: list[dict] = [] # 序列化的 pending gates
+
+    # === Context Management (Layered Multi-Agent) ===
+    _context_store: Any = None    # SharedContextStore 实例
+    _context_manager: Any = None  # ContextManager 实例
+    enable_context_management: bool = False

@@ -92,12 +92,16 @@ def simple_quality_score(output: dict) -> float:
         ("「」", "空引号标记"),
         ("_____", "下划线占位"),
     ]
-    for pattern in placeholder_patterns:
+    for item in placeholder_patterns:
+        if isinstance(item, tuple):
+            pattern, _ = item
+        else:
+            pattern = item
         if isinstance(pattern, re.Pattern):
             if pattern.search(content):
                 score -= 10
                 break
-        else:
+        elif isinstance(pattern, str):
             if pattern.lower() in content.lower():
                 score -= 10
                 break
