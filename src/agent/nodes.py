@@ -30,7 +30,21 @@ from src.memory.agent_scoped_view import (
     WriteResult,
 )
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
+from src.observability import get_tracer
+from src.observability.metrics import record_agent_task, record_agent_think
+
 logger = logging.getLogger(__name__)
+
+_tracer = None
+
+
+def _get_tracer() -> trace.Tracer:
+    global _tracer
+    if _tracer is None:
+        _tracer = get_tracer("agent.nodes")
+    return _tracer
 
 # Token Budget 配置 — 已迁移至 Settings.agent_token_budgets
 
@@ -295,105 +309,121 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
     - 简单任务 → 模板计划（跳过 LLM）
     - 中等/复杂任务 → LLM 拆解 + 模板兜底
     """
+    tracer = _get_tracer()
     user_request = state.get("user_request", "")
-    context = state.get("context", {})
     trace_id = str(uuid.uuid4())
+    complexity = _classify_complexity(user_request)
 
-    # 如果已有预计算计划（来自 SSE /agent/stream），直接跳过分解
-    existing_plan = state.get("plan")
-    if existing_plan and existing_plan.get("tasks"):
-        logger.info("Using pre-computed plan from SSE, skipping re-decomposition")
-        return {
+    with tracer.start_as_current_span(
+        "agent.classify",
+        kind=trace.SpanKind.INTERNAL,
+        attributes={
+            "agent.node": "classify_and_decompose",
+            "agent.complexity": complexity,
+            "agent.user_request.preview": user_request[:200],
+            "custom.run_id": state.get("trace_task_id", ""),
+        },
+    ) as span:
+        span.add_event("complexity_classified", {"complexity": complexity})
+        existing_plan = state.get("plan")
+        if existing_plan and existing_plan.get("tasks"):
+            logger.info("Using pre-computed plan from SSE, skipping re-decomposition")
+            return {
+                "trace_task_id": trace_id,
+                "start_time": time.time(),
+                "thinking_steps": [{
+                    "step_number": 1,
+                    "agent": "ManagerAgent",
+                    "action": "任务拆解完成",
+                    "reasoning": "Using pre-computed plan from SSE endpoint",
+                    "input_summary": user_request[:200],
+                    "output_summary": f"执行计划：{existing_plan.get('reasoning', '')[:80]}...",
+                    "tokens_used": 0,
+                    "time_elapsed": 0,
+                    "status": "done",
+                }],
+                "status": "running",
+                "task_queue": existing_plan.get("tasks", []),
+                "plan_reasoning": existing_plan.get("reasoning", ""),
+            }
+
+        updates = {
             "trace_task_id": trace_id,
             "start_time": time.time(),
-            "thinking_steps": [{
+            "thinking_steps": [],
+            "status": "running",
+        }
+
+        span.add_event("step_started", {"step": "complexity_classification"})
+        updates.update(_add_thinking_step(
+            state, "ManagerAgent", "decompose",
+            reasoning=f"Analyzing user request: {user_request[:100]}...",
+            input_summary=user_request[:200],
+        ))
+
+        logger.info(f"Classified request as '{complexity}': {user_request[:80]}")
+        span.set_attribute("agent.complexity", complexity)
+
+        if complexity == "simple":
+            plan = _build_template_plan(user_request, complexity)
+            updates["plan"] = plan
+            updates["plan_reasoning"] = plan["reasoning"]
+            updates["task_queue"] = plan["tasks"]
+            step = {
                 "step_number": 1,
                 "agent": "ManagerAgent",
                 "action": "任务拆解完成",
-                "reasoning": "Using pre-computed plan from SSE endpoint",
+                "reasoning": f"简单任务，使用模板计划（{len(plan['tasks'])} 步）",
                 "input_summary": user_request[:200],
-                "output_summary": f"执行计划：{existing_plan.get('reasoning', '')[:80]}...",
+                "output_summary": f"执行计划：{plan['reasoning'][:80]}...",
                 "tokens_used": 0,
                 "time_elapsed": 0,
                 "status": "done",
-            }],
-            "status": "running",
-            "task_queue": existing_plan.get("tasks", []),
-            "plan_reasoning": existing_plan.get("reasoning", ""),
-        }
+            }
+            updates["thinking_steps"] = [step]
+            span.add_event("plan_built", {"task_count": len(plan["tasks"]), "method": "template"})
+            span.set_status(Status(StatusCode.OK))
+            return updates
 
-    updates = {
-        "trace_task_id": trace_id,
-        "start_time": time.time(),
-        "thinking_steps": [],
-        "status": "running",
-    }
-
-    # 复杂度分类
-    updates.update(_add_thinking_step(
-        state, "ManagerAgent", "decompose",
-        reasoning=f"Analyzing user request: {user_request[:100]}...",
-        input_summary=user_request[:200],
-    ))
-
-    complexity = _classify_complexity(user_request)
-    logger.info(f"Classified request as '{complexity}': {user_request[:80]}")
-
-    if complexity == "simple":
-        plan = _build_template_plan(user_request, complexity)
-        updates["plan"] = plan
-        updates["plan_reasoning"] = plan["reasoning"]
-        updates["task_queue"] = plan["tasks"]
-        # 更新 thinking step
-        step = {
-            "step_number": 1,
-            "agent": "ManagerAgent",
-            "action": "任务拆解完成",
-            "reasoning": f"简单任务，使用模板计划（{len(plan['tasks'])} 步）",
-            "input_summary": user_request[:200],
-            "output_summary": f"执行计划：{plan['reasoning'][:80]}...",
-            "tokens_used": 0,
-            "time_elapsed": 0,
-            "status": "done",
-        }
-        updates["thinking_steps"] = [step]
-        return updates
-
-    # 中等/复杂 → LLM 拆解
-    llm = _get_llm(state, "ManagerAgent")
-    if not llm:
-        # 回退到模板
-        plan = _build_template_plan(user_request, complexity)
-        updates["plan"] = plan
-        updates["plan_reasoning"] = plan["reasoning"]
-        updates["task_queue"] = plan["tasks"]
-        return updates
-
-    try:
-        context_str = json.dumps(context, ensure_ascii=False, indent=2) if context else "{}"
-        response = await llm.ainvoke([
-            SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-            HumanMessage(content=f"User request: {user_request}\n\nComplexity: {complexity}\nContext: {context_str}\n\nBreak this down into sub-tasks."),
-        ])
-        plan = _parse_plan(response.content, user_request)
-
-        # 验证计划
-        if complexity == "medium" and len(plan.get("tasks", [])) > 8:
+        llm = _get_llm(state, "ManagerAgent")
+        if not llm:
             plan = _build_template_plan(user_request, complexity)
-        elif complexity == "complex" and len(plan.get("tasks", [])) < 2:
+            updates["plan"] = plan
+            updates["plan_reasoning"] = plan["reasoning"]
+            updates["task_queue"] = plan["tasks"]
+            span.set_status(Status(StatusCode.OK))
+            return updates
+
+        span.add_event("llm_decomposition_started")
+        try:
+            context_str = json.dumps(state.get("context", {}), ensure_ascii=False, indent=2) if state.get("context") else "{}"
+            response = await llm.ainvoke([
+                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                HumanMessage(content=f"User request: {user_request}\n\nComplexity: {complexity}\nContext: {context_str}\n\nBreak this down into sub-tasks."),
+            ])
+            plan = _parse_plan(response.content, user_request)
+
+            if complexity == "medium" and len(plan.get("tasks", [])) > 8:
+                plan = _build_template_plan(user_request, complexity)
+            elif complexity == "complex" and len(plan.get("tasks", [])) < 2:
+                plan = _build_template_plan(user_request, complexity)
+
+            updates["plan"] = plan
+            updates["plan_reasoning"] = plan.get("reasoning", "")
+            updates["task_queue"] = plan.get("tasks", [])
+            span.add_event("llm_decomposition_completed", {"task_count": len(plan.get("tasks", []))})
+        except Exception as e:
+            logger.warning(f"LLM decompose failed ({e}), using template")
             plan = _build_template_plan(user_request, complexity)
+            updates["plan"] = plan
+            updates["plan_reasoning"] = plan["reasoning"]
+            updates["task_queue"] = plan["tasks"]
+            span.record_exception(e)
+            span.set_status(Status(StatusCode.ERROR, str(e)))
 
-        updates["plan"] = plan
-        updates["plan_reasoning"] = plan.get("reasoning", "")
-        updates["task_queue"] = plan.get("tasks", [])
-    except Exception as e:
-        logger.warning(f"LLM decompose failed ({e}), using template")
-        plan = _build_template_plan(user_request, complexity)
-        updates["plan"] = plan
-        updates["plan_reasoning"] = plan["reasoning"]
-        updates["task_queue"] = plan["tasks"]
-
-    return updates
+        span.set_attribute("agent.task_count", len(updates.get("task_queue", [])))
+        span.set_status(Status(StatusCode.OK))
+        return updates
 
 
 def _parse_plan(response: str, goal: str) -> dict:
@@ -425,14 +455,8 @@ def _parse_plan(response: str, goal: str) -> dict:
 # ──────────────────────────────────────────────
 
 async def schedule_and_execute(state: AgentGraphState) -> dict:
-    """调度节点：检查 DAG 依赖，找出下一批可执行的任务
-
-    合并了原 find_ready_tasks 和 check_task_results 的逻辑：
-    - 根据 DAG 依赖关系，找出依赖已满足的任务
-    - 如果有 ready 任务，触发 execute_task_batch
-    - 如果没有 ready 任务，进入 merge_and_finish
-    - 处理死锁检测
-    """
+    """调度节点：检查 DAG 依赖，找出下一批可执行的任务"""
+    tracer = _get_tracer()
     task_queue = state.get("task_queue", [])
     completed_ids = set(state.get("completed_task_ids", []))
     failed_ids = set(state.get("failed_task_ids", []))
@@ -440,7 +464,6 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
     def deps_met(task: dict, task_queue: list[dict], completed_ids: set, failed_ids: set) -> bool:
         for dep in task.get("dependencies", []):
             dep_id = _resolve_dep_id(dep, task_queue)
-            # None = 依赖引用无效（索引越界或 ID 不存在），视为未满足
             if dep_id is None:
                 return False
             if dep_id not in completed_ids and dep_id not in failed_ids:
@@ -457,87 +480,144 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
     total_done = len(completed_ids) + len(failed_ids)
     total_tasks = len(task_queue)
 
-    # 死锁检测
-    if not ready and total_done < total_tasks:
-        stuck = [t for t in task_queue if t.get("id") not in completed_ids and t.get("id") not in failed_ids]
-        deps_unmet = 0
-        for t in stuck:
-            for d in t.get("dependencies", []):
-                resolved = _resolve_dep_id(d, task_queue)
-                # 只有有效依赖才计入未满足数；无效引用本身不阻塞死锁检测
-                if resolved is not None and resolved not in completed_ids and resolved not in failed_ids:
-                    deps_unmet += 1
-        if deps_unmet == 0:
-            logger.warning(f"Deadlock detected: {len(stuck)} tasks stuck with no unmet dependencies")
-            return {
-                "ready_tasks": [],
-                "failed_task_ids": list(state.get("failed_task_ids", [])) + [t["id"] for t in stuck],
-            }
-        else:
-            logger.info(f"{len(stuck)} tasks not ready ({deps_unmet} unmet deps)")
-            return {"ready_tasks": []}
+    with tracer.start_as_current_span(
+        "agent.schedule",
+        kind=trace.SpanKind.INTERNAL,
+        attributes={
+            "agent.node": "schedule_and_execute",
+            "schedule.total_tasks": total_tasks,
+            "schedule.completed": len(completed_ids),
+            "schedule.failed": len(failed_ids),
+            "schedule.ready_count": len(ready),
+            "custom.run_id": state.get("trace_task_id", ""),
+        },
+    ) as span:
+        if not ready and total_done < total_tasks:
+            stuck = [t for t in task_queue if t.get("id") not in completed_ids and t.get("id") not in failed_ids]
+            deps_unmet = sum(
+                1 for t in stuck for d in t.get("dependencies", [])
+                if _resolve_dep_id(d, task_queue) is not None
+                and _resolve_dep_id(d, task_queue) not in completed_ids
+                and _resolve_dep_id(d, task_queue) not in failed_ids
+            )
+            if deps_unmet == 0:
+                logger.warning(f"Deadlock detected: {len(stuck)} tasks stuck with no unmet dependencies")
+                span.add_event("deadlock_detected", {"stuck_count": len(stuck)})
+                span.set_status(Status(StatusCode.ERROR, "Deadlock detected"))
+                return {
+                    "ready_tasks": [],
+                    "failed_task_ids": list(state.get("failed_task_ids", [])) + [t["id"] for t in stuck],
+                }
+            else:
+                span.add_event("waiting_for_dependencies", {"deps_unmet": deps_unmet})
+                span.set_status(Status(StatusCode.OK))
+                return {"ready_tasks": []}
 
-    return {"ready_tasks": ready}
+        span.set_status(Status(StatusCode.OK))
+        return {"ready_tasks": ready}
 
 # ──────────────────────────────────────────────
 # 3. execute_task_batch 节点
 # ──────────────────────────────────────────────
 
 async def execute_task_batch(state: AgentGraphState) -> dict:
-    """并行执行当前批次的所有任务
-
-    注意：此节点仅负责执行，ready_tasks 的检查由 schedule_and_execute 完成。
-
-    重要：step_number 在任务开始前预先分配，防止并行执行时竞态导致编号重复。
-    """
+    """并行执行当前批次的所有任务"""
+    tracer = _get_tracer()
     ready_tasks = state.get("ready_tasks", [])
     existing_steps = state.get("thinking_steps", [])
     base_step = len(existing_steps)
-
     concurrency = state.get("concurrency_limit", 3)
-    semaphore = asyncio.Semaphore(concurrency)
+    run_id = state.get("trace_task_id", "")
 
-    async def run_one(task: dict, task_step_number: int) -> tuple[str, dict]:
-        async with semaphore:
-            result = await _run_single_agent_task(task, state, task_step_number=task_step_number)
-            return task["id"], result
+    with tracer.start_as_current_span(
+        "agent.batch_execute",
+        kind=trace.SpanKind.INTERNAL,
+        attributes={
+            "agent.node": "execute_task_batch",
+            "batch.size": len(ready_tasks),
+            "batch.max_concurrent": concurrency,
+            "custom.run_id": run_id,
+        },
+    ) as batch_span:
+        semaphore = asyncio.Semaphore(concurrency)
 
-    tasks_with_steps = [
-        (t, base_step + i + 1)
-        for i, t in enumerate(ready_tasks)
-    ]
-    results_list = await asyncio.gather(
-        *[run_one(t, sn) for t, sn in tasks_with_steps],
-        return_exceptions=True,
-    )
+        async def run_one(task: dict, task_step_number: int) -> tuple[str, dict]:
+            task_id = task.get("id", "")
+            agent_type = task.get("agent_type", "")
 
-    task_results = dict(state.get("task_results", {}))
-    completed = list(state.get("completed_task_ids", []))
-    failed = list(state.get("failed_task_ids", []))
-    new_steps = []
+            with tracer.start_as_current_span(
+                "agent.task_run",
+                kind=trace.SpanKind.INTERNAL,
+                attributes={
+                    "agent.node": "agent_task_run",
+                    "task.id": task_id,
+                    "task.type": task.get("type", ""),
+                    "task.agent_type": agent_type,
+                    "task.priority": task.get("priority", 0),
+                    "task.dependencies": json.dumps(task.get("dependencies", [])),
+                    "custom.run_id": run_id,
+                },
+            ) as task_span:
+                async with semaphore:
+                    try:
+                        result = await _run_single_agent_task(task, state, task_step_number=task_step_number)
+                        task_span.set_status(Status(StatusCode.OK))
+                        task_span.set_attribute("task.status", result.get("status", "unknown"))
+                        return task_id, result
+                    except Exception as e:
+                        task_span.set_status(Status(StatusCode.ERROR, str(e)))
+                        task_span.record_exception(e)
+                        task_span.set_attribute("task.status", "failed")
+                        raise
 
-    for task_id, result in results_list:
-        # 防御：一个 Agent 抛异常不应导致整批失败；其余继续
-        if isinstance(result, Exception):
-            logger.error("Agent task %s raised exception: %s", task_id, result)
-            failed.append(task_id)
-            task_results[task_id] = {
-                "status": "failed",
-                "error": str(result),
-                "thinking_steps": [],
-            }
-            continue
+        tasks_with_steps = [(t, base_step + i + 1) for i, t in enumerate(ready_tasks)]
+        batch_span.add_event("batch_started", {"task_count": len(tasks_with_steps)})
 
-        task_results[task_id] = result
-        if result.get("status") in ("completed", "partial"):
-            completed.append(task_id)
-        else:
-            failed.append(task_id)
-        if result.get("thinking_steps"):
-            new_steps.extend(result["thinking_steps"])
+        results_list = await asyncio.gather(
+            *[run_one(t, sn) for t, sn in tasks_with_steps],
+            return_exceptions=True,
+        )
 
-    # 合并本次新增步骤到已有步骤，防止被 LangGraph 覆盖
-    existing = state.get("thinking_steps", [])
+        task_results = dict(state.get("task_results", {}))
+        completed = list(state.get("completed_task_ids", []))
+        failed = list(state.get("failed_task_ids", []))
+        new_steps = []
+
+        for task_id, result in results_list:
+            if isinstance(result, Exception):
+                logger.error("Agent task %s raised exception: %s", task_id, result)
+                failed.append(task_id)
+                task_results[task_id] = {
+                    "status": "failed", "error": str(result), "thinking_steps": [],
+                }
+                continue
+            task_results[task_id] = result
+            if result.get("status") in ("completed", "partial"):
+                completed.append(task_id)
+            else:
+                failed.append(task_id)
+            if result.get("thinking_steps"):
+                new_steps.extend(result["thinking_steps"])
+
+        existing = state.get("thinking_steps", [])
+        batch_span.add_event("batch_completed", {
+            "completed": len(completed), "failed": len(failed),
+        })
+        batch_span.set_status(Status(StatusCode.OK))
+
+        record_agent_task(
+            agent_type="batch",
+            task_type="batch_execute",
+            status="completed",
+            duration_s=(time.time() - state.get("start_time", time.time())),
+        )
+
+        return {
+            "task_results": task_results,
+            "completed_task_ids": completed,
+            "failed_task_ids": failed,
+            "thinking_steps": existing + new_steps,
+        }
     return {
         "task_results": task_results,
         "completed_task_ids": completed,
@@ -846,79 +926,94 @@ def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
 
 async def merge_and_finish(state: AgentGraphState) -> dict:
     """合并所有子任务结果为最终输出 + 持久化"""
+    tracer = _get_tracer()
     plan = state.get("plan") or {}
     task_results = state.get("task_results", {})
     task_queue = state.get("task_queue", [])
     completed_ids = set(state.get("completed_task_ids", []))
     failed_ids = set(state.get("failed_task_ids", []))
 
-    sections = []
-    full_text_parts = []
-
-    for task in task_queue:
-        tid = task.get("id", "")
-        result = task_results.get(tid, {})
-        if tid in completed_ids or tid in failed_ids:
-            sections.append({
-                "agent": result.get("agent_type", task.get("agent_type", "")),
-                "task_input": task.get("input", {}),
-                "output": result.get("output", {}),
-                "status": result.get("status", "unknown"),
-                "error": result.get("error"),
-            })
-            content = result.get("output", {}).get("content", "")
-            if content:
-                full_text_parts.append(f"\n\n--- {result.get('agent_type', task.get('agent_type', ''))} ---\n{content}")
-
-            # ── 记忆沉淀：执行完成后选择性写入 ──
-            # 改为 await 而非 fire-and-forget，确保失败时至少有日志记录
-            try:
-                await memory_manager.remember(
-                    agent_type=result.get("agent_type", task.get("agent_type", "")),
-                    task_input=task.get("input", {}),
-                    result=result,
-                    user_id=state.get("context", {}).get("user_id", ""),
-                )
-            except Exception as e:
-                logger.warning("Memory remember failed for %s: %s",
-                               result.get("agent_type", "unknown"), e)
-
-    completed = len(completed_ids)
-    failed = len(failed_ids)
-
-    status = "completed"
-    if failed > 0 and completed == 0:
-        status = "failed"
-    elif failed > 0:
-        status = "partial"
-
-    # 持久化（异步，不阻塞）
-    asyncio.create_task(_persist_results_async(state, sections, full_text_parts, status))
-
-    # ── Context management: finalize session via ConsolidatorNode ──
-    enable_ctx = state.get("enable_context_management", False)
-    context_store = state.get("_context_store")
-    if enable_ctx and context_store is not None:
-        try:
-            from src.memory.consolidator import ConsolidatorNode
-            consolidator = ConsolidatorNode()
-            result = consolidator.finalize(context_store)
-            logger.info(
-                "ConsolidatorNode finalized: status=%s, drifts=%d, entities=%d",
-                result.status, len(result.anchor_drifts), len(result.new_memory_entries),
-            )
-        except Exception as e:
-            logger.warning("ConsolidatorNode.finalize failed: %s", e)
-
-    return {
-        "final_output": {
-            "goal": plan.get("goal", ""),
-            "plan_reasoning": plan.get("reasoning", ""),
-            "sections": sections,
-            "full_text": "".join(full_text_parts),
+    with tracer.start_as_current_span(
+        "agent.merge",
+        kind=trace.SpanKind.INTERNAL,
+        attributes={
+            "agent.node": "merge_and_finish",
+            "merge.total_tasks": len(task_queue),
+            "merge.completed": len(completed_ids),
+            "merge.failed": len(failed_ids),
+            "custom.run_id": state.get("trace_task_id", ""),
         },
-        "status": status,
-    }
+    ) as merge_span:
+        sections = []
+        full_text_parts = []
+
+        for task in task_queue:
+            tid = task.get("id", "")
+            result = task_results.get(tid, {})
+            if tid in completed_ids or tid in failed_ids:
+                sections.append({
+                    "agent": result.get("agent_type", task.get("agent_type", "")),
+                    "task_input": task.get("input", {}),
+                    "output": result.get("output", {}),
+                    "status": result.get("status", "unknown"),
+                    "error": result.get("error"),
+                })
+                content = result.get("output", {}).get("content", "")
+                if content:
+                    full_text_parts.append(f"\n\n--- {result.get('agent_type', task.get('agent_type', ''))} ---\n{content}")
+
+                try:
+                    await memory_manager.remember(
+                        agent_type=result.get("agent_type", task.get("agent_type", "")),
+                        task_input=task.get("input", {}),
+                        result=result,
+                        user_id=state.get("context", {}).get("user_id", ""),
+                    )
+                except Exception as e:
+                    logger.warning("Memory remember failed for %s: %s",
+                                   result.get("agent_type", "unknown"), e)
+
+        completed = len(completed_ids)
+        failed = len(failed_ids)
+
+        status = "completed"
+        if failed > 0 and completed == 0:
+            status = "failed"
+        elif failed > 0:
+            status = "partial"
+
+        asyncio.create_task(_persist_results_async(state, sections, full_text_parts, status))
+
+        enable_ctx = state.get("enable_context_management", False)
+        context_store = state.get("_context_store")
+        if enable_ctx and context_store is not None:
+            try:
+                from src.memory.consolidator import ConsolidatorNode
+                consolidator = ConsolidatorNode()
+                result = consolidator.finalize(context_store)
+                logger.info(
+                    "ConsolidatorNode finalized: status=%s, drifts=%d, entities=%d",
+                    result.status, len(result.anchor_drifts), len(result.new_memory_entries),
+                )
+                merge_span.add_event("consolidator_finalized", {
+                    "drifts": len(result.anchor_drifts),
+                    "memory_entries": len(result.new_memory_entries),
+                })
+            except Exception as e:
+                logger.warning("ConsolidatorNode.finalize failed: %s", e)
+
+        merge_span.set_attribute("merge.status", status)
+        merge_span.set_status(Status(StatusCode.OK))
+
+        return {
+            "final_output": {
+                "goal": plan.get("goal", ""),
+                "plan_reasoning": plan.get("reasoning", ""),
+                "sections": sections,
+                "full_text": "".join(full_text_parts),
+            },
+            "status": status,
+        }
 
 
 def _persist_results_sync(state: AgentGraphState, sections: list, full_text_parts: list, status: str) -> None:
@@ -1017,14 +1112,11 @@ def should_continue_or_finish(state: AgentGraphState) -> str:
 # ──────────────────────────────────────────────
 
 async def reflect_on_task_batch(state: AgentGraphState) -> dict:
-    """反思：对已完成批次进行自省和同行评审
-
-    只有在 enable_reflection=True 时生效。
-    对每个刚完成的任务运行 self-reflection。
-    """
+    """反思：对已完成批次进行自省和同行评审"""
     if not state.get("enable_reflection"):
         return {}
 
+    tracer = _get_tracer()
     task_results = state.get("task_results", {})
     completed_ids = set(state.get("completed_task_ids", []))
     reflection_results = list(state.get("reflection_results", []))
@@ -1032,74 +1124,84 @@ async def reflect_on_task_batch(state: AgentGraphState) -> dict:
     llm_models = state.get("_llm_models", {})
     new_steps = list(state.get("thinking_steps", []))
 
-    # 收集需要重试的任务 ID
-    requeue_ids = set()
-    for task_id in completed_ids:
-        result = task_results.get(task_id, {})
-        agent_type = result.get("agent_type", "")
+    with tracer.start_as_current_span(
+        "agent.reflect",
+        kind=trace.SpanKind.INTERNAL,
+        attributes={
+            "agent.node": "reflect_on_task_batch",
+            "reflect.task_count": len(completed_ids),
+            "custom.run_id": state.get("trace_task_id", ""),
+        },
+    ) as reflect_span:
+        requeue_ids = set()
+        for task_id in completed_ids:
+            result = task_results.get(task_id, {})
+            agent_type = result.get("agent_type", "")
 
-        # 只对 Writing/Code/Translation 这类产出型 Agent 做自省
-        if agent_type not in {"WritingAgent", "CodeAgent", "TranslationAgent"}:
-            continue
+            if agent_type not in {"WritingAgent", "CodeAgent", "TranslationAgent"}:
+                continue
 
-        # 检查是否已超过最大反思轮次
-        current_round = reflection_rounds.get(task_id, 0)
-        if current_round >= 2:
-            continue
+            current_round = reflection_rounds.get(task_id, 0)
+            if current_round >= 2:
+                continue
 
-        # 执行自省
-        from .reflection import self_reflect as do_self_reflect
-        llm = llm_models.get(agent_type) or llm_models.get("default")
-        task_input = {"_task_id": task_id}
+            from .reflection import self_reflect as do_self_reflect
+            llm = llm_models.get(agent_type) or llm_models.get("default")
+            task_input = {"_task_id": task_id}
 
-        try:
-            ref_result = await do_self_reflect(agent_type, task_input, result, llm)
-            if ref_result:
-                ref_dict = ref_result.to_dict()
-                ref_dict["round"] = current_round + 1
-                reflection_results.append(ref_dict)
-                reflection_rounds[task_id] = current_round + 1
+            with tracer.start_as_current_span(
+                "agent.reflect_single",
+                kind=trace.SpanKind.INTERNAL,
+                attributes={
+                    "task.id": task_id,
+                    "task.agent_type": agent_type,
+                    "reflection.round": current_round + 1,
+                },
+            ) as single_span:
+                try:
+                    ref_result = await do_self_reflect(agent_type, task_input, result, llm)
+                    if ref_result:
+                        ref_dict = ref_result.to_dict()
+                        ref_dict["round"] = current_round + 1
+                        reflection_results.append(ref_dict)
+                        reflection_rounds[task_id] = current_round + 1
+                        single_span.set_attribute("reflection.score", ref_result.score)
+                        single_span.set_attribute("reflection.passed", ref_result.passed)
 
-                new_steps.append({
-                    "step_number": len(new_steps) + 1,
-                    "agent": agent_type,
-                    "action": "自省完成",
-                    "reasoning": f"自省评分 {ref_result.score}，{len(ref_result.issues)} 个问题",
-                    "output_summary": "; ".join(ref_result.suggestions[:3]) if ref_result.suggestions else "无需修改",
-                    "tokens_used": 0,
-                    "status": "done",
-                })
+                        new_steps.append({
+                            "step_number": len(new_steps) + 1,
+                            "agent": agent_type,
+                            "action": "自省完成",
+                            "reasoning": f"自省评分 {ref_result.score}，{len(ref_result.issues)} 个问题",
+                            "output_summary": "; ".join(ref_result.suggestions[:3]) if ref_result.suggestions else "无需修改",
+                            "tokens_used": 0,
+                            "status": "done",
+                        })
 
-                # 如果自省不通过且还有轮次，从 completed 移除使其重试
-                if not ref_result.passed and current_round < 2:
-                    requeue_ids.add(task_id)
-                    logger.info(
-                        "Reflection: %s task %s score=%.2f, re-queuing for retry",
-                        agent_type, task_id, ref_result.score,
-                    )
-        except Exception as e:
-            logger.warning("Reflection failed for %s: %s", agent_type, e)
+                        if not ref_result.passed and current_round < 2:
+                            requeue_ids.add(task_id)
+                            reflect_span.add_event("retry_queued", {"task_id": task_id, "score": ref_result.score})
+                except Exception as e:
+                    logger.warning("Reflection failed for %s: %s", agent_type, e)
+                    single_span.record_exception(e)
+                    single_span.set_status(Status(StatusCode.ERROR, str(e)))
 
-    # 从 completed_task_ids 移除需要重试的任务
-    updated_completed = [
-        tid for tid in completed_ids
-        if tid not in requeue_ids
-    ]
+        reflect_span.add_event("reflection_completed", {
+            "retried": len(requeue_ids),
+            "total_reflected": len(completed_ids),
+        })
 
-    # 同时移除需要重试任务的 task_results（否则 _run_single_agent_task
-    # 的缓存检查会返回旧结果，导致重试变成空操作）
-    updated_task_results = {
-        tid: res for tid, res in task_results.items()
-        if tid not in requeue_ids
-    }
+        updated_completed = [tid for tid in completed_ids if tid not in requeue_ids]
+        updated_task_results = {tid: res for tid, res in task_results.items() if tid not in requeue_ids}
+        reflect_span.set_status(Status(StatusCode.OK))
 
-    return {
-        "reflection_results": reflection_results,
-        "self_reflection_rounds": reflection_rounds,
-        "thinking_steps": new_steps,
-        "completed_task_ids": updated_completed,
-        "task_results": updated_task_results,
-    }
+        return {
+            "reflection_results": reflection_results,
+            "self_reflection_rounds": reflection_rounds,
+            "thinking_steps": new_steps,
+            "completed_task_ids": updated_completed,
+            "task_results": updated_task_results,
+        }
 
 
 # ──────────────────────────────────────────────

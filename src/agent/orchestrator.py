@@ -12,8 +12,25 @@ import time
 import uuid
 from typing import Any, Optional
 
+from opentelemetry import trace
+from opentelemetry.trace import Status, StatusCode
 
-# Python 3.10 兼容的 asyncio.timeout 包装
+from langchain_openai import ChatOpenAI
+
+from .graph import build_agent_graph
+from .state import AgentGraphState
+from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
+from .thinking_trace import ThinkingTrace
+from src.core.llm_gateway import LLMGateway
+from .agent_utils import PLANNER_SYSTEM_PROMPT
+from src.observability import get_tracer
+from src.observability.metrics import record_agent_run
+
+logger = logging.getLogger(__name__)
+
+_tracer = None
+
+
 class _AsyncioTimeout:
     """兼容 Python 3.10 的 asyncio.timeout 替代"""
     def __init__(self, timeout: float):
@@ -31,20 +48,15 @@ class _AsyncioTimeout:
             self._cancelled = True
             if self._task and not self._task.done():
                 self._task.cancel()
-            # 与 asyncio.timeout (3.11+) 行为对齐：抛 TimeoutError 而非传播 CancelledError
             raise TimeoutError(f"async operation timed out after {self._timeout}s")
         return False
 
-from langchain_openai import ChatOpenAI
 
-from .graph import build_agent_graph
-from .state import AgentGraphState
-from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
-from .thinking_trace import ThinkingTrace
-from src.core.llm_gateway import LLMGateway
-from .agent_utils import PLANNER_SYSTEM_PROMPT
-
-logger = logging.getLogger(__name__)
+def _get_tracer() -> trace.Tracer:
+    global _tracer
+    if _tracer is None:
+        _tracer = get_tracer("agent.orchestrator")
+    return _tracer
 
 
 class Orchestrator:
@@ -135,149 +147,190 @@ class Orchestrator:
         self, user_request: str, context: dict | None = None, timeout: float = 180.0
     ) -> AgentResult:
         """执行一次完整的 Agent 编排流程（使用 LangGraph StateGraph）"""
+        tracer = _get_tracer()
         trace = ThinkingTrace(task_id=str(uuid.uuid4()))
         trace.begin()
         start_time = time.time()
         task_id = trace.task_id
 
-        try:
-            # Python 3.10 兼容：asyncio.timeout 在 3.11+ 才支持上下文管理器
-            async with asyncio.timeout(timeout) if hasattr(asyncio, 'timeout') else _AsyncioTimeout(timeout):
-                # ── 构建初始 state（支持预计算计划，避免 SSE plan ≠ 执行计划）──
-                precomputed = (context or {}).get("precomputed_plan")
-                skill_system_prompt = (context or {}).get("skill_system_prompt", "")
-                skill_name = (context or {}).get("skill_name", "")
-                initial_state: AgentGraphState = {
-                    "user_request": user_request,
-                    "context": context or {},
-                    "skill_system_prompt": skill_system_prompt,
-                    "skill_name": skill_name,
-                    "plan": precomputed,
-                    "plan_reasoning": (precomputed or {}).get("reasoning", ""),
-                    "task_queue": [],
-                    "completed_task_ids": [],
-                    "failed_task_ids": [],
-                    "task_results": {},
-                    "ready_tasks": [],
-                    "concurrency_limit": self.max_concurrent,
-                    "thinking_steps": [],
-                    "trace_task_id": task_id,
-                    "start_time": start_time,
-                    "pending_decision": None,
-                    "decision_result": None,
-                    "final_output": None,
-                    "error": None,
-                    "status": "running",
-                    "_async_task_id": self.async_task_id or task_id,
-                    "_task_queue_ref": self.task_queue,
-                    "_llm_models": self.chat_models,
-                    "_mcp_tools": self.mcp_tools,
-                    "_streaming_mode": True,  # 开启实时流式推送
-                    "_agent_registry": self.agent_registry,
-                    "use_message_bus": self.message_bus is not None,
-                    "_message_bus": self.message_bus,
-                    "_messages": [],
-                    "enable_reflection": self.reflection_engine is not None,
-                    "reflection_config": None,
-                    "_reflection_engine": self.reflection_engine,
-                    "reflection_results": [],
-                    "self_reflection_rounds": {},
-                    "enable_hitl": self.hitl_manager is not None,
-                    "_hitl_manager": self.hitl_manager,
-                    "pending_gates": [],
-                    "_tool_registry": self.tool_registry,
-                    # Context management (layered multi-agent system)
-                    "enable_context_management": True,
-                    "_context_store": None,
-                    "_context_manager": None,
-                }
+        # ── [插桩] agent.run 根 Span ─────────────────────────────────────────
+        run_span_name = f"agent.run"
+        skill_name = (context or {}).get("skill_name", "unknown")
 
-                # ── Initialize context management ──
-                from src.memory import ContextManager, SharedContextStore
-                self._context_manager = ContextManager()
-                conversation_id = (context or {}).get("conversation_id", "default")
-                self._context_store = self._context_manager.handle_message(
-                    user_message=user_request,
-                    conversation_id=conversation_id,
-                    project_id=(context or {}).get("project_id"),
-                    project_directive=(context or {}).get("project_directive"),
-                )
-                initial_state["_context_manager"] = self._context_manager
-                initial_state["_context_store"] = self._context_store
+        with tracer.start_as_current_span(
+            run_span_name,
+            kind=trace.SpanKind.INTERNAL,
+            attributes={
+                # OTel 语义约定
+                "agent.system": "langgraph",
+                "agent.graph.version": "2.0.0",
+                "agent.orchestrator.class": "Orchestrator",
+                "agent.run.id": self.async_task_id or task_id,
+                "agent.skill.name": skill_name,
+                "agent.user_request.preview": user_request[:200],
+                "agent.max_concurrent": self.max_concurrent,
+                "agent.timeout_seconds": timeout,
+                "agent.complexity.hint": context.get("complexity_hint", "balanced") if context else "balanced",
+                "agent.phases.enabled": json.dumps({
+                    "phase_1_agent_registry": bool(self.agent_registry),
+                    "phase_2_message_bus": bool(self.message_bus),
+                    "phase_3_reflection": bool(self.reflection_engine),
+                    "phase_4_hitl": bool(self.hitl_manager),
+                    "phase_5_tools": bool(self.tool_registry),
+                }),
+                "custom.run_id": task_id,
+                "custom.task_id": self.async_task_id or "",
+            },
+        ) as root_span:
+            try:
+                # Python 3.10 兼容
+                async with asyncio.timeout(timeout) if hasattr(asyncio, 'timeout') else _AsyncioTimeout(timeout):
+                    precomputed = (context or {}).get("precomputed_plan")
+                    skill_system_prompt = (context or {}).get("skill_system_prompt", "")
+                    initial_state: AgentGraphState = {
+                        "user_request": user_request,
+                        "context": context or {},
+                        "skill_system_prompt": skill_system_prompt,
+                        "skill_name": skill_name,
+                        "plan": precomputed,
+                        "plan_reasoning": (precomputed or {}).get("reasoning", ""),
+                        "task_queue": [],
+                        "completed_task_ids": [],
+                        "failed_task_ids": [],
+                        "task_results": {},
+                        "ready_tasks": [],
+                        "concurrency_limit": self.max_concurrent,
+                        "thinking_steps": [],
+                        "trace_task_id": task_id,
+                        "start_time": start_time,
+                        "pending_decision": None,
+                        "decision_result": None,
+                        "final_output": None,
+                        "error": None,
+                        "status": "running",
+                        "_async_task_id": self.async_task_id or task_id,
+                        "_task_queue_ref": self.task_queue,
+                        "_llm_models": self.chat_models,
+                        "_mcp_tools": self.mcp_tools,
+                        "_streaming_mode": True,
+                        "_agent_registry": self.agent_registry,
+                        "use_message_bus": self.message_bus is not None,
+                        "_message_bus": self.message_bus,
+                        "_messages": [],
+                        "enable_reflection": self.reflection_engine is not None,
+                        "reflection_config": None,
+                        "_reflection_engine": self.reflection_engine,
+                        "reflection_results": [],
+                        "self_reflection_rounds": {},
+                        "enable_hitl": self.hitl_manager is not None,
+                        "_hitl_manager": self.hitl_manager,
+                        "pending_gates": [],
+                        "_tool_registry": self.tool_registry,
+                        "enable_context_management": True,
+                        "_context_store": None,
+                        "_context_manager": None,
+                    }
 
-                # ── 运行 Graph ──
-                config = {"recursion_limit": 200}
-                final_state = await self._graph.ainvoke(initial_state, config=config)
-                # Note: ConsolidatorNode.finalize() is now called inside merge_and_finish node
+                    from src.memory import ContextManager, SharedContextStore
+                    self._context_manager = ContextManager()
+                    conversation_id = (context or {}).get("conversation_id", "default")
+                    self._context_store = self._context_manager.handle_message(
+                        user_message=user_request,
+                        conversation_id=conversation_id,
+                        project_id=(context or {}).get("project_id"),
+                        project_directive=(context or {}).get("project_directive"),
+                    )
+                    initial_state["_context_manager"] = self._context_manager
+                    initial_state["_context_store"] = self._context_store
 
+                    config = {"recursion_limit": 200}
+                    final_state = await self._graph.ainvoke(initial_state, config=config)
+
+                    elapsed = round(time.time() - start_time, 2)
+                    status = final_state.get("status", "completed")
+                    final_output = final_state.get("final_output")
+                    error = final_state.get("error")
+
+                    thinking_steps = final_state.get("thinking_steps", [])
+                    if thinking_steps:
+                        trace.steps = []
+                        for s in thinking_steps:
+                            step = trace.add_step(
+                                agent=s.get("agent", ""),
+                                action=s.get("action", ""),
+                                reasoning=s.get("reasoning", ""),
+                                input_summary=s.get("input_summary", ""),
+                            )
+                            trace.complete_step(
+                                step_index=step,
+                                output_summary=s.get("output_summary", ""),
+                                tokens_used=s.get("tokens_used", 0),
+                            )
+
+                    result_status = TaskStatus.COMPLETED
+                    if status == "failed":
+                        result_status = TaskStatus.FAILED
+                    elif status == "partial":
+                        result_status = TaskStatus.PARTIAL
+
+                    total_tokens = sum(
+                        r.get("tokens_used", 0)
+                        for r in final_state.get("task_results", {}).values()
+                    )
+
+                    root_span.set_status(Status(StatusCode.OK))
+                    root_span.set_attribute("agent.status", status)
+                    root_span.set_attribute("agent.completed_tasks", len(final_state.get("completed_task_ids", [])))
+                    root_span.set_attribute("agent.failed_tasks", len(final_state.get("failed_task_ids", [])))
+                    root_span.set_attribute("agent.total_tokens", total_tokens)
+                    root_span.set_attribute("agent.duration_ms", elapsed * 1000)
+
+                    record_agent_run(status=status, skill_name=skill_name, duration_s=elapsed)
+
+                    return AgentResult(
+                        task_id=task_id,
+                        status=result_status,
+                        agent_type="ManagerAgent",
+                        output=final_output or {},
+                        error=error,
+                        usage=UsageInfo(
+                            tokens_used=total_tokens,
+                            time_elapsed=elapsed,
+                            model=self.model,
+                        ),
+                        thinking_trace=trace.to_dict(),
+                    )
+
+            except asyncio.TimeoutError:
                 elapsed = round(time.time() - start_time, 2)
-                status = final_state.get("status", "completed")
-                final_output = final_state.get("final_output")
-                error = final_state.get("error")
-
-                # ── 构建 AgentResult（与原有格式一致） ──
-                thinking_steps = final_state.get("thinking_steps", [])
-                if thinking_steps:
-                    trace.steps = []
-                    for s in thinking_steps:
-                        step = trace.add_step(
-                            agent=s.get("agent", ""),
-                            action=s.get("action", ""),
-                            reasoning=s.get("reasoning", ""),
-                            input_summary=s.get("input_summary", ""),
-                        )
-                        trace.complete_step(
-                            step_index=step,
-                            output_summary=s.get("output_summary", ""),
-                            tokens_used=s.get("tokens_used", 0),
-                        )
-
-                result_status = TaskStatus.COMPLETED
-                if status == "failed":
-                    result_status = TaskStatus.FAILED
-                elif status == "partial":
-                    result_status = TaskStatus.PARTIAL
-
-                total_tokens = sum(
-                    r.get("tokens_used", 0)
-                    for r in final_state.get("task_results", {}).values()
-                )
-
+                root_span.set_status(Status(StatusCode.ERROR, "Graph execution timed out"))
+                root_span.record_exception(TimeoutError(f"Graph timed out after {timeout}s"))
+                root_span.set_attribute("agent.status", "timeout")
+                record_agent_run(status="timeout", skill_name=skill_name, duration_s=elapsed)
                 return AgentResult(
                     task_id=task_id,
-                    status=result_status,
+                    status=TaskStatus.FAILED,
                     agent_type="ManagerAgent",
-                    output=final_output or {},
-                    error=error,
-                    usage=UsageInfo(
-                        tokens_used=total_tokens,
-                        time_elapsed=elapsed,
-                        model=self.model,
-                    ),
+                    error="Graph execution timed out",
+                    usage=UsageInfo(time_elapsed=elapsed),
                     thinking_trace=trace.to_dict(),
                 )
-
-        except asyncio.TimeoutError:
-            elapsed = round(time.time() - start_time, 2)
-            return AgentResult(
-                task_id=task_id,
-                status=TaskStatus.FAILED,
-                agent_type="ManagerAgent",
-                error="Graph execution timed out",
-                usage=UsageInfo(time_elapsed=elapsed),
-                thinking_trace=trace.to_dict(),
-            )
-        except Exception as e:
-            elapsed = round(time.time() - start_time, 2)
-            logger.error(f"Graph execution failed: {e}", exc_info=True)
-            return AgentResult(
-                task_id=task_id,
-                status=TaskStatus.FAILED,
-                agent_type="ManagerAgent",
-                error=str(e),
-                usage=UsageInfo(time_elapsed=elapsed),
-                thinking_trace=trace.to_dict(),
-            )
+            except Exception as e:
+                elapsed = round(time.time() - start_time, 2)
+                root_span.set_status(Status(StatusCode.ERROR, str(e)))
+                root_span.record_exception(e)
+                root_span.set_attribute("agent.status", "failed")
+                root_span.set_attribute("agent.error_type", type(e).__name__)
+                logger.error(f"Graph execution failed: {e}", exc_info=True)
+                record_agent_run(status="failed", skill_name=skill_name, duration_s=elapsed)
+                return AgentResult(
+                    task_id=task_id,
+                    status=TaskStatus.FAILED,
+                    agent_type="ManagerAgent",
+                    error=str(e),
+                    usage=UsageInfo(time_elapsed=elapsed),
+                    thinking_trace=trace.to_dict(),
+                )
 
     # ══════════════════════════════════════════════
     # 以下方法保留供 /agent/plan 和 /agent/repurpose 使用

@@ -6,7 +6,6 @@ from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 from prometheus_fastapi_instrumentator import Instrumentator as PrometheusInstrumentator
 
 from .config import get_gateway_settings
-from .tracing import setup_tracing
 from .core.circuit_breaker import CircuitBreaker
 from .core.rate_limiter import MultiDimensionalRateLimiter, SlidingWindowRateLimiter
 from .core.cost_tracker import CostTracker
@@ -15,11 +14,27 @@ from .core.security import SecurityMiddleware
 from .litellm_client import GatewayCallbacks, LiteLLMClient
 from .api import chat, models, stats
 
+# Use the unified observability module
+from src.observability import setup_observability, setup_local_dev
+from src.observability import metrics as obs_metrics
+import os
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_gateway_settings()
-    setup_tracing("model-gateway", log_json=settings.log_json)
+    use_local_dev = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip() == ""
+
+    if use_local_dev:
+        tracer, meter = setup_local_dev()
+    else:
+        tracer, meter = setup_observability(
+            service_name="model-gateway",
+            service_version="1.0.0",
+            log_json=settings.log_json,
+        )
+
+    obs_metrics.create_meters()
 
     cost_tracker = CostTracker(
         db_path=settings.cost_db_path,
@@ -61,7 +76,6 @@ async def lifespan(app: FastAPI):
         failure_callback=success_cb,
     )
 
-    # Store all state in app.state — accessible from middleware and survives requests.
     app.state.cost_tracker = cost_tracker
     app.state.circuit_breaker = cb
     app.state.rate_limiter = rate_limiter
@@ -100,7 +114,6 @@ def create_gateway_app() -> FastAPI:
 
     @app.middleware("http")
     async def inject_gateway_state(request: Request, call_next):
-        # Access app.state — lifespan guarantees this is populated before HTTP handlers run.
         state = getattr(request.app.state, "cost_tracker", None)
         if state is None:
             return await call_next(request)
