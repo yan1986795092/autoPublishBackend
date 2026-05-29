@@ -1,45 +1,9 @@
-import structlog
-import logging
-from opentelemetry import trace
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.sdk.resources import Resource
-from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExporter
-from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
-from opentelemetry.propagate import set_global_textmap
+"""Gateway tracing — re-exported from unified observability module.
 
+The gateway now uses src.observability for all tracing/metrics/logging.
+This module is kept for backward compatibility.
+"""
 
-def setup_tracing(service_name: str = "model-gateway", log_json: bool = True):
-    resource = Resource.create({"service.name": service_name})
-    provider = TracerProvider(resource=resource)
-    processor = BatchSpanProcessor(ConsoleSpanExporter())
-    provider.add_span_processor(processor)
-    trace.set_tracer_provider(provider)
-    set_global_textmap(TraceContextTextMapPropagator())
+from src.observability.tracing import get_tracer, setup_observability, setup_local_dev
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(message)s",
-    )
-    structlog.configure(
-        processors=[
-            structlog.stdlib.filter_by_level,
-            structlog.stdlib.add_logger_name,
-            structlog.stdlib.add_log_level,
-            structlog.stdlib.PositionalArgumentsFormatter(),
-            structlog.processors.TimeStamper(fmt="iso"),
-            structlog.processors.StackInfoRenderer(),
-            structlog.processors.format_exc_info,
-            structlog.processors.UnicodeDecoder(),
-            structlog.processors.JSONRenderer() if log_json else structlog.dev.ConsoleRenderer(),
-        ],
-        wrapper_class=structlog.stdlib.BoundLogger,
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
-
-    return trace.get_tracer(service_name)
-
-
-def get_tracer(name: str = "model-gateway") -> trace.Tracer:
-    return trace.get_tracer(name)
+__all__ = ["get_tracer", "setup_observability", "setup_local_dev"]

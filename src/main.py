@@ -5,9 +5,9 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
 import asyncio
+import os
 
 from src.core.exceptions import GenerateError
-from src.core.logging import configure_logging
 from src.core.migrations import migration_manager
 from src.config import get_settings
 from src.database import engine
@@ -16,6 +16,10 @@ from src.api import auth, contents, publish, platforms, templates, presets, ai_e
 from src.api.skills import router as skills_router
 from src.agent.api import router as agent_router
 from src.agent.workflow.worker import worker
+from src.observability import setup_observability, setup_local_dev
+from src.observability import metrics as obs_metrics
+from src.observability.api import router as observability_router
+from src.observability.es_client import close_es
 import src.migrations  # noqa: F401 — register migrations
 
 logger = logging.getLogger(__name__)
@@ -23,21 +27,32 @@ logger = logging.getLogger(__name__)
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # 初始化日志
     settings = get_settings()
-    configure_logging(debug=settings.debug)
+    log_json = os.getenv("LOG_JSON", "true").lower() == "true"
+    use_local_dev = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip() == ""
 
-    # 启动时：创建表 + 启动 Worker
+    if use_local_dev:
+        tracer, meter = setup_local_dev()
+    else:
+        tracer, meter = setup_observability(
+            service_name="autopublish-api",
+            service_version="2.0.0",
+            log_json=log_json,
+            debug=settings.debug,
+        )
+
+    obs_metrics.create_meters()
+
+    # Start DB + migrations + worker
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: Base.metadata.create_all(bind=engine))
-
-    # 运行数据库迁移
     await loop.run_in_executor(None, lambda: migration_manager.run_all(engine))
 
     await worker.start()
     logger.info("Agent Worker started")
     yield
-    # 关闭时：停止 Worker
+
+    await close_es()
     await worker.stop()
     logger.info("Agent Worker stopped")
 
@@ -123,6 +138,7 @@ app.include_router(ai_editor.router, prefix="/api/v1")
 app.include_router(personas.router, prefix="/api/v1")
 app.include_router(skills_router)
 app.include_router(agent_router, prefix="/api/v1")
+app.include_router(observability_router)
 
 
 @app.get("/")

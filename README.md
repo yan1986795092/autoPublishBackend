@@ -7,12 +7,15 @@ AI 内容生产与发布工具后端 API 服务，基于 FastAPI + LangGraph Mul
 - **FastAPI** — Web 框架
 - **LangGraph** — Multi-Agent StateGraph 编排
 - **LangChain** — LLM 调用封装
+- **litellm** — 多供应商统一调用（OpenAI / 智谱 / 通义千问 / 100+ 供应商）
 - **SQLAlchemy** — ORM（SQLite 开发环境）
 - **Python-JOSE + Passlib** — JWT 认证 + 密码加密
 - **Pydantic** — 数据验证
 - **httpx** — HTTP 客户端（搜索、热点抓取）
 - **sse-starlette** — SSE 流式推送
 - **Jinja2** — Prompt 模板引擎
+- **MCP (Model Context Protocol)** — 外部工具标准化集成
+- **OpenTelemetry + Prometheus** — 全链路追踪与可观测性
 
 ## 快速开始
 
@@ -33,27 +36,54 @@ API 文档：http://localhost:8000/docs
 ## 系统架构
 
 ```
-┌─────────────────────────────────────────────┐
-│              API Layer (FastAPI)              │
-│  /agent/*  /contents/*  /publish/*           │
-└────────────┬────────────────────┬────────────┘
-             │                    │
-┌────────────▼──────┐  ┌─────────▼──────────┐
-│  Orchestrator     │  │  Content Services   │
-│  (LangGraph)      │  │  (CRUD + Generate)  │
-└────────────┬──────┘  └────────────────────┘
+┌──────────────────────────────────────────────────────────────────────┐
+│                    API Layer (FastAPI)                                  │
+│  /agent/*  /contents/*  /publish/*  /api/v1/skills/*              │
+└────────────┬────────────────────┬─────────────────┬──────────────────┘
+             │                    │                 │
+┌────────────▼──────┐  ┌────────▼────────┐  ┌─▼─────────────────┐
+│  Orchestrator     │  │  Content Services│  │  Skills API        │
+│  (LangGraph)      │  │  (CRUD+Generate)│  │  CRUD+Import+URL   │
+└────────────┬──────┘  └─────────────────┘  └────────────────────┘
              │
-┌────────────▼────────────────────────────────┐
-│          Agent Handlers (HANDLER_MAP)        │
-│  Writing │ SEO │ Review │ WebSearch         │
-│  Diagram │ Image │ HotTopic │ Code          │
-│  PlatformAdapter │ Translation │ Fallback   │
-└────────────┬────────────────────────────────┘
+┌────────────▼────────────────────────────────────────────────────────┐
+│                     Agent System (Multi-Agent)                          │
+│  ┌──────────────┐  ┌───────────────┐  ┌────────────────────┐    │
+│  │  ToolRegistry │  │ ContextManager │  │ ReflectionEngine  │    │
+│  │  注册+绑定    │  │ 混合路由+压缩   │  │ Self+Peer+Meta   │    │
+│  └──────┬───────┘  └───────┬───────┘  └────────────────────┘    │
+│         │                    │                                       │
+│  ┌──────▼───────┐  ┌───────▼────────┐  ┌────────────────────┐    │
+│  │ Handler层     │  │ MemoryManager  │  │ HITLManager       │    │
+│  │ Writing/SEO   │  │ Working+Epis   │  │ Human-in-Loop     │    │
+│  │ Review/Diagram│  │ +Semantic       │  │ 审批门控          │    │
+│  └───────────────┘  └────────────────┘  └────────────────────┘    │
+└────────────┬───────────────────────────────────────────────────────┘
              │
-┌────────────▼────────────────────────────────┐
-│         LLM Gateway / ModelRouter            │
-│  OpenAI │ Qwen │ Zhipu                      │
-└─────────────────────────────────────────────┘
+┌────────────▼────────────────────────────────────────────────────────┐
+│                    MCP Layer (Model Context Protocol)                    │
+│  MCPClient — 配置驱动的多 Server 管理（stdio / streamable-http）        │
+│  ┌────────────────────────────────────────────────────────────────┐ │
+│  │ WebSearch │ Brave Search │ Jina Reader │ Tavily │ Pexels │     │
+│  │ Server    │ Server       │ Server      │ Search │ Server │     │
+│  │ GitHub    │              │             │ Server │        │     │
+│  │ Server    │             │             │        │        │     │
+│  └────────────────────────────────────────────────────────────────┘ │
+└────────────┬───────────────────────────────────────────────────────┘
+             │
+┌────────────▼────────────────────────────────────────────────────────┐
+│              Model Gateway（生产级，OpenAI 兼容）                       │
+│  ┌──────────────┐  ┌────────────┐  ┌─────────────┐  ┌────────┐ │
+│  │Security MW    │  │RateLimiter│  │CircuitBrk   │  │ Router │ │
+│  │来源校验+白名单│  │滑动窗口RPM │  │被动+主动     │  │三维加权│ │
+│  └──────────────┘  └────────────┘  └─────────────┘  └────────┘ │
+│  ┌──────────────┐  ┌────────────────────────────────────────┐     │
+│  │ CostTracker   │  │ Tracer (OTel + Prometheus)             │     │
+│  │ 异步批量写入  │  │ 100%采样 + 全链路追踪                  │     │
+│  └──────────────┘  └────────────────────────────────────────┘     │
+│                            │                                         │
+│  litellm — 统一调用 OpenAI / 智谱 / 通义千问 / 100+ 供应商         │
+└──────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Multi-Agent 编排流程
@@ -69,6 +99,9 @@ API 文档：http://localhost:8000/docs
               │
               ▼
     execute_task_batch → asyncio.gather 并行
+              │
+              ▼
+    reflect_on_task_batch → Self/Peer/Meta 三层反思
               │
               ▼
     merge_and_finish → 结果合并 + 持久化
@@ -98,7 +131,7 @@ Client → POST /agent/stream
 
 ## Agent 系统
 
-### 已注册 Agent（10 个）
+### 已注册 Agent（14 个）
 
 | Agent | 功能 | 工具/实现 |
 |-------|------|----------|
@@ -110,8 +143,23 @@ Client → POST /agent/stream
 | **ImageAgent** | 配图/封面生成 | LLM |
 | **HotTopicAgent** | 微博/知乎热搜抓取 | httpx 直连 |
 | **CodeAgent** | 代码片段生成 | LLM |
-| **WebSearch** | 实时网络搜索 | SerpAPI / DuckDuckGo |
+| **WebSearch** | 实时网络搜索 | MCP: WebSearch Server |
 | **PlatformAdapter** | 多平台格式转换 | 平台适配器 |
+| **TranslationAgent** | 多语言翻译 | LLM |
+| **FactCheckAgent** | 事实核查 | LLM + 搜索验证 |
+| **KeywordToolAgent** | 关键词研究与分析 | LLM + 工具 |
+| **TrendAnalysisAgent** | 趋势分析 | LLM + 数据分析 |
+
+### MCP 工具层
+
+| Server | 功能 | Transport | 默认启用 |
+|--------|------|---------|---------|
+| **WebSearch Server** | 网页/新闻搜索 + 页面抓取 | stdio | ✅ |
+| **Brave Search Server** | 隐私优先搜索 | stdio | 需 `BRAVE_API_KEY` |
+| **Jina Reader Server** | 网页 Markdown 化抓取 | stdio | ✅ |
+| **Tavily Search Server** | AI 优化新闻/博客搜索 | stdio | 需 `TAVILY_API_KEY` |
+| **Pexels Server** | 免费高清图片搜索 | stdio | 需 `PEXELS_API_KEY` |
+| **GitHub Server** | 代码/Issues/PR 搜索 | stdio | 需 `GITHUB_TOKEN` |
 
 ### 任务拆解策略
 
@@ -120,6 +168,42 @@ Client → POST /agent/stream
 | simple | 无关键词、短文本 | 模板 | 2 |
 | medium | 含搜索/平台/优化关键词 | LLM + 模板兜底 | 4 |
 | complex | 含图表/配图/多平台等 | LLM + 验证回退 | 6 |
+
+## 上下文管理与记忆系统
+
+### 三层记忆架构
+
+| 层级 | 存储介质 | 内容 | 检索方式 |
+|------|---------|---------|---------|
+| **Working Memory** | 内存（dict） | 当前会话活跃上下文 | 直接访问 |
+| **Episodic Memory** | SQLite/PG | 已完成任务完整记录 | SQL 查询 |
+| **Semantic Memory** | ChromaDB（向量库） | 高价值内容片段 | ANN 向量相似度检索 |
+
+### ContextManager 核心能力
+
+- **混合路由**：语义相似度 + 显式指令，决定新会话或继续当前会话
+- **Token Budget 监控**：实时估算，80% threshold 触发压缩
+- **阶段感知压缩**：不同 ProjectStage 保留不同内容（早期保留更多思考链路）
+
+## Skills 系统
+
+### 内置 Skill（7 个）
+
+| ID | 名称 | 类别 | 复杂 度 |
+|----|------|------|---------|
+| builtin-001 | 专业博客写作 | writing | medium |
+| builtin-002 | 小红书种草 | social | simple |
+| builtin-003 | 热点分析报告 | analysis | complex |
+| builtin-004 | 短视频脚本 | writing | medium |
+| builtin-005 | 营销文案 | writing | medium |
+| builtin-006 | Newsletter 邮件 | writing | simple |
+| builtin-007 | 自由创作 | writing | - |
+
+### Skill 支持的导入方式
+
+- **URL 导入**：支持 raw GitHub/Gist URL 自动解析 SKILL.md
+- **文件导入**：SKILL.md 或 JSON 格式
+- **前端导入**：SKILL.md frontmatter 解析（YAML frontmatter + Markdown body）
 
 ## API 概览
 
@@ -151,6 +235,21 @@ Client → POST /agent/stream
 | `GET /contents/{id}/versions/diff` | 版本对比（含 content_id 归属校验） |
 | `POST /contents/{id}/check-banned-words` | 违禁词检查 |
 | `GET /contents/calendar` | 内容日历（按月/年过滤，已优化 N+1） |
+
+### Skills 接口
+
+| 端点 | 说明 |
+|------|------|
+| `GET /api/v1/skills` | 列出当前用户所有 Skill |
+| `GET /api/v1/skills/{id}` | 获取 Skill 详情 |
+| `POST /api/v1/skills` | 创建新 Skill |
+| `PUT /api/v1/skills/{id}` | 更新 Skill |
+| `DELETE /api/v1/skills/{id}` | 删除 Skill |
+| `GET /api/v1/skills/builtins` | 列出所有内置 Skill |
+| `GET /api/v1/skills/builtins/{id}` | 获取内置 Skill 详情 |
+| `POST /api/v1/skills/import/url` | 从 URL 导入 Skill |
+| `POST /api/v1/skills/import/file` | 从文件导入 Skill |
+| `POST /api/v1/skills/import/preview` | 预览导入内容（不保存） |
 
 ### 发布与平台
 
@@ -199,11 +298,13 @@ backend/
 │   │   ├── templates.py        # Prompt 模板
 │   │   ├── presets.py          # 用户预设
 │   │   ├── personas.py         # 人设管理
-│   │   └── ai_editor.py        # AI 编辑助手
+│   │   ├── ai_editor.py        # AI 编辑助手
+│   │   └── skills.py          # Skill CRUD + 导入 + 解析
 │   ├── agent/                  # Agent 系统
 │   │   ├── orchestrator.py     # 编排器 + 任务拆解
 │   │   ├── graph.py            # LangGraph StateGraph
 │   │   ├── nodes.py            # 图节点函数
+│   │   ├── edges.py            # 条件边路由函数
 │   │   ├── state.py            # AgentGraphState
 │   │   ├── factory.py          # 工厂函数
 │   │   ├── api.py              # Agent REST/SSE/WS 端点
@@ -211,51 +312,131 @@ backend/
 │   │   ├── thinking_trace.py   # 思考链路记录
 │   │   ├── persistence.py      # 持久化
 │   │   ├── agent_utils.py      # 共享常量（违禁词/模板）
+│   │   ├── cache.py            # 结果缓存
+│   │   ├── retry.py            # 重试策略
+│   │   ├── agents/             # Agent 基类与注册表
+│   │   │   ├── base_agent.py
+│   │   │   ├── profile.py
+│   │   │   └── registry.py
 │   │   ├── handlers/           # Agent 处理函数
 │   │   │   ├── writing.py / seo.py / review.py
 │   │   │   ├── diagram.py / image.py / hot_topic.py
 │   │   │   ├── code.py / web_search.py
 │   │   │   ├── platform_adapter.py / translation.py
-│   │   │   ├── fallback.py     # 兜底处理
+│   │   │   ├── factcheck.py / keyword_tool.py / trend_analysis.py
+│   │   │   ├── fallback.py
 │   │   │   └── __init__.py     # HANDLER_MAP
+│   │   ├── reflection/          # 三层反思引擎
+│   │   │   ├── engine.py
+│   │   │   ├── self_reflection.py
+│   │   │   ├── peer_review.py
+│   │   │   ├── meta_cognition.py
+│   │   │   └── models.py
+│   │   ├── communication/       # Agent 间通信
+│   │   │   ├── bus.py
+│   │   │   ├── channel.py
+│   │   │   └── models.py
+│   │   ├── hitl/               # Human-in-the-Loop
+│   │   │   ├── manager.py
+│   │   │   └── gates.py
+│   │   ├── tools/              # Agent 工具系统
+│   │   │   ├── base.py        # AgentTool / AgentToolMeta
+│   │   │   ├── registry.py    # ToolRegistry / bind_agent_tools
+│   │   │   ├── binding.py
+│   │   │   └── builtins/       # 内置工具集
+│   │   │       ├── memory_tools.py
+│   │   │       ├── reflection_tools.py
+│   │   │       ├── hitl_tools.py
+│   │   │       └── communication_tools.py
 │   │   └── workflow/
 │   │       ├── task_queue.py   # 异步任务队列
-│   │       └── worker.py       # Worker
+│   │       ├── worker.py       # Worker
+│   │       └── redis_queue.py  # Redis 队列（可选）
+│   ├── mcp/                     # MCP（Model Context Protocol）
+│   │   ├── client.py           # MCPClient 多 Server 管理
+│   │   ├── web_search_server.py
+│   │   ├── brave_search_server.py
+│   │   ├── jina_reader_server.py
+│   │   ├── tavily_search_server.py
+│   │   ├── pexels_server.py
+│   │   └── github_server.py
+│   ├── memory/                  # 记忆系统
+│   │   ├── context_manager.py  # ContextManager（混合路由+压缩）
+│   │   ├── context_store.py    # SharedContextStore
+│   │   ├── manager.py          # MemoryManager（上下文构建）
+│   │   ├── episodic_memory.py   # 情节记忆
+│   │   ├── semantic_memory.py  # 语义记忆（ChromaDB）
+│   │   ├── working_memory.py   # 工作记忆
+│   │   ├── consolidator.py     # 记忆巩固（外部触发）
+│   │   ├── agent_scoped_view.py
+│   │   └── schemas.py
+│   ├── skills/                 # Skill 内置注册表
+│   │   └── builtins.py         # 7 个内置 Skill 定义
+│   ├── core/
+│   │   ├── llm_gateway.py      # LLM 网关（Legacy）
+│   │   ├── model_router.py     # 模型路由
+│   │   ├── prompt_engine.py   # Prompt 引擎
+│   │   ├── security.py         # 安全工具
+│   │   ├── logging.py          # structlog 配置
+│   │   ├── exceptions.py      # 自定义异常
+│   │   └── migrations.py
+│   ├── core/gateway/          # 模型网关（生产级）
+│   │   ├── config.py           # 网关配置（路由权重/限流/价格表）
+│   │   ├── server.py          # FastAPI 应用入口
+│   │   ├── litellm_client.py  # litellm 封装 + callbacks
+│   │   ├── tracing.py         # OTel + structlog 配置
+│   │   ├── api/
+│   │   │   ├── chat.py        # POST /v1/chat/completions
+│   │   │   ├── models.py      # GET  /v1/models
+│   │   │   └── stats.py        # GET  /gateway/stats
+│   │   └── core/
+│   │       ├── router.py       # 三维加权打分路由
+│   │       ├── circuit_breaker.py  # 混合熔断器
+│   │       ├── rate_limiter.py    # 滑动窗口限流
+│   │       ├── cost_tracker.py    # 异步批量写入 SQLite
+│   │       └── security.py        # 来源校验 + 输入清洗
 │   ├── services/
-│   │   ├── content_service.py  # 内容生成 + 管理
+│   │   ├── content_service.py   # 内容生成 + 管理
 │   │   └── ai_editor_service.py # AI 编辑器服务
 │   ├── adapters/               # 平台适配器
 │   │   ├── base.py             # 抽象基类
 │   │   ├── xiaohongshu.py
 │   │   ├── wechat.py
 │   │   └── zhihu.py
-│   ├── core/
-│   │   ├── llm_gateway.py      # LLM 网关
-│   │   ├── model_router.py     # 模型路由
-│   │   └── prompt_engine.py    # Prompt 引擎
 │   ├── utils/
 │   │   └── evaluator.py        # 违禁词/SEO 评估
 │   ├── schemas/                # Pydantic Schema
 │   └── prompts/
-│       └── agent_prompts.py    # Prompt 模板
-├── tests/                      # 单元测试（75 passed）
+│       └── builtin/            # 内置 Prompt 模板
+│           ├── system.py
+│           ├── manager.py
+│           ├── writing.py
+│           ├── review.py
+│           ├── diagram.py
+│           ├── code.py
+│           └── reflection.py
+├── tests/                      # 单元测试
 ├── scripts/                    # 工具脚本
+├── docs/                        # 设计文档
 ├── .env.example
 ├── Dockerfile
 └── requirements.txt
 ```
 
-## LLM 提供商配置
+## 模型网关（生产级）
 
-支持三个提供商，通过环境变量切换：
+网关通过 litellm 统一封装所有供应商，提供生产级治理能力：
 
-| 提供商 | 环境变量 | 默认模型 |
-|--------|---------|---------|
-| OpenAI | `OPENAI_API_KEY` | gpt-3.5-turbo |
-| 通义千问 | `DASHSCOPE_API_KEY` | qwen-plus |
-| 智谱 | `ZHIPUAI_API_KEY` | glm-4 |
+| 组件 | 功能 |
+|------|------|
+| **Security Middleware** | X-Source-App 来源校验 + 模型白名单 |
+| **Rate Limiter** | 滑动窗口 RPM/TPM 限流（按供应商 + 按来源应用） |
+| **Circuit Breaker** | 被动熔断（连续失败/错误率）+ 主动健康检查 + 批量半开探测 |
+| **Enhanced Router** | 三维加权打分（成本 + 静态延迟 + P95 实际延迟反馈）|
+| **Cost Tracker** | 异步队列 + SQLite 批量写入 |
+| **Tracer** | OTel 100% 采样 + Prometheus metrics |
 
-各 Agent 可通过 `ModelRouter` 分配独立的模型实例，实现模型分级调度。
+通过 `GATEWAY_MODE=legacy` 可一键回退到直接 LLM 调用。
 
 ## 违禁词系统
 
@@ -282,6 +463,13 @@ backend/
 | `WECHAT_APP_ID` | 公众号 App ID（可选） | - |
 | `WECHAT_APP_SECRET` | 公众号 Secret（可选） | - |
 | `ZHIHU_COOKIE` | 知乎凭证（可选） | - |
+| `MCP_ENABLE_SEARCH` | 启用 WebSearch Server | `true` |
+| `MCP_ENABLE_BRAVE` | 启用 Brave Search Server | `false` |
+| `MCP_ENABLE_JINA` | 启用 Jina Reader Server | `true` |
+| `MCP_ENABLE_TAVILY` | 启用 Tavily Search Server | `false` |
+| `MCP_ENABLE_PEXELS` | 启用 Pexels Server | `false` |
+| `MCP_ENABLE_GITHUB` | 启用 GitHub Server | `false` |
+| `GATEWAY_MODE` | 网关模式（`gateway` / `legacy`）| `legacy` |
 
 ## 运行测试
 
@@ -291,6 +479,9 @@ pytest tests/ -v
 
 # 运行 Agent 单元测试
 pytest tests/agents/test_base_agent.py -v
+
+# 运行网关冒烟测试
+pytest tests/core/gateway/test_smoke.py -v
 ```
 
 ## 关键设计决策
@@ -302,3 +493,6 @@ pytest tests/agents/test_base_agent.py -v
 | 计划传递 | SSE 预计算 → Worker 复用 | 消除计划不一致，但增加一次 LLM 调用 |
 | 数据库隔离 | 批量生成创建独立 Session | 防竞态，但增加连接开销 |
 | 违禁词检查 | 正则 + 子串双系统 | Agent 审核精确，编辑器检查灵活 |
+| 工具集成 | MCP (Model Context Protocol) | 标准化协议，热插拔，新增工具不改代码 |
+| 模型调用 | litellm 统一封装 | 支持 100+ 供应商，治理逻辑叠加 |
+| 上下文压缩 | 阶段感知分层压缩 | 不同阶段保留不同内容，早期保留更多思考链路 |

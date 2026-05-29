@@ -51,7 +51,12 @@ litellm>=1.52.0
 opentelemetry-api>=1.20.0
 opentelemetry-sdk>=1.20.0
 opentelemetry-exporter-otlp>=1.20.0
+opentelemetry-exporter-otlp-proto-grpc>=1.20.0
+opentelemetry-exporter-otlp-proto-http>=1.20.0
 opentelemetry-instrumentation-fastapi>=0.41b0
+
+# Observability: Elasticsearch（trace/logs 持久化存储）
+elasticsearch>=8.13.0
 
 # Observability: Prometheus
 prometheus-fastapi-instrumentator>=6.1.0

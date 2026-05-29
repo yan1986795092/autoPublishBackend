@@ -1,7 +1,7 @@
 version: '3.8'
 
 services:
-  # 后端 API 服务
+  # ─── Application ───────────────────────────────────────────
   api:
     build:
       context: ./backend
@@ -14,40 +14,136 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - DEBUG=true
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      # Observability
+      - OTEL_SERVICE_NAME=autopublish-api
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
+      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+      - OTEL_TRACES_SAMPLER=parentbased_traceidratio
+      - OTEL_TRACES_SAMPLER_ARG=1.0
+      - LOG_JSON=true
+      # Elasticsearch
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - JAEGER_HOST=http://jaeger:16686
+      - PROMETHEUS_HOST=http://prometheus:9090
     volumes:
       - ./backend:/app
       - autopublish-data:/app/data
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      otel-collector:
+        condition: service_healthy
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
       interval: 30s
       timeout: 10s
       retries: 3
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
-  # Redis（用于 Celery 队列，V1.0 阶段使用）
-  # redis:
-  #   image: redis:7-alpine
-  #   container_name: autopublish-redis
-  #   ports:
-  #     - "6379:6379"
-  #   volumes:
-  #     - redis-data:/data
-  #   restart: unless-stopped
+  # ─── Elasticsearch：主存储（traces + structured logs）─────────────
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    container_name: elasticsearch
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - cluster.name=autopublish-obs
+      - action.auto_create_index=true
+    ports:
+      - "9200:9200"   # ES HTTP API
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -s http://localhost:9200/_cluster/health | grep -q '\"status\":\"green\"\\|\"status\":\"yellow\"'"]
+      interval: 10s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
 
-  # Celery Worker（V1.0 阶段启用）
-  # celery-worker:
-  #   build:
-  #     context: ./backend
-  #     dockerfile: Dockerfile
-  #   container_name: autopublish-celery
-  #   command: celery -A app.tasks.celery_app worker --loglevel=info
-  #   environment:
-  #     - DATABASE_URL=sqlite:///./autopublish.db
-  #     - REDIS_URL=redis://redis:6379/0
-  #   depends_on:
-  #     - redis
-  #   restart: unless-stopped
+  # ─── OTel Collector ───────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.0
+    container_name: otel-collector
+    ports:
+      - "4317:4317"        # OTLP gRPC
+      - "4318:4318"        # OTLP HTTP
+      - "4319:4319"        # OTel gRPC (receiver)
+      - "8888:8888"        # Prometheus metrics (collector)
+    command:
+      - "--config=/etc/otelcol-contrib/config.yaml"
+    volumes:
+      - ./infra/otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      jaeger:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  # ─── Jaeger：Trace UI（数据从 Elasticsearch 读取）─────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.63
+    container_name: jaeger
+    ports:
+      - "16686:16686"   # Jaeger UI
+    environment:
+      # Jaeger Query 从 ES 读取 trace 数据
+      - SPAN_STORAGE_TYPE=elasticsearch
+      - ES_SERVER_URLS=http://elasticsearch:9200
+      - ES_INDEX_PREFIX=jaeger
+      - ES_USERNAME=
+      - ES_PASSWORD=
+      # Collector 配置
+      - COLLECTOR_OTLP_ENABLED=true
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ─── Prometheus：指标采集 ──────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.55.0
+    container_name: prometheus
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+    restart: unless-stopped
+
+  # ─── Grafana：可视化看板 ───────────────────────────────────
+  grafana:
+    image: grafana/grafana:11.5.2
+    container_name: grafana
+    ports:
+      - "3000:3000"
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
+    volumes:
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana-data:/var/lib/grafana
+    depends_on:
+      - prometheus
+      - elasticsearch
+    restart: unless-stopped
 
 volumes:
   autopublish-data:
-  redis-data:
+  prometheus-data:
+  grafana-data:
+  es-data:
