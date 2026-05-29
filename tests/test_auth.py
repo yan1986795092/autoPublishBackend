@@ -17,7 +17,7 @@ class TestAuth:
         assert response.status_code == 200
         data = response.json()
         assert data["success"] is True
-        assert data["data"]["email"] == "test2@example.com"
+        assert data["data"]["user"]["email"] == "test2@example.com"
 
     def test_register_duplicate_email(self, client):
         """测试重复邮箱注册"""

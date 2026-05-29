@@ -1,4 +1,4 @@
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AliasChoices
 from functools import lru_cache
 from typing import Optional
@@ -137,10 +137,7 @@ class Settings(BaseSettings):
         "URLCrawler": 0,
     }
 
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        extra = "ignore"  # Allow extra fields in env file
+    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
 @lru_cache()
