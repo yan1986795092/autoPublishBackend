@@ -451,7 +451,17 @@ async def get_trace_stats(
     """Get aggregated stats for traces."""
     es = await get_es()
     if not es:
-        return {"total_traces": 0, "total_spans": 0, "error_rate": 0}
+        return {
+            "total_traces": 0,
+            "total_spans": 0,
+            "error_count": 0,
+            "error_rate": 0,
+            "by_service": [],
+            "by_operation": [],
+            "p50_duration_ms": None,
+            "p95_duration_ms": None,
+            "p99_duration_ms": None,
+        }
 
     filter_clauses = []
     if service:

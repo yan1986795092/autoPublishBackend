@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 import structlog
 from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
+from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from langchain_openai import ChatOpenAI
 
@@ -148,10 +148,10 @@ class Orchestrator:
     ) -> AgentResult:
         """执行一次完整的 Agent 编排流程（使用 LangGraph StateGraph）"""
         tracer = _get_tracer()
-        trace = ThinkingTrace(task_id=str(uuid.uuid4()))
-        trace.begin()
+        thinking_trace = ThinkingTrace(task_id=str(uuid.uuid4()))
+        thinking_trace.begin()
         start_time = time.time()
-        task_id = trace.task_id
+        task_id = thinking_trace.task_id
 
         # ── [插桩] agent.run 根 Span ─────────────────────────────────────────
         run_span_name = f"agent.run"
@@ -159,7 +159,7 @@ class Orchestrator:
 
         with tracer.start_as_current_span(
             run_span_name,
-            kind=trace.SpanKind.INTERNAL,
+            kind=SpanKind.INTERNAL,
             attributes={
                 # OTel 语义约定
                 "agent.system": "langgraph",
@@ -253,15 +253,15 @@ class Orchestrator:
 
                     thinking_steps = final_state.get("thinking_steps", [])
                     if thinking_steps:
-                        trace.steps = []
+                        thinking_trace.steps = []
                         for s in thinking_steps:
-                            step = trace.add_step(
+                            step = thinking_trace.add_step(
                                 agent=s.get("agent", ""),
                                 action=s.get("action", ""),
                                 reasoning=s.get("reasoning", ""),
                                 input_summary=s.get("input_summary", ""),
                             )
-                            trace.complete_step(
+                            thinking_trace.complete_step(
                                 step_index=step,
                                 output_summary=s.get("output_summary", ""),
                                 tokens_used=s.get("tokens_used", 0),
@@ -298,7 +298,7 @@ class Orchestrator:
                             time_elapsed=elapsed,
                             model=self.model,
                         ),
-                        thinking_trace=trace.to_dict(),
+                        thinking_trace=thinking_trace.to_dict(),
                     )
 
             except asyncio.TimeoutError:
@@ -313,7 +313,7 @@ class Orchestrator:
                     agent_type="ManagerAgent",
                     error="Graph execution timed out",
                     usage=UsageInfo(time_elapsed=elapsed),
-                    thinking_trace=trace.to_dict(),
+                    thinking_trace=thinking_trace.to_dict(),
                 )
             except Exception as e:
                 elapsed = round(time.time() - start_time, 2)
