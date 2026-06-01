@@ -243,7 +243,18 @@ async def get_trace_stats(
     if "error" in stats:
         raise HTTPException(status_code=503, detail=stats["error"])
 
-    return TraceStatsResponse(**{k: v for k, v in stats.items() if k != "error"})
+    # 确保所有字段都有默认值，防止 ES 不可用时 Pydantic 校验失败
+    return TraceStatsResponse(
+        total_traces=stats.get("total_traces", 0),
+        total_spans=stats.get("total_spans", 0),
+        error_count=stats.get("error_count", 0),
+        error_rate=stats.get("error_rate", 0),
+        by_service=stats.get("by_service", []),
+        by_operation=stats.get("by_operation", []),
+        p50_duration_ms=stats.get("p50_duration_ms"),
+        p95_duration_ms=stats.get("p95_duration_ms"),
+        p99_duration_ms=stats.get("p99_duration_ms"),
+    )
 
 
 # ── Structured Log Search ───────────────────────────────────────────────────────
@@ -369,6 +380,12 @@ async def dashboard_overview():
 
     stats_hour = await get_trace_stats(start_time_ms=hour_ago, end_time_ms=now_ms)
     stats_day = await get_trace_stats(start_time_ms=day_ago, end_time_ms=now_ms)
+
+    # 移除可能的 error 字段，避免前端收到脏数据
+    if "error" in stats_hour:
+        stats_hour = {k: v for k, v in stats_hour.items() if k != "error"}
+    if "error" in stats_day:
+        stats_day = {k: v for k, v in stats_day.items() if k != "error"}
 
     # Key metric queries via Prometheus
     async with httpx.AsyncClient(timeout=10.0) as client:

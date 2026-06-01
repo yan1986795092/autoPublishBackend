@@ -187,6 +187,16 @@ class GatewaySession:
     # ── Properties ─────────────────────────────────────────────────────
 
     @property
+    def model(self) -> str:
+        """Exposed for backward compatibility with Orchestrator and other
+        code that expects ChatOpenAI-like `.model` attribute.
+
+        Returns the first candidate's model name, or empty string if no
+        candidates are configured.
+        """
+        return self.candidates[0].model if self.candidates else ""
+
+    @property
     def max_tokens(self) -> int:
         """Exposed for Token Budget checks (nodes.py:735 uses getattr)."""
         return self._max_tokens

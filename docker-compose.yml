@@ -4,7 +4,7 @@ services:
   # ─── Application ───────────────────────────────────────────
   api:
     build:
-      context: ./backend
+      context: .
       dockerfile: Dockerfile
     container_name: autopublish-api
     ports:
@@ -26,7 +26,7 @@ services:
       - JAEGER_HOST=http://jaeger:16686
       - PROMETHEUS_HOST=http://prometheus:9090
     volumes:
-      - ./backend:/app
+      - .:/app
       - autopublish-data:/app/data
     depends_on:
       elasticsearch:
@@ -65,7 +65,7 @@ services:
 
   # ─── OTel Collector ───────────────────────────────────────
   otel-collector:
-    image: otel/opentelemetry-collector-contrib:0.115.0
+    image: otel/opentelemetry-collector-contrib:latest
     container_name: otel-collector
     ports:
       - "4317:4317"        # OTLP gRPC
@@ -75,12 +75,12 @@ services:
     command:
       - "--config=/etc/otelcol-contrib/config.yaml"
     volumes:
-      - ./infra/otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
+      - ../infra/otel/collector-config.yaml:/etc/otelcol-contrib/config.yaml:ro
     depends_on:
       elasticsearch:
         condition: service_healthy
       jaeger:
-        condition: service_healthy
+        condition: service_started
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:13133"]
       interval: 10s
@@ -90,7 +90,7 @@ services:
 
   # ─── Jaeger：Trace UI（数据从 Elasticsearch 读取）─────────────
   jaeger:
-    image: jaegertracing/all-in-one:1.63
+    image: jaegertracing/all-in-one:latest
     container_name: jaeger
     ports:
       - "16686:16686"   # Jaeger UI
@@ -115,7 +115,7 @@ services:
     ports:
       - "9090:9090"
     volumes:
-      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ../infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
       - prometheus-data:/prometheus
     command:
       - '--config.file=/etc/prometheus/prometheus.yml'
@@ -135,7 +135,7 @@ services:
       - GF_USERS_ALLOW_SIGN_UP=false
       - GF_FEATURE_TOGGLES_ENABLE=traceqlEditor
     volumes:
-      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ../infra/grafana/provisioning:/etc/grafana/provisioning:ro
       - grafana-data:/var/lib/grafana
     depends_on:
       - prometheus
