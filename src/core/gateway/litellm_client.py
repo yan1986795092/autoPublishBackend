@@ -6,17 +6,39 @@ from opentelemetry import trace, metrics
 from opentelemetry.trace import Status, StatusCode
 
 import litellm
-from src.observability import get_tracer
-from src.observability.metrics import record_gateway_request, record_gateway_error
 
+# Lazy imports — observability may not be fully configured at import time
+# (e.g., elasticsearch not installed in dev environment)
 _tracer = None
+_get_tracer_fn = None
+_record_gateway_request = None
+_record_gateway_error = None
 
 
 def _get_tracer():
-    global _tracer
+    global _tracer, _get_tracer_fn
+    if _get_tracer_fn is None:
+        from src.observability import get_tracer as _fn
+        _get_tracer_fn = _fn
     if _tracer is None:
-        _tracer = get_tracer("gateway.litellm")
+        _tracer = _get_tracer_fn("gateway.litellm")
     return _tracer
+
+
+def _do_record_gateway_request(*args, **kwargs):
+    global _record_gateway_request
+    if _record_gateway_request is None:
+        from src.observability.metrics import record_gateway_request as _fn
+        _record_gateway_request = _fn
+    return _record_gateway_request(*args, **kwargs)
+
+
+def _do_record_gateway_error(*args, **kwargs):
+    global _record_gateway_error
+    if _record_gateway_error is None:
+        from src.observability.metrics import record_gateway_error as _fn
+        _record_gateway_error = _fn
+    return _record_gateway_error(*args, **kwargs)
 
 
 class GatewayCallbacks:
@@ -233,7 +255,7 @@ class LiteLLMClient:
                 request_span.add_event("llm.call_end")
 
                 # Prometheus metrics
-                record_gateway_request(
+                _do_record_gateway_request(
                     source_app=source_app,
                     provider=actual_provider,
                     model=actual_model,
@@ -260,12 +282,12 @@ class LiteLLMClient:
                 request_span.set_status(Status(StatusCode.ERROR, str(e)))
                 request_span.set_attribute("llm.error_type", type(e).__name__)
 
-                record_gateway_error(
+                _do_record_gateway_error(
                     provider=actual_provider,
                     model=actual_model,
                     error_type=type(e).__name__,
                 )
-                record_gateway_request(
+                _do_record_gateway_request(
                     source_app=source_app,
                     provider=actual_provider,
                     model=actual_model,

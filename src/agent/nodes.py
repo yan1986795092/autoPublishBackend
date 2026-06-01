@@ -618,12 +618,6 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
             "failed_task_ids": failed,
             "thinking_steps": existing + new_steps,
         }
-    return {
-        "task_results": task_results,
-        "completed_task_ids": completed,
-        "failed_task_ids": failed,
-        "thinking_steps": existing + new_steps,
-    }
 
 # ──────────────────────────────────────────────
 # 4. merge_and_finish 节点

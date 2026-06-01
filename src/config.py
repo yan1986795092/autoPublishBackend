@@ -29,7 +29,7 @@ class Settings(BaseSettings):
 
     zhipu_api_key: Optional[str] = None
     zhipu_model: str = "glm-4-flash"
-    zhipu_base_url: str = "https://open.bigmodel.cn/api/coding/paas/v4"
+    zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
 
     default_llm_provider: str = "zhipu"
     default_temperature: float = 0.7
