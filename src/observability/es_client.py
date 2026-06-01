@@ -6,11 +6,9 @@ import os
 import logging
 from typing import Any, Optional
 
-from elasticsearch import AsyncElasticsearch
-
 logger = logging.getLogger(__name__)
 
-_es_client: Optional[AsyncElasticsearch] = None
+_es_client: Optional[Any] = None  # AsyncElasticsearch (lazy import)
 
 
 def get_es_url() -> str:
@@ -20,10 +18,11 @@ def get_es_url() -> str:
     )
 
 
-async def get_es() -> Optional[AsyncElasticsearch]:
+async def get_es() -> Optional[Any]:
     """Get or create the Elasticsearch client."""
     global _es_client
     if _es_client is None:
+        from elasticsearch import AsyncElasticsearch  # lazy import
         url = get_es_url()
         try:
             _es_client = AsyncElasticsearch(

@@ -27,7 +27,10 @@ from .tracing import (
     get_meter,
 )
 from . import metrics
-from . import es_client
+
+# es_client is lazy — requires elasticsearch which may not be installed
+# in all environments (e.g., local dev). Access via module attribute or
+# explicit import: from src.observability.es_client import ...
 
 __all__ = [
     "setup_observability",

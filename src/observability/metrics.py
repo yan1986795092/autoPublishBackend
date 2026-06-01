@@ -11,7 +11,6 @@ from typing import Optional
 
 from opentelemetry import metrics
 from opentelemetry.metrics import Counter, Histogram, ObservableGauge, Meter
-from opentelemetry.metrics.observation import Observation
 
 # ── Meter handles (set by create_meters) ──────────────────────────────────────
 agent_meter: Optional[Meter] = None
