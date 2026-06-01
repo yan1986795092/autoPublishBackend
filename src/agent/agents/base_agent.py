@@ -6,15 +6,15 @@ Handler 函数保持不变，BaseAgent 只是在其上包装一层 profile 上�
 """
 from __future__ import annotations
 
-import logging
 from typing import Any, Callable, Optional
 
+import structlog
 from langchain_openai import ChatOpenAI
 
 from .profile import AgentProfile
 from ..handlers import HANDLER_MAP, handle_fallback
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class BaseAgent:
@@ -103,8 +103,9 @@ class BaseAgent:
                 self.profile.name, tool_registry,
             )
             logger.info(
-                "BaseAgent[%s]: 已绑定工具，可用工具描述: %s",
-                self.name, self._tool_descriptions[:100] if self._tool_descriptions else "无",
+                "Agent tools bound",
+                agent_name=self.name,
+                tool_preview=self._tool_descriptions[:100] if self._tool_descriptions else "none",
             )
 
     # ── 内部 ──
@@ -117,5 +118,5 @@ class BaseAgent:
         key = self.profile.handler_key or self.profile.name
         self._handler_fn = HANDLER_MAP.get(key)
         if self._handler_fn is None:
-            logger.warning("BaseAgent[%s]: no handler found for key=%s", self.name, key)
+            logger.warning("No handler found for agent", agent_name=self.name, handler_key=key)
         return self._handler_fn

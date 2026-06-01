@@ -19,9 +19,9 @@ Usage:
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Optional
 
+import structlog
 from .circuit_breaker import CircuitBreaker
 from .rate_limiter import MultiDimensionalRateLimiter, SlidingWindowRateLimiter
 from .cost_tracker import CostTracker
@@ -29,7 +29,7 @@ from .router import ModelCandidate, LatencyTracker
 from ..litellm_client import LiteLLMClient, GatewayCallbacks
 from ..config import get_gateway_settings, GatewaySettings
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class GatewayContainer:
@@ -62,6 +62,10 @@ class GatewayContainer:
             health_check_timeout=self.settings.cb_health_check_timeout,
             health_check_model=self.settings.cb_health_check_model,
         )
+
+        # Register with OTel ObservableGauge callback
+        from src.observability.metrics import set_circuit_breaker
+        set_circuit_breaker(self.circuit_breaker)
 
         # Rate limiter — sliding window RPM/TPM per provider + per source app
         self.rate_limiter = MultiDimensionalRateLimiter(
@@ -103,7 +107,7 @@ class GatewayContainer:
         self._started = True
         await self.circuit_breaker.start()
         await self.cost_tracker.start()
-        logger.info("GatewayContainer started (CB health check + CostTracker flush)")
+        logger.info("GatewayContainer started", component="gateway", lifecycle="start")
 
     async def stop(self):
         """Gracefully stop all background tasks."""
@@ -112,7 +116,7 @@ class GatewayContainer:
         self._started = False
         await self.circuit_breaker.stop()
         await self.cost_tracker.stop()
-        logger.info("GatewayContainer stopped")
+        logger.info("GatewayContainer stopped", component="gateway", lifecycle="stop")
 
     # ── Singleton access ─────────────────────────────────────────────────
 

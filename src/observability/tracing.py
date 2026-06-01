@@ -1,17 +1,17 @@
-"""Observability: OpenTelemetry tracing + Prometheus metrics + structured logging.
+"""Observability: OpenTelemetry tracing + Prometheus metrics.
 
 This module provides a unified observability setup for the entire backend.
 Import this in your app lifespan to enable distributed tracing across all services.
+
+Logging configuration is delegated to ``src.core.logging.setup_logging``.
 """
 
 from __future__ import annotations
 
 import logging
 import os
-import sys
 from typing import Optional
 
-import structlog
 from opentelemetry import metrics, trace
 from opentelemetry.exporter.otlp.proto.grpc.metric_exporter import OTLPMetricExporter
 from opentelemetry.exporter.otlp.proto.grpc.trace_exporter import OTLPSpanExporter
@@ -25,6 +25,7 @@ from opentelemetry.trace import Tracer
 from opentelemetry.trace.propagation.tracecontext import TraceContextTextMapPropagator
 from opentelemetry.propagate import set_global_textmap
 
+from src.core.logging import setup_logging
 from .metrics import create_meters
 
 logger = logging.getLogger(__name__)
@@ -37,17 +38,21 @@ _initialized = False
 def setup_observability(
     service_name: str = "autopublish-api",
     service_version: str = "2.0.0",
-    log_json: bool = True,
-    debug: bool = False,
+    settings=None,
 ) -> tuple[Tracer, Meter]:
     """Initialize OpenTelemetry tracing, Prometheus metrics, and structlog.
 
     Call this exactly once in your FastAPI app lifespan.
+    Logging is configured via ``src.core.logging.setup_logging(settings)``.
     Returns the global tracer and meter instances.
     """
     global _tracer, _meter, _initialized
     if _initialized:
         return _tracer or trace.get_tracer(service_name), _meter or metrics.get_meter(service_name)
+
+    # Configure logging first (delegated to core.logging)
+    if settings is not None:
+        setup_logging(settings)
 
     resource = Resource.create({
         SERVICE_NAME: service_name,
@@ -73,9 +78,6 @@ def setup_observability(
     _tracer = trace.get_tracer(service_name, service_version)
     _meter = metrics.get_meter(service_name, service_version)
 
-    # ── Structured Logging ───────────────────────────────────────────────────
-    _setup_structlog(log_json=log_json, debug=debug)
-
     _initialized = True
     logging.getLogger("opentelemetry").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
@@ -85,47 +87,9 @@ def setup_observability(
         service=service_name,
         version=service_version,
         otlp_endpoint=otlp_endpoint,
-        log_json=log_json,
     )
 
     return _tracer, _meter
-
-
-def _setup_structlog(log_json: bool, debug: bool) -> None:
-    """Configure structlog with JSON or console output."""
-    processors = [
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-    ]
-
-    if log_json:
-        processors.append(structlog.processors.JSONRenderer())
-    else:
-        processors.append(structlog.dev.ConsoleRenderer())
-
-    structlog.configure(
-        processors=processors,
-        wrapper_class=structlog.stdlib.BoundLogger,
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
-    )
-
-    # Route standard logging through structlog (only for named loggers to avoid cycles)
-    for _name in ["uvicorn", "uvicorn.error", "uvicorn.access"]:
-        _l = logging.getLogger(_name)
-        # Only inject if no handler is set (avoid double-output when running under uvicorn)
-        if not _l.handlers:
-            _h = logging.StreamHandler(sys.stderr)
-            _h.setFormatter(logging.Formatter("%(message)s"))
-            _l.addHandler(_h)
-        _l.setLevel(logging.DEBUG if debug else logging.INFO)
 
 
 def get_tracer(name: str = "autopublish") -> Tracer:
@@ -144,13 +108,21 @@ def get_meter(name: str = "autopublish") -> Meter:
     return _meter
 
 
-def setup_local_dev() -> tuple[Tracer, Meter]:
+def setup_local_dev(settings=None) -> tuple[Tracer, Meter]:
     """Local dev mode: console-only tracing, no OTLP export.
 
     Useful when running without Docker (e.g., IDE debugger).
+    Delegates logging to ``src.core.logging.setup_logging``.
     """
     from opentelemetry.sdk.trace.export import ConsoleSpanExporter
     from opentelemetry.sdk.metrics.export import ConsoleMetricExporter, PeriodicExportingMetricReader
+
+    # Configure logging (dev defaults: console format, debug level)
+    if settings is not None:
+        setup_logging(settings)
+    else:
+        from src.config import Settings
+        setup_logging(Settings(log_level="DEBUG", log_json_format=False))
 
     resource = Resource.create({SERVICE_NAME: "autopublish-api-dev"})
 
@@ -166,8 +138,6 @@ def setup_local_dev() -> tuple[Tracer, Meter]:
     global _tracer, _meter, _initialized
     _tracer = trace.get_tracer("autopublish-api-dev")
     _meter = metrics.get_meter("autopublish-api-dev")
-
-    _setup_structlog(log_json=False, debug=True)
 
     _initialized = True
     return _tracer, _meter

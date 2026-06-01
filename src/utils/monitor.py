@@ -1,52 +1,60 @@
-"""性能监控 — Token 消耗、响应时间、缓存命中率统计"""
+"""Cache monitoring — bridged to OTel Prometheus metrics.
+
+Tracks cache hits and misses via both in-memory counters (for instant summary)
+and OpenTelemetry counters (for Prometheus dashboards).
+
+The OTel counters are registered in ``src.observability.metrics._init_agent_metrics``
+as ``agent.cache.hit.total`` and ``agent.cache.miss.total``.
+"""
 
 from __future__ import annotations
-import time
+
 from dataclasses import dataclass, field
-from collections import defaultdict
 
 
 @dataclass
 class MonitorMetrics:
-    total_requests: int = 0
-    total_tokens: int = 0
-    total_time_ms: float = 0.0
+    """Cache hit/miss tracker, bridged to OTel Prometheus counters.
+
+    Usage::
+
+        monitor = get_monitor()
+        monitor.record_cache_hit()
+        monitor.record_cache_miss()
+        summary = monitor.summary()   # {"cache_hits": 5, "cache_misses": 3, "cache_hit_rate": 0.625}
+    """
+
     cache_hits: int = 0
     cache_misses: int = 0
-    errors: int = 0
-    by_agent: dict = field(default_factory=lambda: defaultdict(lambda: {"calls": 0, "tokens": 0, "time_ms": 0.0}))
 
-    @property
-    def avg_time_ms(self) -> float:
-        return self.total_time_ms / max(self.total_requests, 1)
+    # ── Properties ──────────────────────────────────────────────────────────
 
     @property
     def cache_hit_rate(self) -> float:
         total = self.cache_hits + self.cache_misses
         return self.cache_hits / max(total, 1)
 
-    def record(self, agent: str, tokens: int, elapsed_ms: float, cache_hit: bool = False):
-        self.total_requests += 1
-        self.total_tokens += tokens
-        self.total_time_ms += elapsed_ms
-        if cache_hit:
-            self.cache_hits += 1
-        else:
-            self.cache_misses += 1
-        self.by_agent[agent]["calls"] += 1
-        self.by_agent[agent]["tokens"] += tokens
-        self.by_agent[agent]["time_ms"] += elapsed_ms
+    # ── Recording helpers ───────────────────────────────────────────────────
+
+    def record_cache_hit(self) -> None:
+        """Record a cache hit (in-memory + OTel counter)."""
+        self.cache_hits += 1
+        _otel_cache_hit()
+
+    def record_cache_miss(self) -> None:
+        """Record a cache miss (in-memory + OTel counter)."""
+        self.cache_misses += 1
+        _otel_cache_miss()
 
     def summary(self) -> dict:
         return {
-            "total_requests": self.total_requests,
-            "total_tokens": self.total_tokens,
-            "avg_time_ms": round(self.avg_time_ms, 1),
+            "cache_hits": self.cache_hits,
+            "cache_misses": self.cache_misses,
             "cache_hit_rate": round(self.cache_hit_rate, 3),
-            "errors": self.errors,
-            "by_agent": dict(self.by_agent),
         }
 
+
+# ── Singleton access ────────────────────────────────────────────────────────
 
 _monitor: MonitorMetrics | None = None
 
@@ -56,3 +64,23 @@ def get_monitor() -> MonitorMetrics:
     if _monitor is None:
         _monitor = MonitorMetrics()
     return _monitor
+
+
+# ── OTel bridge helpers (lazy import to avoid circular deps at module level) ─
+
+def _otel_cache_hit() -> None:
+    try:
+        from src.observability.metrics import agent_cache_hit
+        if agent_cache_hit is not None:
+            agent_cache_hit.add(1)
+    except Exception:
+        pass
+
+
+def _otel_cache_miss() -> None:
+    try:
+        from src.observability.metrics import agent_cache_miss
+        if agent_cache_miss is not None:
+            agent_cache_miss.add(1)
+    except Exception:
+        pass

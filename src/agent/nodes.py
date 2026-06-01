@@ -3,11 +3,11 @@
 from __future__ import annotations
 import asyncio
 import json
-import logging
 import time
 import uuid
 from typing import Any
 
+import structlog
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
@@ -35,7 +35,7 @@ from opentelemetry.trace import Status, StatusCode
 from src.observability import get_tracer
 from src.observability.metrics import record_agent_task, record_agent_think
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _tracer = None
 
@@ -131,7 +131,7 @@ def _get_llm(state: AgentGraphState, agent_type: str) -> ChatOpenAI:
     models = state.get("_llm_models", {})
     llm = models.get(agent_type, models.get("default"))
     if llm is None:
-        logger.warning(f"No LLM configured for agent_type=%s, falling back to mock mode", agent_type)
+        logger.warning("No LLM configured, falling back to mock mode", agent_type=agent_type)
     return llm
 
 
@@ -156,7 +156,7 @@ async def _publish_streaming_event(state: AgentGraphState, event_type: str, data
             elif event_type == "reasoning":
                 await task_queue.publish_reasoning(task_id, data)
         except Exception as e:
-            logger.warning("Failed to publish streaming event (%s): %s", event_type, e)
+            logger.warning("Failed to publish streaming event", event_type=event_type, error=str(e))
 
 
 def _add_thinking_step(state: AgentGraphState, agent: str, action: str, reasoning: str = "",
@@ -214,22 +214,18 @@ def _post_process_context(
                     store=store,
                 )
                 if write_result != WriteResult.ACCEPTED:
-                    logger.warning(
-                        "WritingAgent content write was not accepted: %s", write_result
-                    )
+                    logger.warning("WritingAgent content write was not accepted", write_result=write_result)
 
             # 3. Extract and update creative anchors
             updated = update_creative_anchors(result, store)
             if updated:
-                logger.info("WritingAgent: updated creative anchors from output")
+                logger.info("WritingAgent updated creative anchors from output")
 
         elif agent_type == "ReviewAgent":
             # Check anchor drift from review output
             drifts = check_anchor_drift_from_review(result, store)
             if drifts > 0:
-                logger.info(
-                    "ReviewAgent: detected %d anchor drift signals", drifts
-                )
+                logger.info("ReviewAgent detected anchor drift signals", drift_count=drifts)
 
             # Write review feedback to store
             output = result.get("output", {})
@@ -248,7 +244,7 @@ def _post_process_context(
                 )
 
     except Exception as e:
-        logger.warning("Post-processing context failed for %s: %s", agent_type, e)
+        logger.warning("Post-processing context failed", agent_type=agent_type, error=str(e))
 
 
 def _serialize_context_for_prompt(ctx: dict, agent_type: str) -> str:
@@ -361,7 +357,7 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
             input_summary=user_request[:200],
         ))
 
-        logger.info(f"Classified request as '{complexity}': {user_request[:80]}")
+        logger.info("Classified request complexity", complexity=complexity, preview=user_request[:80])
         span.set_attribute("agent.complexity", complexity)
 
         if complexity == "simple":
@@ -413,7 +409,7 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
             updates["task_queue"] = plan.get("tasks", [])
             span.add_event("llm_decomposition_completed", {"task_count": len(plan.get("tasks", []))})
         except Exception as e:
-            logger.warning(f"LLM decompose failed ({e}), using template")
+            logger.warning("LLM decompose failed, using template", error=str(e))
             plan = _build_template_plan(user_request, complexity)
             updates["plan"] = plan
             updates["plan_reasoning"] = plan["reasoning"]
@@ -501,7 +497,7 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
                 and _resolve_dep_id(d, task_queue) not in failed_ids
             )
             if deps_unmet == 0:
-                logger.warning(f"Deadlock detected: {len(stuck)} tasks stuck with no unmet dependencies")
+                logger.warning("Deadlock detected", stuck_count=len(stuck))
                 span.add_event("deadlock_detected", {"stuck_count": len(stuck)})
                 span.set_status(Status(StatusCode.ERROR, "Deadlock detected"))
                 return {
@@ -585,7 +581,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
 
         for task_id, result in results_list:
             if isinstance(result, Exception):
-                logger.error("Agent task %s raised exception: %s", task_id, result)
+                logger.error("Agent task raised exception", task_id=task_id, exc_info=True)
                 failed.append(task_id)
                 task_results[task_id] = {
                     "status": "failed", "error": str(result), "thinking_steps": [],
@@ -648,9 +644,8 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
     # Mock 模式：无 LLM 可用时使用 fallback（有明确的警告日志）
     if not llm:
         logger.warning(
-            "Agent %s: no LLM configured (all providers failed). "
-            "Returning mock result. Set API keys in .env to enable real generation.",
-            agent_type,
+            "Agent has no LLM configured, returning mock result",
+            agent_type=agent_type,
         )
         fallback_task = {
             "agent_type": agent_type,
@@ -688,7 +683,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     context_str = _serialize_context_for_prompt(ctx, agent_type)
                     t_input["_extra_context"] = context_str
                 except Exception as e:
-                    logger.warning("Failed to build agent context: %s", e)
+                    logger.warning("Failed to build agent context", error=str(e))
 
             # 缓存检查：对非写作/分析类 Agent 启用缓存
             cacheable_types = {"SEOAgent", "ReviewAgent", "WebSearch", "HotTopicAgent", "PlatformAdapter"}
@@ -735,8 +730,8 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 max_tokens = getattr(llm, 'max_tokens', None) or 0
                 if max_tokens and max_tokens > budget:
                     logger.warning(
-                        "Token budget exceeded for %s: max_tokens=%d > budget=%d",
-                        agent_type, max_tokens, budget,
+                        "Token budget exceeded",
+                        agent_type=agent_type, max_tokens=max_tokens, budget=budget,
                     )
 
             # ── 执行 handler（支持流式 LLM 回调）──
@@ -769,7 +764,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 if memory_context:
                     t_input["_memory_context"] = memory_context
             except Exception as e:
-                logger.warning(f"Memory context injection failed: {e}")
+                logger.warning("Memory context injection failed", error=str(e))
 
             # ── 消息总线注入（Phase 2 点对点通信）──
             if state.get("use_message_bus") and state.get("_message_bus"):
@@ -852,12 +847,12 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     _cache_input = {k: v for k, v in t_input.items() if not k.startswith('_')}
                     agent_cache.set(agent_type, _cache_input, result)
                 except Exception as e:
-                    logger.warning(f"Failed to cache result for {agent_type}: {e}")
+                    logger.warning("Failed to cache result", agent_type=agent_type, error=str(e))
 
             return result
         except Exception as e:
             elapsed = round(time.time() - start_time, 2)
-            logger.error(f"Agent {agent_type} failed: {e}")
+            logger.error("Agent execution failed", agent_type=agent_type, error=str(e), exc_info=True)
             # ── 任务失败：发布 thinking_step (failed) ──
             await _publish_streaming_event(state, "thinking_step", {
                 "step_number": task_step_number,
@@ -964,8 +959,8 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                         user_id=state.get("context", {}).get("user_id", ""),
                     )
                 except Exception as e:
-                    logger.warning("Memory remember failed for %s: %s",
-                                   result.get("agent_type", "unknown"), e)
+                    logger.warning("Memory remember failed",
+                                   agent_type=result.get("agent_type", "unknown"), error=str(e))
 
         completed = len(completed_ids)
         failed = len(failed_ids)
@@ -994,7 +989,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                     "memory_entries": len(result.new_memory_entries),
                 })
             except Exception as e:
-                logger.warning("ConsolidatorNode.finalize failed: %s", e)
+                logger.warning("ConsolidatorNode finalize failed", error=str(e))
 
         merge_span.set_attribute("merge.status", status)
         merge_span.set_status(Status(StatusCode.OK))
@@ -1048,7 +1043,7 @@ def _persist_results_sync(state: AgentGraphState, sections: list, full_text_part
                     error=result.get("error"),
                 )
     except Exception as e:
-        logger.warning(f"Persistence failed: {e}")
+        logger.warning("Persistence failed", error=str(e))
 
 
 async def _persist_results_async(state: AgentGraphState, sections: list, full_text_parts: list, status: str) -> None:
@@ -1056,7 +1051,7 @@ async def _persist_results_async(state: AgentGraphState, sections: list, full_te
     try:
         await asyncio.to_thread(_persist_results_sync, state, sections, full_text_parts, status)
     except Exception as e:
-        logger.warning(f"Async persistence failed: {e}")
+        logger.warning("Async persistence failed", error=str(e))
 
 
 # ──────────────────────────────────────────────
@@ -1093,8 +1088,8 @@ def should_continue_or_finish(state: AgentGraphState) -> str:
     # 情况3：没有可执行的任务但还有未完成的任务（死锁）
     if total_done < total_tasks:
         logger.warning(
-            f"No ready tasks ({total_tasks} total, "
-            f"{total_done} done/failed). Forcing exit."
+            "No ready tasks, forcing exit",
+            total_tasks=total_tasks, total_done=total_done,
         )
         return "done"
 
@@ -1176,7 +1171,7 @@ async def reflect_on_task_batch(state: AgentGraphState) -> dict:
                             requeue_ids.add(task_id)
                             reflect_span.add_event("retry_queued", {"task_id": task_id, "score": ref_result.score})
                 except Exception as e:
-                    logger.warning("Reflection failed for %s: %s", agent_type, e)
+                    logger.warning("Reflection failed", agent_type=agent_type, error=str(e))
                     single_span.record_exception(e)
                     single_span.set_status(Status(StatusCode.ERROR, str(e)))
 

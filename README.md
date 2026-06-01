@@ -99,12 +99,24 @@ API 文档：http://localhost:8000/docs
               │
               ▼
     execute_task_batch → asyncio.gather 并行
-              │
-              ▼
+         │
+         │  每个 task 走完整链路：
+         │  Skill Prompt → 记忆注入 → 工具描述 → Token Budget
+         │       │
+         │       ▼
+         │  GatewaySession (内嵌网关)
+         │  ├─ EnhancedRouter.select()    三维加权打分选供应商
+         │  ├─ MultiDimensionalRateLimiter 滑动窗口 RPM/TPM 限流
+         │  ├─ CircuitBreaker             CLOSED/OPEN/HALF_OPEN 熔断
+         │  ├─ LiteLLMClient.completion()  OTel span + litellm 调用
+         │  ├─ LatencyTracker.record()    P95 延迟反馈回路
+         │  └─ CostTracker.record()       成本落库 gateway_cost.db
+         │
+         ▼
     reflect_on_task_batch → Self/Peer/Meta 三层反思
               │
               ▼
-    merge_and_finish → 结果合并 + 持久化
+    merge_and_finish → 结果合并 + 持久化 + 记忆巩固
 ```
 
 支持**预计算计划传递**：SSE 端点生成的计划通过 `AsyncTask.plan` 传递给 Worker，确保用户看到的计划与 Worker 执行的计划一致。
@@ -380,7 +392,7 @@ backend/
 │   │   ├── logging.py          # structlog 配置
 │   │   ├── exceptions.py      # 自定义异常
 │   │   └── migrations.py
-│   ├── core/gateway/          # 模型网关（生产级）
+│   ├── core/gateway/          # 模型网关（已接入 Agent）
 │   │   ├── config.py           # 网关配置（路由权重/限流/价格表）
 │   │   ├── server.py          # FastAPI 应用入口
 │   │   ├── litellm_client.py  # litellm 封装 + callbacks
@@ -390,11 +402,13 @@ backend/
 │   │   │   ├── models.py      # GET  /v1/models
 │   │   │   └── stats.py        # GET  /gateway/stats
 │   │   └── core/
-│   │       ├── router.py       # 三维加权打分路由
-│   │       ├── circuit_breaker.py  # 混合熔断器
-│   │       ├── rate_limiter.py    # 滑动窗口限流
-│   │       ├── cost_tracker.py    # 异步批量写入 SQLite
-│   │       └── security.py        # 来源校验 + 输入清洗
+│   │       ├── container.py    # GatewayContainer 单例管理器
+│   │       ├── session.py      # GatewaySession (LangChain 兼容)
+│   │       ├── router.py       # EnhancedRouter 三维加权打分
+│   │       ├── circuit_breaker.py  # CircuitBreaker 混合熔断
+│   │       ├── rate_limiter.py    # SlidingWindowRateLimiter 限流
+│   │       ├── cost_tracker.py    # CostTracker 异步批量写入
+│   │       └── security.py        # SecurityMiddleware 来源校验
 │   ├── services/
 │   │   ├── content_service.py   # 内容生成 + 管理
 │   │   └── ai_editor_service.py # AI 编辑器服务
@@ -423,20 +437,31 @@ backend/
 └── requirements.txt
 ```
 
-## 模型网关（生产级）
+## 模型网关（已接入 Agent 系统）
 
-网关通过 litellm 统一封装所有供应商，提供生产级治理能力：
+网关通过 litellm 统一封装所有供应商，提供生产级治理能力。**每次 Agent LLM 调用都经过完整网关管线**，不再绕过：
 
 | 组件 | 功能 |
 |------|------|
-| **Security Middleware** | X-Source-App 来源校验 + 模型白名单 |
+| **GatewaySession** | LangChain 兼容包装器（ainvoke/astream/bind_tools），handler 零改动接入 |
+| **GatewayContainer** | 单例管理器，共享 CircuitBreaker / RateLimiter / CostTracker / LatencyTracker |
+| **Enhanced Router** | 三维加权打分（成本 0.4 + 静态延迟 0.3 + P95 实际延迟反馈 0.3）|
 | **Rate Limiter** | 滑动窗口 RPM/TPM 限流（按供应商 + 按来源应用） |
 | **Circuit Breaker** | 被动熔断（连续失败/错误率）+ 主动健康检查 + 批量半开探测 |
-| **Enhanced Router** | 三维加权打分（成本 + 静态延迟 + P95 实际延迟反馈）|
-| **Cost Tracker** | 异步队列 + SQLite 批量写入 |
-| **Tracer** | OTel 100% 采样 + Prometheus metrics |
+| **Cost Tracker** | 异步队列 + SQLite 批量写入 (`gateway_cost.db`) |
+| **Latency Tracker** | 60s 滑动窗口 P95 延迟，实时反馈到路由打分 |
 
-通过 `GATEWAY_MODE=legacy` 可一键回退到直接 LLM 调用。
+**调用链路**：
+```
+handler → call_llm() → GatewaySession.ainvoke/astream
+         → EnhancedRouter.select() → RateLimiter.check()
+         → LiteLLMClient.completion() → litellm.acompletion()
+         → LatencyTracker.record() → CostTracker.record()
+```
+
+与旧版 `LLMGateway`（直接 ChatOpenAI 调用）的区别：
+- 旧版：`ModelRouter → ChatOpenAI → 直连供应商 API`（限流/熔断/路由全无效）
+- 新版：`ModelRouter → GatewaySession → 完整 Gateway 管线 → 供应商 API`
 
 ## 违禁词系统
 
@@ -495,4 +520,5 @@ pytest tests/core/gateway/test_smoke.py -v
 | 违禁词检查 | 正则 + 子串双系统 | Agent 审核精确，编辑器检查灵活 |
 | 工具集成 | MCP (Model Context Protocol) | 标准化协议，热插拔，新增工具不改代码 |
 | 模型调用 | litellm 统一封装 | 支持 100+ 供应商，治理逻辑叠加 |
+| 网关接入 | GatewaySession 内嵌 Agent 管线 | handler 零改动；路由/限流/熔断/成本对每次 LLM 调用生效 |
 | 上下文压缩 | 阶段感知分层压缩 | 不同阶段保留不同内容，早期保留更多思考链路 |

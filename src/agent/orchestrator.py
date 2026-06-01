@@ -7,11 +7,11 @@
 from __future__ import annotations
 import asyncio
 import json
-import logging
 import time
 import uuid
 from typing import Any, Optional
 
+import structlog
 from opentelemetry import trace
 from opentelemetry.trace import Status, StatusCode
 
@@ -26,7 +26,7 @@ from .agent_utils import PLANNER_SYSTEM_PROMPT
 from src.observability import get_tracer
 from src.observability.metrics import record_agent_run
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _tracer = None
 
@@ -321,7 +321,7 @@ class Orchestrator:
                 root_span.record_exception(e)
                 root_span.set_attribute("agent.status", "failed")
                 root_span.set_attribute("agent.error_type", type(e).__name__)
-                logger.error(f"Graph execution failed: {e}", exc_info=True)
+                logger.error("Graph execution failed", error=str(e), exc_info=True)
                 record_agent_run(status="failed", skill_name=skill_name, duration_s=elapsed)
                 return AgentResult(
                     task_id=task_id,
@@ -434,7 +434,7 @@ Since this is a {complexity} complexity request, create an appropriately detaile
                 return self._build_template_plan(user_request, complexity)
             return plan
         except Exception as e:
-            logger.warning(f"LLM decompose failed ({e}), falling back to template")
+            logger.warning("LLM decompose failed, falling back to template", error=str(e))
             return self._build_template_plan(user_request, complexity)
 
     def _parse_plan(self, response: str, goal: str) -> ExecutionPlan:

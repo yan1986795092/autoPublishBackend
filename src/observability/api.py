@@ -378,9 +378,9 @@ async def dashboard_overview():
             ("tasks_1h", "sum(increase(agent_task_total[1h]))"),
             ("errors_1h", "sum(increase(agent_run_total{status=\"failed\"}[1h]))"),
             ("p95_latency_1h", "histogram_quantile(0.95, sum(rate(agent_run_duration_seconds_bucket[1h])) by (le)) * 1000"),
-            ("cost_1h_usd", "sum(increase(agent_cost_total_usd[1h]))"),
-            ("token_prompt_1h", "sum(increase(agent_tokens_total{type=\"prompt\"}[1h]))"),
-            ("token_completion_1h", "sum(increase(agent_tokens_total{type=\"completion\"}[1h]))"),
+            ("cost_1h_usd", "sum(increase(gateway_cost_total_usd[1h]))"),
+            ("token_prompt_1h", "sum(increase(gateway_tokens_total{type=\"prompt\"}[1h]))"),
+            ("token_completion_1h", "sum(increase(gateway_tokens_total{type=\"completion\"}[1h]))"),
         ]
 
         metrics = {}

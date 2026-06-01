@@ -1,8 +1,9 @@
 from __future__ import annotations
 import asyncio
-import logging
 import time
 from typing import Optional
+
+import structlog
 
 from .task_queue import task_queue, AsyncTask
 from ..orchestrator import Orchestrator
@@ -11,7 +12,7 @@ from ..factory import create_orchestrator
 from ..cache import agent_cache
 from src.mcp.client import get_mcp_client, shutdown_mcp_client
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class AgentWorker:
@@ -39,18 +40,18 @@ class AgentWorker:
             await GatewayContainer.get_instance()
             logger.info("GatewayContainer started")
         except Exception as e:
-            logger.error("Failed to start GatewayContainer: %s", e)
+            logger.error("Failed to start GatewayContainer", error=str(e), exc_info=True)
 
         # 启动 MCP WebSearch Client
         try:
             self._mcp_client = await get_mcp_client()
             if self._mcp_client.is_started:
                 self._mcp_tools = self._mcp_client.get_tools()
-                logger.info("MCP WebSearch started with %d tools", len(self._mcp_tools))
+                logger.info("MCP WebSearch started", tool_count=len(self._mcp_tools))
             else:
                 logger.warning("MCP WebSearch not available (network/config issue)")
         except Exception as e:
-            logger.error("Failed to start MCP WebSearch: %s", e)
+            logger.error("Failed to start MCP WebSearch", error=str(e), exc_info=True)
 
         self._task = asyncio.create_task(self._run_loop())
 
@@ -64,7 +65,7 @@ class AgentWorker:
         try:
             await shutdown_mcp_client()
         except Exception as e:
-            logger.warning("MCP shutdown error: %s", e)
+            logger.warning("MCP shutdown error", error=str(e))
 
         # 关闭 Gateway 管线
         try:
@@ -73,7 +74,7 @@ class AgentWorker:
             await container.stop()
             logger.info("GatewayContainer stopped")
         except Exception as e:
-            logger.warning("Gateway shutdown error: %s", e)
+            logger.warning("Gateway shutdown error", error=str(e))
 
     async def _run_loop(self):
         while self._running:
@@ -87,9 +88,9 @@ class AgentWorker:
                         try:
                             counts = cleanup_old_records()
                             if any(counts.values()):
-                                logger.info("Cleaned up old records: %s", counts)
+                                logger.info("Cleaned up old records", **counts)
                         except Exception as e:
-                            logger.warning("Cleanup error: %s", e)
+                            logger.warning("Cleanup error", error=str(e))
                     continue
 
                 await self._process_task(async_task)
@@ -97,7 +98,7 @@ class AgentWorker:
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.warning("Worker loop error: %s", e)
+                logger.warning("Worker loop error", error=str(e))
 
     async def _process_task(self, async_task: AsyncTask) -> None:
         """执行单个异步任务，带重试逻辑"""
@@ -107,8 +108,9 @@ class AgentWorker:
             try:
                 if attempt > 0:
                     wait = min(2 ** attempt, 30)
-                    logger.info("Retry %d/%d for task %s, waiting %ds",
-                                attempt + 1, self._max_retries, async_task.id, wait)
+                    logger.info("Retrying task",
+                                attempt=attempt + 1, max_retries=self._max_retries,
+                                task_id=async_task.id, wait_s=wait)
                     await asyncio.sleep(wait)
 
                 task_queue.update_task_progress(
@@ -165,8 +167,8 @@ class AgentWorker:
                 # partial 状态：有输出但质量不足，记录警告但不退出重试
                 if result.status.value == "partial":
                     last_error = result.error or "partial_result"
-                    logger.warning("Task %s attempt %d produced partial result: %s",
-                                   async_task.id, attempt + 1, last_error)
+                    logger.warning("Task produced partial result",
+                                   task_id=async_task.id, attempt=attempt + 1, error=last_error)
                     # partial 结果可以继续（当达到最大重试次数时退化为 partial 完成）
                     if attempt >= self._max_retries - 1:
                         task_queue.complete_task(async_task.id, result.to_dict())
@@ -186,13 +188,13 @@ class AgentWorker:
                     continue
 
                 last_error = result.error or "Unknown error"
-                logger.warning("Task %s attempt %d failed: %s",
-                               async_task.id, attempt + 1, last_error)
+                logger.warning("Task attempt failed",
+                               task_id=async_task.id, attempt=attempt + 1, error=last_error)
 
             except Exception as e:
                 last_error = str(e)
-                logger.error("Task %s attempt %d error: %s",
-                             async_task.id, attempt + 1, e)
+                logger.error("Task attempt error",
+                             task_id=async_task.id, attempt=attempt + 1, exc_info=True)
                 # 网络/超时类错误可重试
                 if isinstance(e, (asyncio.TimeoutError, ConnectionError, OSError)):
                     continue
@@ -202,8 +204,8 @@ class AgentWorker:
                 break
 
         # 所有重试耗尽，进入死信队列
-        logger.warning("Task %s exhausted all %d retries. Sending to DLQ.",
-                       async_task.id, self._max_retries)
+        logger.warning("Task exhausted retries, sending to DLQ",
+                       task_id=async_task.id, max_retries=self._max_retries)
         task_queue.send_to_dlq(async_task.id, reason=last_error)
         save_agent_task(
             task_id=async_task.id,

@@ -2,6 +2,7 @@ import json
 import time
 from typing import Any, Optional, AsyncGenerator
 
+import structlog
 from opentelemetry import trace, metrics
 from opentelemetry.trace import Status, StatusCode
 
@@ -13,6 +14,8 @@ _tracer = None
 _get_tracer_fn = None
 _record_gateway_request = None
 _record_gateway_error = None
+
+logger = structlog.get_logger(__name__)
 
 
 def _get_tracer():
