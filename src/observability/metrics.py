@@ -7,7 +7,7 @@ anywhere you need to record measurements.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import Any, Optional
 
 from opentelemetry import metrics
 from opentelemetry.metrics import Counter, Histogram, ObservableGauge, Meter
@@ -25,6 +25,8 @@ agent_task_duration: Optional[Histogram] = None
 agent_think_duration: Optional[Histogram] = None
 memory_read_duration: Optional[Histogram] = None
 memory_write_duration: Optional[Histogram] = None
+agent_cache_hit: Optional[Counter] = None
+agent_cache_miss: Optional[Counter] = None
 
 # ── Gateway metrics ────────────────────────────────────────────────────────────
 gateway_request_counter: Optional[Counter] = None
@@ -39,11 +41,15 @@ gateway_rate_limit_wait: Optional[Histogram] = None
 tool_call_counter: Optional[Counter] = None
 tool_call_duration: Optional[Histogram] = None
 
+# ── Circuit breaker reference for ObservableGauge callback ────────────────────
+_circuit_breaker_ref: Any = None
+
 
 def _init_agent_metrics(meter: Meter) -> None:
     global agent_run_counter, agent_run_duration
     global agent_task_counter, agent_task_duration, agent_think_duration
     global memory_read_duration, memory_write_duration
+    global agent_cache_hit, agent_cache_miss
 
     agent_run_counter = meter.create_counter(
         name="agent.run.total",
@@ -80,6 +86,16 @@ def _init_agent_metrics(meter: Meter) -> None:
         description="Duration of memory write operations in milliseconds",
         unit="ms",
     )
+    agent_cache_hit = meter.create_counter(
+        name="agent.cache.hit.total",
+        description="Total number of agent cache hits",
+        unit="1",
+    )
+    agent_cache_miss = meter.create_counter(
+        name="agent.cache.miss.total",
+        description="Total number of agent cache misses",
+        unit="1",
+    )
 
 
 def _init_gateway_metrics(meter: Meter) -> None:
@@ -112,6 +128,12 @@ def _init_gateway_metrics(meter: Meter) -> None:
         description="Total number of LLM provider errors",
         unit="1",
     )
+    gateway_circuit_breaker_state = meter.create_observable_gauge(
+        name="gateway.circuit.breaker.state",
+        description="Current circuit breaker state (0=closed, 1=open, 2=half_open)",
+        unit="1",
+        callbacks=[_read_circuit_breaker_state],
+    )
     gateway_rate_limit_wait = meter.create_histogram(
         name="gateway.rate_limit.wait",
         description="Time spent waiting for rate limit in seconds",
@@ -134,6 +156,31 @@ def _init_task_metrics(meter: Meter) -> None:
     )
 
 
+def set_circuit_breaker(cb) -> None:
+    """Register a CircuitBreaker instance for the ObservableGauge callback.
+
+    Called during GatewayContainer startup (after CircuitBreaker is created).
+    The callback reads state on each OTel collection interval.
+    """
+    global _circuit_breaker_ref
+    _circuit_breaker_ref = cb
+
+
+def _read_circuit_breaker_state(options) -> list:
+    """OTel ObservableGauge callback — reads current circuit breaker state."""
+    if _circuit_breaker_ref is None:
+        return []
+    results = []
+    try:
+        for model_key in getattr(_circuit_breaker_ref, "_snapshots", {}):
+            state = _circuit_breaker_ref.get_state(model_key)
+            state_value = {"closed": 0, "open": 1, "half_open": 2}.get(state, 0)
+            results.append(metrics.Measurement(state_value, {"model": model_key}))
+    except Exception:
+        pass  # best-effort: don't break the metrics pipeline
+    return results
+
+
 def create_meters() -> tuple[Meter, Meter, Meter]:
     """Create and register all Prometheus metrics on three meters.
 
@@ -142,6 +189,7 @@ def create_meters() -> tuple[Meter, Meter, Meter]:
     global agent_meter, gateway_meter, task_meter
     global agent_run_counter, agent_task_counter, agent_think_duration
     global memory_read_duration, memory_write_duration
+    global agent_cache_hit, agent_cache_miss
     global gateway_request_counter, gateway_request_duration
     global gateway_tokens_total, gateway_cost_total, gateway_provider_errors, gateway_rate_limit_wait
     global tool_call_counter, tool_call_duration
@@ -219,3 +267,15 @@ def record_gateway_error(provider: str, model: str, error_type: str) -> None:
     attrs = {"provider": provider, "model": model, "error_type": error_type}
     if gateway_provider_errors:
         gateway_provider_errors.add(1, attrs)
+
+
+def record_cache_hit() -> None:
+    """Increment the cache hit counter."""
+    if agent_cache_hit:
+        agent_cache_hit.add(1)
+
+
+def record_cache_miss() -> None:
+    """Increment the cache miss counter."""
+    if agent_cache_miss:
+        agent_cache_miss.add(1)

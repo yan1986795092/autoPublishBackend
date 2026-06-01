@@ -8,6 +8,7 @@ import asyncio
 import os
 
 from src.core.exceptions import GenerateError
+from src.core.logging import setup_logging
 from src.core.migrations import migration_manager
 from src.config import get_settings
 from src.database import engine
@@ -22,23 +23,24 @@ from src.observability.api import router as observability_router
 from src.observability.es_client import close_es
 import src.migrations  # noqa: F401 — register migrations
 
-logger = logging.getLogger(__name__)
+import structlog
+logger = structlog.get_logger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    log_json = os.getenv("LOG_JSON", "true").lower() == "true"
+    # Unified logging configuration (reads settings.log_level, settings.log_json_format)
+    setup_logging(settings)
     use_local_dev = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip() == ""
 
     if use_local_dev:
-        tracer, meter = setup_local_dev()
+        tracer, meter = setup_local_dev(settings)
     else:
         tracer, meter = setup_observability(
             service_name="autopublish-api",
             service_version="2.0.0",
-            log_json=log_json,
-            debug=settings.debug,
+            settings=settings,
         )
 
     obs_metrics.create_meters()

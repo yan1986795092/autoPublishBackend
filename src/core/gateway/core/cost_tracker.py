@@ -110,6 +110,27 @@ class CostTracker:
             ])
             await db.commit()
 
+        # Also emit to OTel metrics for real-time Prometheus visibility
+        self._emit_otel_metrics(records)
+
+    def _emit_otel_metrics(self, records: list[CostRecord]) -> None:
+        """Emit cost records as OTel metrics alongside SQLite recording.
+
+        Best-effort: failures are silently ignored to avoid blocking the flush loop.
+        """
+        try:
+            from src.observability.metrics import gateway_cost_total
+            if gateway_cost_total is None:
+                return
+            for r in records:
+                gateway_cost_total.add(r.estimated_cost, {
+                    "provider": r.provider,
+                    "model": r.model,
+                    "source_app": r.source_app,
+                })
+        except Exception:
+            pass  # OTel emission is best-effort
+
     async def query_stats(
         self,
         from_time: Optional[datetime] = None,

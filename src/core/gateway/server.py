@@ -15,23 +15,34 @@ from .litellm_client import GatewayCallbacks, LiteLLMClient
 from .api import chat, models, stats
 
 # Use the unified observability module
+from src.core.logging import setup_logging
 from src.observability import setup_observability, setup_local_dev
 from src.observability import metrics as obs_metrics
 import os
+from types import SimpleNamespace
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_gateway_settings()
+
+    # Unified logging: map GatewaySettings to the interface setup_logging expects
+    from src.config import Settings as AppSettings
+    log_settings = AppSettings(
+        log_level="INFO",
+        log_json_format=settings.log_json,
+    )
+    setup_logging(log_settings)
+
     use_local_dev = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip() == ""
 
     if use_local_dev:
-        tracer, meter = setup_local_dev()
+        tracer, meter = setup_local_dev(log_settings)
     else:
         tracer, meter = setup_observability(
             service_name="model-gateway",
             service_version="1.0.0",
-            log_json=settings.log_json,
+            settings=log_settings,
         )
 
     obs_metrics.create_meters()
