@@ -43,6 +43,7 @@ class RenderedPrompt:
     template_version: str
     variables_used: dict
     errors: list[str] = field(default_factory=list)
+    template_hash: str = ""          # 模板内容 hash（保持向后兼容）
 
     @property
     def success(self) -> bool:
