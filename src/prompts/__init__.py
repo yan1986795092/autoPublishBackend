@@ -23,6 +23,8 @@ from .engine import PromptEngine, prompt_engine, PromptTemplateDef, RenderedProm
 from .builder import PromptBuilder
 from .variables import VariableDef, VariableSet
 from .builtins import register_all as _register_all
+from .registry import PromptRegistry
+from .registry_types import RegistryEntry, RegistryTemplateVersion, PromptDiff
 
 # ── 启动时自动注册内建模板 ──
 _registered_count = _register_all()
@@ -43,4 +45,8 @@ __all__ = [
     "VariableSet",
     "CONTENT_TYPE_PROMPTS",
     "STYLE_GUIDES",
+    "PromptRegistry",
+    "RegistryEntry",
+    "RegistryTemplateVersion",
+    "PromptDiff",
 ]
