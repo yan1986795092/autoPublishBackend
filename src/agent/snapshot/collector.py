@@ -46,7 +46,7 @@ class SnapshotCollector:
         self._profile = profile
         self._task_id = task_id
         self._parent_snapshot_id = parent_snapshot_id
-        self._start = time.monotonic()
+        self._start = time.perf_counter()
         self.tags: list[str] = []
 
         self._prompt_messages: list[PromptMessageSnapshot] = []
@@ -98,7 +98,7 @@ class SnapshotCollector:
 
     def finalize(self, result: dict) -> ExecutionSnapshot:
         """执行完毕后生成最终快照。"""
-        duration = int((time.monotonic() - self._start) * 1000)
+        duration = int((time.perf_counter() - self._start) * 1000)
         snapshot = ExecutionSnapshot(
             snapshot_id=self._snapshot_id,
             agent_name=self._agent_name,
