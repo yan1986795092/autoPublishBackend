@@ -53,24 +53,64 @@ class BaseAgent:
         """执行任务
 
         将 profile 注入 task_input，然后委托给对应的 handler 函数。
-        返回值与 handler 函数完全一致。
+        自动采集执行快照。
         """
-        # 注入 profile 到 task_input（handler 可选使用）
         enriched = {**task_input, "_agent_profile": self.profile}
 
-        # 获取 handler
+        # ── 创建 SnapshotCollector ──
+        collector = None
+        try:
+            from src.agent.snapshot.collector import SnapshotCollector, set_collector
+            collector = SnapshotCollector(
+                agent_name=self.name,
+                profile=self.profile.to_dict(),
+                task_id=task_input.get("_task_id"),
+            )
+            set_collector(collector)
+
+            # 注册 PromptBuilder hook
+            from src.prompts import builder as _prompt_builder
+            _prompt_builder.set_on_build_complete(
+                lambda composed, messages: _record_builder_messages(collector, messages)
+            )
+        except ImportError:
+            pass
+
+        # 获取 handler（原有逻辑不变）
         handler = self._resolve_handler()
 
-        # 调用 handler
-        if handler is not None:
-            return await handler(enriched, self._llm, mcp_tools)
+        try:
+            if handler is not None:
+                result = await handler(enriched, self._llm, mcp_tools)
+            else:
+                fallback_input = {
+                    "agent_type": self.profile.name,
+                    "input": task_input,
+                }
+                result = await handle_fallback(fallback_input, self._llm, None)
 
-        # Fallback
-        fallback_input = {
-            "agent_type": self.profile.name,
-            "input": task_input,
-        }
-        return await handle_fallback(fallback_input, self._llm, None)
+            # ── 采集快照并持久化 ──
+            if collector is not None:
+                snapshot = collector.finalize(result)
+                try:
+                    from src.agent.snapshot.storage import SnapshotStorage
+                    storage = SnapshotStorage()
+                    storage.save(snapshot)
+                    result["_snapshot_id"] = snapshot.snapshot_id
+                except Exception as e:
+                    logger.warning("Failed to persist snapshot: %s", e)
+
+            return result
+        finally:
+            # 清理 context
+            if collector is not None:
+                try:
+                    from src.agent.snapshot.collector import set_collector
+                    set_collector(None)
+                    from src.prompts import builder as _prompt_builder
+                    _prompt_builder.set_on_build_complete(None)
+                except ImportError:
+                    pass
 
     async def execute_with_memory(
         self,
@@ -120,3 +160,14 @@ class BaseAgent:
         if self._handler_fn is None:
             logger.warning("No handler found for agent", agent_name=self.name, handler_key=key)
         return self._handler_fn
+
+
+def _record_builder_messages(collector, messages):
+    """将 PromptBuilder 构建的消息注册到 collector（模块级函数，避免 lambda 序列化问题）。"""
+    from src.agent.snapshot.models import PromptMessageSnapshot
+    for m in messages:
+        collector.record_prompt_message(PromptMessageSnapshot(
+            role=m["role"],
+            source="build_result",
+            resolved_content=m["content"],
+        ))

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time as _time
 from typing import Any, Callable, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
@@ -30,6 +31,43 @@ logger = logging.getLogger(__name__)
 
 # 最大工具调用轮次，防止无限循环
 MAX_TOOL_ROUNDS = 5
+
+
+def _record_llm_to_collector(collector, llm, messages, response, start_time):
+    """内部辅助：记录 LLM 调用到 SnapshotCollector"""
+    if collector is None:
+        return
+    latency_ms = int((_time.monotonic() - start_time) * 1000)
+    content = response.content if hasattr(response, 'content') else str(response)
+
+    messages_dict = []
+    for m in messages:
+        if hasattr(m, 'type') and hasattr(m, 'content'):
+            messages_dict.append({"role": m.type, "content": m.content})
+        else:
+            messages_dict.append({"role": "user", "content": str(m)})
+
+    finish_reason = getattr(response, 'finish_reason', None)
+    if finish_reason is None and hasattr(response, 'response_metadata'):
+        finish_reason = response.response_metadata.get('finish_reason', 'stop')
+
+    usage = {}
+    if hasattr(response, 'usage_metadata'):
+        usage = response.usage_metadata
+    elif hasattr(response, 'usage'):
+        usage = response.usage if isinstance(response.usage, dict) else {}
+
+    collector.record_llm_call(
+        model=getattr(llm, 'model_name', 'unknown'),
+        params={"temperature": getattr(llm, 'temperature', None)},
+        messages=messages_dict,
+        response_content=content,
+        finish_reason=finish_reason or 'stop',
+        prompt_tokens=usage.get('input_tokens', usage.get('prompt_tokens', 0)),
+        completion_tokens=usage.get('output_tokens', usage.get('completion_tokens', 0)),
+        total_tokens=usage.get('total_tokens', 0),
+        latency_ms=latency_ms,
+    )
 
 
 def bind_tools(
@@ -143,13 +181,23 @@ async def call_llm(
     Returns:
         LLM 返回的文本内容
     """
+    # ── collector 注入 ──
+    collector = None
+    try:
+        from src.agent.snapshot.collector import get_collector
+        collector = get_collector()
+    except ImportError:
+        pass
+
     has_tools = _check_tools(tool_registry, agent_type)
 
     # ── 无工具：直接走原始路径 ──
     if not has_tools:
         if stream:
             return await _stream_only(llm, messages, on_chunk)
+        _start = _time.monotonic()
         result = await llm.ainvoke(messages)
+        _record_llm_to_collector(collector, llm, messages, result, _start)
         return result.content or ""
 
     # ── 有工具：绑定工具并执行工具循环 ──
@@ -158,7 +206,9 @@ async def call_llm(
 
     # Phase 1: 工具调用循环（非流式）
     for _round in range(max_tool_rounds):
+        _start = _time.monotonic()
         response = await tool_llm.ainvoke(current_messages)
+        _record_llm_to_collector(collector, tool_llm, current_messages, response, _start)
         current_messages.append(response)
 
         tool_calls = _get_tool_calls(response)
