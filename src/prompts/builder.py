@@ -10,9 +10,19 @@ fluent API 风格，handler 中链式调用：
 """
 
 from __future__ import annotations
-from typing import Optional
+from typing import Optional, Callable
+import logging
 
 from .engine import PromptEngine, prompt_engine as _default_engine, ComposedMessages
+
+logger = logging.getLogger(__name__)
+
+# 延迟导入钩子（由 BaseAgent 注入，避免循环依赖）
+_on_build_complete: Optional[Callable] = None
+
+def set_on_build_complete(callback: Optional[Callable]) -> None:
+    global _on_build_complete
+    _on_build_complete = callback
 
 
 class PromptBuilder:
@@ -109,12 +119,20 @@ class PromptBuilder:
 
         # 3. 合并同 role 的连续消息
         merged = self._merge_consecutive(messages)
-
-        return ComposedMessages(
+        result = ComposedMessages(
             messages=merged,
             used_templates=composed.used_templates,
             total_chars=sum(len(m["content"]) for m in merged),
         )
+
+        # ── 注册到 SnapshotCollector（如当前 context 有 collector）──
+        if _on_build_complete is not None:
+            try:
+                _on_build_complete(composed=result, messages=merged)
+            except Exception as e:
+                logger.warning("PromptBuilder build hook failed: %s", e)
+
+        return result
 
     def build_langchain(self):
         """构建为 LangChain Message 列表"""
