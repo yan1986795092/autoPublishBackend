@@ -43,7 +43,7 @@ class RenderedPrompt:
     template_version: str
     variables_used: dict
     errors: list[str] = field(default_factory=list)
-    template_hash: str = ""          # 模板内容 hash（保持向后兼容）
+    template_hash: str | None = None   # 模板内容 hash（由 PromptRegistry.render 填充，engine.render 路径为空）
 
     @property
     def success(self) -> bool:

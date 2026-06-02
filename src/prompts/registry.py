@@ -2,6 +2,7 @@
 from __future__ import annotations
 import hashlib
 import difflib
+import json
 import logging
 from datetime import datetime, timezone
 from typing import Literal
@@ -18,7 +19,8 @@ logger = logging.getLogger(__name__)
 
 def _compute_hash(template: str, variables: list[dict]) -> str:
     """计算模板的内容 hash（SHA256 的前 12 位）。"""
-    raw = template.strip() + "|" + str(sorted(str(v) for v in variables))
+    var_str = json.dumps(sorted(json.dumps(v, sort_keys=True) for v in variables))
+    raw = template.strip() + "|" + var_str
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
 
 
@@ -55,6 +57,7 @@ class PromptRegistry:
         """首次注册模板。如果已存在则转为 new_version。"""
         existing = self._entries.get(name)
         if existing:
+            logger.info("Template %s already registered, creating new version", name)
             self.new_version(name, template, changelog=changelog, variables=variables)
             return existing
 
@@ -162,10 +165,10 @@ class PromptRegistry:
         variables = variables or {}
         errors = []
 
-        # 检查必填变量
+        # 检查必填变量（variables 为 list[dict]）
         for var_def in version.variables:
-            var_name = var_def["name"] if isinstance(var_def, dict) else var_def.name
-            required = var_def.get("required", False) if isinstance(var_def, dict) else (getattr(var_def, "required", False) if hasattr(var_def, "required") else False)
+            var_name = var_def["name"]
+            required = var_def.get("required", False)
             val = variables.get(var_name)
             if required and (val is None or val == ""):
                 msg = f"{name}: 缺少必填变量 '{var_name}'"
