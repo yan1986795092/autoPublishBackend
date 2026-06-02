@@ -398,3 +398,26 @@ class Skill(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class SnapshotRecord(Base):
+    """执行快照元数据（完整 JSON 存文件系统）"""
+    __tablename__ = "execution_snapshots"
+
+    snapshot_id = Column(String(32), primary_key=True)
+    task_id = Column(String(36), ForeignKey("agent_tasks.id"), nullable=True, index=True)
+    agent_name = Column(String(64), index=True)
+    timestamp = Column(DateTime, index=True)
+    duration_ms = Column(Integer, default=0)
+    tags = Column(Text, nullable=True)                    # JSON list
+
+    template_names = Column(Text, nullable=True)          # JSON list
+    template_versions = Column(Text, nullable=True)       # JSON list
+    prompt_tokens = Column(Integer, default=0)
+    completion_tokens = Column(Integer, default=0)
+    model = Column(String(64), nullable=True)
+    result_summary = Column(Text, nullable=True)
+    captured_hash = Column(String(64))
+    parent_snapshot_id = Column(String(32), nullable=True)
+
+    snapshot_path = Column(String(256), nullable=False)   # "snapshots/202606/snap_xxx.json"
