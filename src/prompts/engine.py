@@ -80,7 +80,6 @@ class PromptEngine:
         """注册一个模板。同名模板会推入 registry 版本链。"""
         self._templates[template.name] = template
         # 同步注册到 registry
-        from .registry_types import VersionStatus
         variables_dicts = []
         for v in template.variables:
             if hasattr(v, 'to_dict'):
@@ -138,8 +137,8 @@ class PromptEngine:
     # 渲染
     # ═══════════════════════════════════════════
 
-    def render(self, name: str, variables: dict | None = None,
-               strict: bool = False, *,
+    def render(self, name: str, variables: dict | None = None, *,
+               strict: bool = False,
                pin: str | None = None,
                pin_hash: str | None = None) -> RenderedPrompt:
         """渲染一个命名的模板。
