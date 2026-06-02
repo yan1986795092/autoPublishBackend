@@ -67,17 +67,51 @@ class PromptEngine:
     文本中的字面花括号需使用 {{ 和 }} 转义（Python str.format 约定）。
     """
 
-    def __init__(self):
+    def __init__(self, registry: Optional["PromptRegistry"] = None):
         self._templates: dict[str, PromptTemplateDef] = {}
+        from .registry import PromptRegistry  # Lazy import to avoid circular
+        self._registry = registry or PromptRegistry()
 
     # ═══════════════════════════════════════════
     # 注册
     # ═══════════════════════════════════════════
 
     def register(self, template: PromptTemplateDef) -> None:
-        """注册一个模板。同名模板会覆盖（允许自定义模板替换内建模板）。"""
+        """注册一个模板。同名模板会推入 registry 版本链。"""
         self._templates[template.name] = template
-        logger.debug("Template registered: %s (v%s, role=%s)", template.name, template.version, template.role)
+        # 同步注册到 registry
+        from .registry_types import VersionStatus
+        variables_dicts = []
+        for v in template.variables:
+            if hasattr(v, 'to_dict'):
+                variables_dicts.append(v.to_dict())
+            elif hasattr(v, '__dict__'):
+                variables_dicts.append(v.__dict__)
+            else:
+                variables_dicts.append({"name": str(v)})
+
+        existing = self._registry.get(template.name)
+        if existing:
+            new_ver = self._registry.new_version(
+                name=template.name,
+                template=template.template,
+                changelog=f"从代码注册更新",
+                variables=variables_dicts,
+            )
+            if new_ver:
+                logger.debug("Template %s: new registry version %s", template.name, new_ver.version)
+        else:
+            self._registry.register(
+                name=template.name,
+                template=template.template,
+                description=template.description,
+                variables=variables_dicts,
+                role=template.role,
+                group=template.group,
+                changelog="从代码注册",
+            )
+        logger.debug("Template registered: %s (v%s, role=%s)",
+                     template.name, template.version, template.role)
 
     def register_many(self, templates: list[PromptTemplateDef]) -> None:
         for t in templates:
@@ -105,17 +139,17 @@ class PromptEngine:
     # ═══════════════════════════════════════════
 
     def render(self, name: str, variables: dict | None = None,
-               strict: bool = False) -> RenderedPrompt:
-        """渲染一个命名的模板
+               strict: bool = False, *,
+               pin: str | None = None,
+               pin_hash: str | None = None) -> RenderedPrompt:
+        """渲染一个命名的模板。
 
-        Args:
-            name: 模板名称
-            variables: 模板变量
-            strict: True 时变量校验失败抛出异常
-
-        Returns:
-            渲染结果（包含文本、版本、错误信息）
+        支持 pin/pin_hash 参数以引用 registry 中的特定版本。
         """
+        # 如果指定了 pin 或 pin_hash，使用 registry 渲染
+        if pin is not None or pin_hash is not None:
+            return self._registry.render(name, variables, pin=pin, pin_hash=pin_hash, strict=strict)
+
         template = self._templates.get(name)
         if not template:
             err = f"模板未注册: {name}"
