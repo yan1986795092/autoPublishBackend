@@ -15,8 +15,9 @@ Jina Reader 特点：
 2. 直接 HTTP 抓取（兜底降级）
 """
 
-from __future__ import annotations
-
+# Note: DO NOT use `from __future__ import annotations` here.
+# The MCP SDK's `issubclass(param.annotation, Context)` inspection requires
+# eagerly-evaluated type annotations, not strings.
 import logging
 from mcp.server.fastmcp import FastMCP
 

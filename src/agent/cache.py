@@ -93,9 +93,29 @@ class AgentCache:
         self._misses = 0
 
     def _make_key(self, agent_type: str, task_input: dict) -> str:
-        normalized = json.dumps(task_input, sort_keys=True, ensure_ascii=False)
+        # Sanitize: remove non-serializable objects (e.g. StructuredTool) before hashing
+        sanitized = self._sanitize_for_json(task_input)
+        normalized = json.dumps(sanitized, sort_keys=True, ensure_ascii=False)
         input_hash = hashlib.sha256(normalized.encode()).hexdigest()[:16]
         return f"{agent_type}:{input_hash}"
+
+    @staticmethod
+    def _sanitize_for_json(obj: object) -> object:
+        """Recursively remove non-JSON-serializable objects."""
+        if obj is None or isinstance(obj, (str, int, float, bool)):
+            return obj
+        if isinstance(obj, dict):
+            return {k: AgentCache._sanitize_for_json(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [AgentCache._sanitize_for_json(item) for item in obj]
+        if isinstance(obj, bytes):
+            return obj.decode("utf-8", errors="replace")
+        # Fallback: convert to string representation
+        try:
+            json.dumps(obj)
+            return obj
+        except (TypeError, ValueError):
+            return str(obj)
 
     def get(self, agent_type: str, task_input: dict) -> Optional[dict]:
         key = self._make_key(agent_type, task_input)

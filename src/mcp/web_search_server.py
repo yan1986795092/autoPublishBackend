@@ -5,8 +5,9 @@
 支持多引擎：DuckDuckGo / Bing (需 API Key) / SerpAPI
 """
 
-from __future__ import annotations
-
+# Note: DO NOT use `from __future__ import annotations` here.
+# The MCP SDK's `issubclass(param.annotation, Context)` inspection requires
+# eagerly-evaluated type annotations, not strings.
 import asyncio
 import logging
 import os

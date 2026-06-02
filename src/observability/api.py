@@ -226,7 +226,7 @@ async def get_span_detail(trace_id: str, span_id: str):
 # ── Aggregated Stats ────────────────────────────────────────────────────────────
 
 @router.get("/stats", response_model=TraceStatsResponse)
-async def get_trace_stats(
+async def get_stats_route(
     service: str = Query("", description="Service name filter"),
     time: str = Query("1h", description="Time range: 1h, 24h, 7d, or ISO8601"),
 ):
