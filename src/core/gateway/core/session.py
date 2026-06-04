@@ -48,7 +48,11 @@ def _estimate_tokens(messages: list[dict]) -> int:
 
 
 def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict]:
-    """Convert LangChain BaseMessage list to dict list for LiteLLMClient."""
+    """Convert LangChain BaseMessage list to dict list for LiteLLMClient.
+
+    Also sanitizes messages for models that don't support 'tool' role
+    (e.g., GLM-4-Flash), converting tool messages to user messages.
+    """
     result = []
     for m in messages:
         role = getattr(m, "type", "user")
@@ -66,7 +70,42 @@ def _messages_to_dicts(messages: list[BaseMessage]) -> list[dict]:
             msg_dict["tool_calls"] = tc
 
         result.append(msg_dict)
+
+    # Sanitize: convert unsupported roles for models like GLM-4-Flash
+    result = _sanitize_roles(result)
     return result
+
+
+def _sanitize_roles(messages: list[dict]) -> list[dict]:
+    """Sanitize message roles for models that don't support 'tool'/'function' roles.
+
+    GLM-4-Flash and some other Chinese LLMs only support system/user/assistant roles.
+    Tool messages are converted to user messages with a prefix.
+    """
+    ALLOWED_ROLES = {"system", "user", "assistant"}
+    cleaned = []
+    for msg in messages:
+        role = msg.get("role", "")
+        if role in ALLOWED_ROLES:
+            cleaned.append(msg)
+        elif role in ("tool", "function"):
+            # Convert tool/function results to user messages
+            content = msg.get("content", "")
+            if content:
+                text = f"[工具返回结果]\n{content}"
+            else:
+                text = "[工具返回结果]（空）"
+            # Keep tool_call_id for traceability but use user role
+            new_msg = {"role": "user", "content": text}
+            tc_id = msg.get("tool_call_id")
+            if tc_id:
+                new_msg["_original_tool_call_id"] = tc_id
+            cleaned.append(new_msg)
+        else:
+            # Unknown role - convert to user to be safe
+            content = msg.get("content", "")
+            cleaned.append({"role": "user", "content": str(content) if content else ""})
+    return cleaned
 
 
 def _convert_tools_to_openai(tools: list[BaseTool]) -> list[dict]:
@@ -84,10 +123,14 @@ def _convert_tools_to_openai(tools: list[BaseTool]) -> list[dict]:
     for tool in tools:
         try:
             if hasattr(tool, "args_schema") and tool.args_schema is not None:
-                parameters = tool.args_schema.schema()
+                # Use model_json_schema() for Pydantic v2 compatibility
+                if hasattr(tool.args_schema, "model_json_schema"):
+                    parameters = tool.args_schema.model_json_schema()
+                else:
+                    parameters = tool.args_schema.schema()
+
                 # Remove Pydantic-specific keys that OpenAI doesn't expect
-                parameters.pop("title", None)
-                parameters.pop("description", None)
+                parameters = _sanitize_openai_schema(parameters)
             else:
                 parameters = {"type": "object", "properties": {}}
         except Exception:
@@ -102,6 +145,34 @@ def _convert_tools_to_openai(tools: list[BaseTool]) -> list[dict]:
             },
         })
     return openai_tools
+
+
+def _sanitize_openai_schema(schema: dict) -> dict:
+    """递归清理 JSON Schema 中 OpenAI 不支持的 Pydantic 特有字段"""
+    if not isinstance(schema, dict):
+        return schema
+
+    # 移除 Pydantic v2 生成的 $defs（OpenAI 不支持）
+    schema.pop("$defs", None)
+
+    # 移除 Pydantic 添加的 title/description 顶层字段
+    schema.pop("title", None)
+    schema.pop("description", None)
+
+    # 移除 additionalProperties（Pydantic v2 默认添加）
+    schema.pop("additionalProperties", None)
+
+    # 递归清理子字段
+    for key in list(schema.keys()):
+        if isinstance(schema[key], dict):
+            schema[key] = _sanitize_openai_schema(schema[key])
+        elif isinstance(schema[key], list):
+            schema[key] = [
+                _sanitize_openai_schema(item) if isinstance(item, dict) else item
+                for item in schema[key]
+            ]
+
+    return schema
 
 
 def _parse_tool_calls(response: Any) -> list[dict]:

@@ -8,6 +8,21 @@ from opentelemetry.trace import Status, StatusCode
 
 import litellm
 
+# Mapping from internal provider names to litellm's custom_llm_provider names.
+# litellm doesn't natively know "zhipu" or "qwen" as providers — it needs the
+# custom provider identifier that matches its internal routing logic.
+_LITELLM_PROVIDER_MAP = {
+    "zhipu": "openai",      # Zhipu (BigModel) is OpenAI-API-compatible
+    "zhipuai": "openai",    # Alias
+    "qwen": "dashscope",    # Alibaba Dashscope
+    "openai": "openai",     # Direct OpenAI
+}
+
+
+def _to_litellm_provider(provider: str) -> str:
+    """Convert internal provider name to litellm's custom_llm_provider name."""
+    return _LITELLM_PROVIDER_MAP.get(provider, provider)
+
 # Lazy imports — observability may not be fully configured at import time
 # (e.g., elasticsearch not installed in dev environment)
 _tracer = None
@@ -152,6 +167,11 @@ class LiteLLMClient:
             actual_provider = routing_decision.get("provider", provider)
             actual_model = routing_decision.get("model", actual_model)
 
+        # Prefix model with provider for litellm compatibility
+        litellm_provider = _to_litellm_provider(actual_provider)
+        if litellm_provider and "/" not in actual_model:
+            actual_model = f"{litellm_provider}/{actual_model}"
+
         # ── [插桩] model.request span ──────────────────────────────────────
         with tracer.start_as_current_span(
             "model.request",
@@ -233,6 +253,7 @@ class LiteLLMClient:
                 "max_tokens": max_tokens,
                 "stream": stream,
                 "timeout": timeout,
+                "custom_llm_provider": litellm_provider,
                 **kwargs,
             }
 
@@ -326,24 +347,31 @@ class LiteLLMClient:
         tracer = _get_tracer()
         start_time = time.perf_counter()
 
+        # Prefix model with provider for litellm compatibility
+        litellm_provider = _to_litellm_provider(provider)
+        litellm_model = model
+        if litellm_provider and "/" not in litellm_model:
+            litellm_model = f"{litellm_provider}/{litellm_model}"
+
         with tracer.start_as_current_span(
             "model.request.sync",
             kind=trace.SpanKind.CLIENT,
             attributes={
                 "gen_ai.system": "openai",
-                "gen_ai.request.model": model,
+                "gen_ai.request.model": litellm_model,
                 "custom.provider": provider,
                 "custom.source_app": source_app,
             },
         ) as request_span:
             litellm_params = {
-                "model": model,
+                "model": litellm_model,
                 "messages": messages,
                 "api_key": api_key,
                 "api_base": base_url,
                 "temperature": temperature,
                 "max_tokens": max_tokens,
                 "timeout": timeout,
+                "custom_llm_provider": litellm_provider,
                 **kwargs,
             }
             try:

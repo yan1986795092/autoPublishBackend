@@ -233,8 +233,19 @@ class MCPClient:
             else:
                 category = "search"
 
+            # 根据分类限制可见的 Agent 类型（防止污染非搜索 Agent 的 LLM 调用）
+            if category == "search":
+                agent_types = ["WebSearch", "HotTopicAgent"]
+            elif category == "media":
+                agent_types = ["ImageAgent"]
+            elif category == "code":
+                agent_types = ["CodeAgent"]
+            else:
+                agent_types = []
+
             meta = AgentToolMeta(
                 category=category,
+                agent_types=agent_types,
                 builtin=False,
                 visible=True,
             )

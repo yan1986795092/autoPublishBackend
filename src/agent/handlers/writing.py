@@ -27,8 +27,29 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         dep_context = task_input.get("_context", {})
         context_str_parts = []
         for cdata in dep_context.values():
-            if cdata.get("content"):
-                context_str_parts.append(cdata["content"][:1000])
+            raw = cdata.get("content")
+            if raw:
+                # 支持纯字符串和结构化内容（如 MCP 工具返回的 [{"type":"text","text":"..."}]）
+                if isinstance(raw, str):
+                    text = raw[:1000]
+                elif isinstance(raw, list):
+                    parts = []
+                    for item in raw:
+                        if isinstance(item, dict):
+                            if "text" in item:
+                                parts.append(str(item["text"]))
+                            elif "structured_content" in item:
+                                sc = item["structured_content"]
+                                if isinstance(sc, dict) and "result" in sc:
+                                    parts.append(str(sc["result"]))
+                        elif isinstance(item, str):
+                            parts.append(item)
+                    text = "\n".join(parts)[:1000]
+                elif isinstance(raw, dict):
+                    text = str(raw.get("result", raw))[:1000]
+                else:
+                    text = str(raw)[:1000]
+                context_str_parts.append(text)
 
         # 记忆上下文（由 MemoryManager 注入）
         memory_context = task_input.get("_memory_context", "")

@@ -7,7 +7,7 @@ import structlog
 
 from .task_queue import task_queue, AsyncTask
 from ..orchestrator import Orchestrator
-from ..persistence import save_agent_task, save_thinking_trace, cleanup_old_records
+from ..persistence import save_agent_task, cleanup_old_records
 from ..factory import create_orchestrator
 from ..cache import agent_cache
 from src.mcp.client import get_mcp_client, shutdown_mcp_client
@@ -149,19 +149,9 @@ class AgentWorker:
 
                 if result.status.value == "completed":
                     task_queue.complete_task(async_task.id, result.to_dict())
-                    trace_steps = result.thinking_trace.get("steps", []) if result.thinking_trace else []
-                    save_agent_task(
-                        task_id=async_task.id,
-                        user_id=async_task.user_id,
-                        prompt=async_task.prompt,
-                        status="completed",
-                        result={"agent_result": result.to_dict()},
-                        progress=100.0,
-                        total_steps=len(trace_steps) or 1,
-                        completed_steps=len(trace_steps),
-                        total_tokens=result.usage.tokens_used if result.usage else 0,
-                        thinking_trace=result.thinking_trace,
-                    )
+                    # 注意：不再调用 save_agent_task。
+                    # orchestrator.run_async 内部通过 _persist_results_async 已完成写入，
+                    # 再次调用会导致 UNIQUE constraint failed (与 SSE 路径冲突)。
                     return  # 完全成功，退出重试循环
 
                 # partial 状态：有输出但质量不足，记录警告但不退出重试
@@ -177,12 +167,10 @@ class AgentWorker:
                             user_id=async_task.user_id,
                             prompt=async_task.prompt,
                             status="partial",
-                            result={"agent_result": result.to_dict()},
+                            error=last_error,
                             progress=50.0,
                             total_steps=1,
                             completed_steps=0,
-                            total_tokens=0,
-                            thinking_trace=result.thinking_trace,
                         )
                         return
                     continue

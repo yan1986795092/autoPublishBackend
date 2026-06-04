@@ -81,7 +81,13 @@ class AgentTool:
         """从 LangChain BaseTool 创建 AgentTool"""
         async def _execute(**kwargs: Any) -> str:
             if hasattr(lc_tool, "_arun"):
-                return await lc_tool._arun(**kwargs)
+                # LangChain StructuredTool 要求 config 参数
+                try:
+                    from langchain_core.runnables import RunnableConfig
+                    return await lc_tool._arun(**kwargs, config=RunnableConfig())
+                except TypeError:
+                    # 如果 config 参数不被接受，回退到不带 config 调用
+                    return await lc_tool._arun(**kwargs)
             return lc_tool.run(kwargs)
 
         return cls(

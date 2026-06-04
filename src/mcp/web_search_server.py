@@ -2,7 +2,12 @@
 
 基于 Model Context Protocol (MCP) SDK，
 提供网页搜索、新闻搜索、内容抓取等工具。
-支持多引擎：DuckDuckGo / Bing (需 API Key) / SerpAPI
+
+引擎优先级（国内可直连）：
+  1. 百度搜索（baidu）— 免费，无需 API Key，国内秒访问
+  2. DuckDuckGo — 免费，无需 API Key（依赖境外网络）
+  3. Bing Web Search — 需 BING_API_KEY
+  4. SerpAPI — 需 SERPAPI_API_KEY
 """
 
 # Note: DO NOT use `from __future__ import annotations` here.
@@ -21,14 +26,230 @@ logger = logging.getLogger(__name__)
 # 初始化 FastMCP Server
 mcp = FastMCP(
     name="open-websearch",
-    instructions="实时网络搜索工具，支持网页搜索、新闻搜索和页面内容抓取",
-    dependencies=["duckduckgo_search>=7.0"],
+    instructions="实时网络搜索工具，支持网页搜索、新闻搜索和页面内容抓取。优先使用百度搜索（国内可直连），无需 API Key。",
+    dependencies=["duckduckgo_search>=7.0", "httpx", "beautifulsoup4"],
 )
 
 
 # ──────────────────────────────────────────
 # 搜索工具
 # ──────────────────────────────────────────
+
+
+async def _search_bing_cn(query: str, max_results: int = 5) -> list[dict]:
+    """Bing 中国版搜索 — 国内可直连，完全免费
+
+    直接爬取 https://cn.bing.com/search，无需任何 API Key。
+    返回格式: list[dict]，每个 dict 包含 title/href/body/source
+    """
+    import httpx
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    }
+
+    results = []
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        resp = await client.get(
+            "https://cn.bing.com/search",
+            params={"q": query, "ensearch": "0"},
+            headers=headers,
+        )
+
+        if resp.status_code != 200:
+            return []
+
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "html.parser")
+        except ImportError:
+            soup = __import__("bs4").BeautifulSoup(resp.text, "html.parser")
+
+        for item in soup.select("li.b_algo, .b_algo"):
+            title_elem = item.select_one("h2 a") or item.select_one("a")
+            if not title_elem:
+                continue
+
+            url = title_elem.get("href", "")
+            if not url or not url.startswith("http"):
+                continue
+
+            title = title_elem.get_text(strip=True)
+
+            # 摘要片段
+            snippet_elem = item.select_one(".b_paractl") or item.select_one(".b_caption p")
+            snippet = snippet_elem.get_text(separator=" ", strip=True) if snippet_elem else ""
+
+            results.append({
+                "title": title,
+                "href": url,
+                "body": snippet,
+                "source": "bing",
+            })
+
+            if len(results) >= max_results:
+                break
+
+    return results
+
+
+async def _search_360(query: str, max_results: int = 5) -> list[dict]:
+    """360 搜索 — 国内可直连，完全免费
+
+    直接爬取 https://www.so.com/s，无需任何 API Key。
+    """
+    import httpx
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+
+    results = []
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        resp = await client.get(
+            "https://www.so.com/s",
+            params={"q": query},
+            headers=headers,
+        )
+
+        if resp.status_code != 200:
+            return []
+
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "html.parser")
+        except ImportError:
+            soup = __import__("bs4").BeautifulSoup(resp.text, "html.parser")
+
+        for item in soup.select(".res-list, .result"):
+            title_elem = item.select_one("h3 a") or item.select_one(".res-title a")
+            if not title_elem:
+                continue
+
+            url = title_elem.get("href", "")
+            if not url or not url.startswith("http"):
+                continue
+
+            title = title_elem.get_text(strip=True)
+
+            snippet_elem = item.select_one(".res-desc, .res-con")
+            snippet = snippet_elem.get_text(separator=" ", strip=True) if snippet_elem else ""
+
+            results.append({
+                "title": title,
+                "href": url,
+                "body": snippet,
+                "source": "360",
+            })
+
+            if len(results) >= max_results:
+                break
+
+    return results
+
+
+async def _search_baidu_news(query: str, max_results: int = 5) -> list[dict]:
+    """国内新闻搜索 — 优先用 Bing 中国新闻分类（国内可直连）"""
+    import httpx
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+
+    results = []
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        # Bing 新闻
+        resp = await client.get(
+            "https://cn.bing.com/news/search",
+            params={"q": query, "qft": "区间：今日"},
+            headers=headers,
+        )
+
+        if resp.status_code == 200:
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(resp.text, "html.parser")
+            except ImportError:
+                soup = __import__("bs4").BeautifulSoup(resp.text, "html.parser")
+
+            for item in soup.select(".news-item, .b_algo"):
+                title_elem = item.select_one("h2 a") or item.select_one("a")
+                if not title_elem:
+                    continue
+                url = title_elem.get("href", "")
+                if not url or not url.startswith("http"):
+                    continue
+                title = title_elem.get_text(strip=True)
+
+                date_elem = item.select_one(".b_attn, .news-date")
+                date_str = date_elem.get_text(strip=True) if date_elem else ""
+
+                snippet_elem = item.select_one(".b_paractl") or item.select_one("p")
+                snippet = snippet_elem.get_text(separator=" ", strip=True)[:150] if snippet_elem else ""
+
+                results.append({
+                    "title": title,
+                    "url": url,
+                    "body": snippet,
+                    "source": date_str or "Bing新闻",
+                    "date": date_str,
+                })
+
+                if len(results) >= max_results:
+                    break
+
+    return results
+
+
+def _ddgs_text(query: str, max_results: int = 5) -> list[dict]:
+    """统一 DuckDuckGo text 搜索入口，自动兼容新旧包名"""
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            from duckduckgo_search import DDGS as _DDGS
+
+        with _DDGS(timeout=20) as ddgs:
+            return list(ddgs.text(query, max_results=max_results))
+    except ImportError:
+        from duckduckgo_search import DDGS as _DDGS
+        with _DDGS(timeout=20) as ddgs:
+            return list(ddgs.text(query, max_results=max_results))
+
+
+def _ddgs_news(query: str, max_results: int = 5) -> list[dict]:
+    """统一 DuckDuckGo news 搜索入口，自动兼容新旧包名"""
+    try:
+        import warnings
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            from duckduckgo_search import DDGS as _DDGS
+
+        with _DDGS(timeout=20) as ddgs:
+            return list(ddgs.news(query, max_results=max_results))
+    except ImportError:
+        from duckduckgo_search import DDGS as _DDGS
+        with _DDGS(timeout=20) as ddgs:
+            return list(ddgs.news(query, max_results=max_results))
 
 
 @mcp.tool(
@@ -40,25 +261,32 @@ async def web_search(
     max_results: int = 5,
     source: str = "auto",
 ) -> str:
-    """网页搜索 — 支持多引擎自动降级"""
+    """网页搜索 — 多引擎自动降级（国内可直连）"""
     engines_tried = []
 
-    # ── 引擎 1: DuckDuckGo (免费，无需 API Key) ──
+    # ── 引擎 1: Bing 中国版（国内可直连，完全免费） ──
+    if source in ("auto", "bing", "baidu"):
+        engines_tried.append("Bing中国")
+        try:
+            results = await _search_bing_cn(query, max_results=max_results)
+            if results:
+                return _format_web_results(results, query)
+            logger.warning("Bing CN returned empty results, trying next engine")
+        except Exception as e:
+            logger.warning(f"Bing CN search failed: {e}")
+
+    # ── 引擎 2: DuckDuckGo (免费，需境外网络) ──
     if source in ("auto", "duckduckgo"):
         engines_tried.append("DuckDuckGo")
         try:
-            from duckduckgo_search import DDGS
-
-            with DDGS(timeout=20) as ddgs:
-                results = list(ddgs.text(query, max_results=max_results))
-
+            results = _ddgs_text(query, max_results=max_results)
             if results:
                 return _format_web_results(results, query)
             logger.warning("DuckDuckGo returned empty results, trying next engine")
         except Exception as e:
             logger.warning(f"DuckDuckGo search failed: {e}")
 
-    # ── 引擎 2: Bing Web Search (需 BING_API_KEY) ──
+    # ── 引擎 3: Bing Web Search (需 BING_API_KEY) ──
     bing_key = os.getenv("BING_API_KEY")
     if bing_key and source in ("auto", "bing"):
         engines_tried.append("Bing")
@@ -69,7 +297,7 @@ async def web_search(
         except Exception as e:
             logger.warning(f"Bing search failed: {e}")
 
-    # ── 引擎 3: SerpAPI (需 SERPAPI_API_KEY) ──
+    # ── 引擎 4: SerpAPI (需 SERPAPI_API_KEY) ──
     serpapi_key = os.getenv("SERPAPI_API_KEY")
     if serpapi_key and source in ("auto", "serpapi"):
         engines_tried.append("SerpAPI")
@@ -80,9 +308,10 @@ async def web_search(
         except Exception as e:
             logger.warning(f"SerpAPI search failed: {e}")
 
+    tried_str = "、".join(engines_tried) or "无"
     return (
-        f"搜索「{query}」失败。尝试过的引擎：{', '.join(engines_tried) or '无'}。"
-        "请检查网络连接或配置 BING_API_KEY / SERPAPI_API_KEY 环境变量。"
+        f"搜索「{query}」暂时不可用（已尝试引擎：{tried_str}）。"
+        "建议配置 BING_API_KEY 或 SERPAPI_API_KEY 环境变量。"
     )
 
 
@@ -95,35 +324,41 @@ async def news_search(
     max_results: int = 5,
     region: str = "cn-zh",
 ) -> str:
-    """新闻搜索"""
+    """新闻搜索 — 优先使用 Bing 新闻（国内可直连）"""
+    # ── 引擎 1: Bing 新闻 ──
     try:
-        from duckduckgo_search import DDGS
-
-        with DDGS(timeout=20) as ddgs:
-            results = list(ddgs.news(query, max_results=max_results))
-
-        if not results:
-            return f"未找到「{query}」相关的最新新闻。"
-
-        lines = [f"**{query}** 相关新闻（共 {len(results)} 条）：\n"]
-        for i, r in enumerate(results, 1):
-            title = r.get("title", "")
-            source = r.get("source", "")
-            date = r.get("date", "")
-            url = r.get("url", "")
-            body = r.get("body", "")[:200]
-
-            lines.append(f"**{i}. {title}**")
-            if source:
-                lines.append(f"   来源：{source}  |  时间：{date}")
-            if body:
-                lines.append(f"   {body}...")
-            lines.append(f"   🔗 {url}\n")
-
-        return "\n".join(lines)
+        results = await _search_baidu_news(query, max_results=max_results)
+        if results:
+            lines = [f"**{query}** 相关新闻（共 {len(results)} 条）：\n"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"**{i}. {r['title']}**")
+                if r.get("date"):
+                    lines.append(f"   时间：{r['date']}")
+                if r.get("body"):
+                    lines.append(f"   {r['body'][:150]}...")
+                lines.append(f"   🔗 {r['url']}\n")
+            return "\n".join(lines)
     except Exception as e:
-        logger.warning(f"News search failed: {e}")
-        return f"新闻搜索暂时不可用：{e}"
+        logger.warning(f"Baidu news search failed: {e}")
+
+    # ── 引擎 2: DuckDuckGo 新闻 ──
+    try:
+        results = _ddgs_news(query, max_results=max_results)
+        if results:
+            lines = [f"**{query}** 相关新闻（共 {len(results)} 条）：\n"]
+            for i, r in enumerate(results, 1):
+                lines.append(f"**{i}. {r.get('title', '')}**")
+                if r.get("date"):
+                    lines.append(f"   来源：{r.get('source', '')}  |  时间：{r.get('date', '')}")
+                body = r.get("body", "")[:150]
+                if body:
+                    lines.append(f"   {body}...")
+                lines.append(f"   🔗 {r.get('url', '')}\n")
+            return "\n".join(lines)
+    except Exception as e:
+        logger.warning(f"DuckDuckGo news search failed: {e}")
+
+    return f"未找到「{query}」相关的最新新闻。"
 
 
 @mcp.tool(

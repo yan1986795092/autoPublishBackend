@@ -57,7 +57,8 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
         tool_name = getattr(tool, "name", None) or str(tool)
         if "web_search" in tool_name or "search" in tool_name:
             try:
-                result = await tool._arun(query=query, max_results=count)
+                from langchain_core.runnables import RunnableConfig
+                result = await tool._arun(query=query, max_results=count, config=RunnableConfig())
                 return {
                     "status": "completed",
                     "agent_type": "WebSearch",
@@ -74,11 +75,67 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
             except Exception as e:
                 logger.warning(f"MCP tool {tool_name} failed, falling back to direct search: {e}")
 
-    # ── 兜底：直接 DuckDuckGo ──
-    results = []
-    source = "none"
+    # ── 直接搜索降级链（ToolRegistry/MCP 均不可用时）──
+    # 优先级：Bing中国（国内直连）→ 360搜索 → DuckDuckGo（境外）→ SerpAPI（需 key）→ LLM 知识
 
-    # Layer 1: SerpAPI
+    # Layer 1: Bing 中国版（国内可直连，完全免费）
+    try:
+        results = await _search_bing_cn(query, count)
+        if results:
+            content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: Bing中国）："]
+            for r in results:
+                content_parts.append("- [%s](%s): %s" % (r['title'], r['url'], r.get('snippet', '')))
+            return {
+                "status": "completed", "agent_type": "WebSearch",
+                "output": {"content": "\n".join(content_parts), "results": results, "source": "bing_cn", "query": query},
+                "tokens_used": 0,
+                "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": "搜索：%s" % query, "output_summary": "Bing中国搜索找到 %d 条结果" % len(results), "status": "done"}],
+            }
+    except Exception as e:
+        logger.warning("Bing CN direct search failed: %s" % e)
+
+    # Layer 2: 360搜索（国内可直连，完全免费）
+    try:
+        results = await _search_360(query, count)
+        if results:
+            content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: 360搜索）："]
+            for r in results:
+                content_parts.append("- [%s](%s): %s" % (r['title'], r['url'], r.get('snippet', '')))
+            return {
+                "status": "completed", "agent_type": "WebSearch",
+                "output": {"content": "\n".join(content_parts), "results": results, "source": "360", "query": query},
+                "tokens_used": 0,
+                "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": "搜索：%s" % query, "output_summary": "360搜索找到 %d 条结果" % len(results), "status": "done"}],
+            }
+    except Exception as e:
+        logger.warning("360 search failed: %s" % e)
+
+    # Layer 2: DuckDuckGo HTML (境外网络)
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            from duckduckgo_search import DDGS
+        raw_results = await asyncio.to_thread(
+            lambda: list(DDGS(timeout=20).text(query, max_results=count))
+        )
+        results = [
+            {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", ""), "source": "duckduckgo"}
+            for r in raw_results
+        ]
+        if results:
+            content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: DuckDuckGo）："]
+            for r in results:
+                content_parts.append(f"- [{r['title']}]({r['url']}): {r.get('snippet', '')}")
+            return {
+                "status": "completed", "agent_type": "WebSearch",
+                "output": {"content": "\n".join(content_parts), "results": results, "source": "duckduckgo", "query": query},
+                "tokens_used": 0,
+                "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": f"DuckDuckGo 找到 {len(results)} 条结果", "status": "done"}],
+            }
+    except Exception as e:
+        logger.warning(f"DuckDuckGo failed: {e}")
+
+    # Layer 3: SerpAPI（需 API Key）
     serpapi_key = os.getenv("SERPAPI_API_KEY")
     if serpapi_key:
         try:
@@ -90,46 +147,125 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
                 )
                 data = resp.json()
                 results = [
-                    {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", ""), "source": r.get("source", "")}
+                    {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", ""), "source": "serpapi"}
                     for r in data.get("organic_results", [])[:count]
                 ]
-                source = "serpapi"
+                if results:
+                    content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: SerpAPI）："]
+                    for r in results:
+                        content_parts.append(f"- [{r['title']}]({r['url']}): {r.get('snippet', '')}")
+                    return {
+                        "status": "completed", "agent_type": "WebSearch",
+                        "output": {"content": "\n".join(content_parts), "results": results, "source": "serpapi", "query": query},
+                        "tokens_used": 0,
+                        "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": f"SerpAPI 找到 {len(results)} 条结果", "status": "done"}],
+                    }
         except Exception as e:
             logger.warning(f"SerpAPI failed: {e}")
 
-    # Layer 2: DuckDuckGo HTML
-    if not results:
-        try:
-            from duckduckgo_search import DDGS
-            raw_results = await asyncio.to_thread(
-                lambda: list(DDGS(timeout=20).text(query, max_results=count))
-            )
-            results = [
-                {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", ""), "source": "duckduckgo"}
-                for r in raw_results
-            ]
-            source = "duckduckgo"
-        except Exception as e:
-            logger.warning(f"DuckDuckGo failed: {e}")
-
-    if not results:
-        return {
-            "status": "completed", "agent_type": "WebSearch",
-            "output": {"content": f"搜索服务暂时不可用，Agent 将使用内部知识生成关于「{query}」的内容。", "results": [], "fallback": "web_search_unavailable"},
-            "tokens_used": 0,
-            "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": "搜索服务不可用，将使用内部知识", "status": "done"}],
-        }
-
-    content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: {source}）："]
-    for r in results:
-        content_parts.append(f"- [{r['title']}]({r['url']}): {r.get('snippet', '')}")
-
+    # 全部失败：让 LLM 用自身知识生成（不阻塞链路）
     return {
         "status": "completed", "agent_type": "WebSearch",
-        "output": {"content": "\n".join(content_parts), "results": results, "source": source, "query": query},
+        "output": {"content": f"所有搜索引擎均不可用，Agent 将使用内部知识生成关于「{query}」的内容。", "results": [], "fallback": "llm_knowledge"},
         "tokens_used": 0,
-        "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": f"找到 {len(results)} 条结果（来源: {source}）", "status": "done"}],
+        "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": "搜索引擎不可用，将使用 LLM 内部知识生成", "status": "done"}],
     }
+
+
+async def _search_bing_cn(query: str, max_results: int = 5) -> list[dict]:
+    """Bing 中国版网页爬取 — 国内可直连，完全免费"""
+    import httpx
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+
+    results = []
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        resp = await client.get(
+            "https://cn.bing.com/search",
+            params={"q": query, "ensearch": "0"},
+            headers=headers,
+        )
+
+        if resp.status_code != 200:
+            return []
+
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "html.parser")
+        except ImportError:
+            soup = __import__("bs4").BeautifulSoup(resp.text, "html.parser")
+
+        for item in soup.select("li.b_algo, .b_algo"):
+            title_elem = item.select_one("h2 a") or item.select_one("a")
+            if not title_elem:
+                continue
+            url = title_elem.get("href", "")
+            if not url or not url.startswith("http"):
+                continue
+            title = title_elem.get_text(strip=True)
+            snippet_elem = item.select_one(".b_paractl") or item.select_one(".b_caption p")
+            snippet = snippet_elem.get_text(separator=" ", strip=True) if snippet_elem else ""
+            results.append({"title": title, "url": url, "snippet": snippet, "source": "bing_cn"})
+            if len(results) >= max_results:
+                break
+
+    return results
+
+
+async def _search_360(query: str, max_results: int = 5) -> list[dict]:
+    """360 搜索爬取 — 国内可直连，完全免费"""
+    import httpx
+
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/120.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+    }
+
+    results = []
+
+    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+        resp = await client.get(
+            "https://www.so.com/s",
+            params={"q": query},
+            headers=headers,
+        )
+
+        if resp.status_code != 200:
+            return []
+
+        try:
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(resp.text, "html.parser")
+        except ImportError:
+            soup = __import__("bs4").BeautifulSoup(resp.text, "html.parser")
+
+        for item in soup.select(".res-list, .result"):
+            title_elem = item.select_one("h3 a") or item.select_one(".res-title a")
+            if not title_elem:
+                continue
+            url = title_elem.get("href", "")
+            if not url or not url.startswith("http"):
+                continue
+            title = title_elem.get_text(strip=True)
+            snippet_elem = item.select_one(".res-desc, .res-con")
+            snippet = snippet_elem.get_text(separator=" ", strip=True) if snippet_elem else ""
+            results.append({"title": title, "url": url, "snippet": snippet, "source": "360"})
+            if len(results) >= max_results:
+                break
+
+    return results
 
 
 async def handle_url_crawl(task_input: dict, llm: ChatOpenAI | None = None, mcp_tools: list | None = None) -> dict:
