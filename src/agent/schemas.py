@@ -37,6 +37,9 @@ class AgentTask:
     status: TaskStatus = TaskStatus.PENDING
     retry_count: int = 0
     max_retries: int = 2
+    can_parallel_with: list[str] = field(default_factory=list)
+    retry_on_low_quality: bool = False
+    priority: str = "medium"
 
 
 @dataclass
@@ -88,3 +91,5 @@ class ExecutionPlan:
     tasks: list[AgentTask]
     reasoning: str = ""
     estimated_steps: int = 0
+    parallel_groups: list[list[str]] = field(default_factory=list)
+    plan_method: str = "llm"

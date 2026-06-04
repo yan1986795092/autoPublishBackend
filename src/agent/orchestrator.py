@@ -22,7 +22,7 @@ from .state import AgentGraphState
 from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
 from .thinking_trace import ThinkingTrace
 from src.core.llm_gateway import LLMGateway
-from .agent_utils import PLANNER_SYSTEM_PROMPT
+from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, validate_plan_structure
 from src.observability import get_tracer
 from src.observability.metrics import record_agent_run
 
@@ -359,118 +359,115 @@ class Orchestrator:
             return "medium"
         return "simple"
 
-    def _build_template_plan(self, user_request: str, complexity: str) -> ExecutionPlan:
-        """根据复杂度返回预设模板计划"""
+    def _build_fallback_plan(self, user_request: str, complexity: str) -> ExecutionPlan:
+        """Emergency fallback when LLM planning fails. Returns ExecutionPlan dataclass."""
         goal = user_request[:200]
-        plans = {
-            "simple": ExecutionPlan(
-                goal=goal,
-                reasoning="简单任务：直接写作 + 质量审核",
-                estimated_steps=2,
-                tasks=[
-                    AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[0]),
-                ],
-            ),
-            "medium": ExecutionPlan(
-                goal=goal,
-                reasoning="中等任务：搜索资料 → 写作 → SEO 优化 → 审核",
-                estimated_steps=4,
-                tasks=[
-                    AgentTask(id=str(uuid.uuid4()), agent_type="WebSearch", input={"query": user_request, "count": 5}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[0]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[1]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[1, 2]),
-                ],
-            ),
-            "complex": ExecutionPlan(
-                goal=goal,
-                reasoning="复杂任务：搜索 → 写作 → 图表 → SEO → 审核",
-                estimated_steps=5,
-                tasks=[
-                    AgentTask(id=str(uuid.uuid4()), agent_type="WebSearch", input={"query": user_request, "count": 8}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[0]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="DiagramAgent", input={"topic": user_request, "diagram_type": "auto"}, dependencies=[1]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[1]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[1, 3]),
-                ],
-            ),
-        }
-        return plans.get(complexity, plans["simple"])
+
+        if complexity == "simple":
+            task0 = AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[], can_parallel_with=[], retry_on_low_quality=True, priority="high")
+            task1 = AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[0], can_parallel_with=[], retry_on_low_quality=False, priority="medium")
+            return ExecutionPlan(goal=goal, reasoning="Fallback (simple): direct write + review", estimated_steps=2, tasks=[task0, task1], plan_method="template")
+
+        elif complexity == "medium":
+            task0 = AgentTask(id=str(uuid.uuid4()), agent_type="WebSearch", input={"query": user_request, "count": 5}, dependencies=[], can_parallel_with=[], retry_on_low_quality=False, priority="high")
+            task1 = AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[0], can_parallel_with=[], retry_on_low_quality=True, priority="high")
+            task2 = AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[1], can_parallel_with=[], retry_on_low_quality=True, priority="medium")
+            task3 = AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[1, 2], can_parallel_with=[], retry_on_low_quality=False, priority="medium")
+            return ExecutionPlan(goal=goal, reasoning="Fallback (medium): research + write + SEO + review", estimated_steps=4, tasks=[task0, task1, task2, task3], plan_method="template")
+
+        else:  # complex
+            task0 = AgentTask(id=str(uuid.uuid4()), agent_type="WebSearch", input={"query": user_request, "count": 8}, dependencies=[], can_parallel_with=[], retry_on_low_quality=False, priority="high")
+            task1 = AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[0], can_parallel_with=[], retry_on_low_quality=True, priority="high")
+            task2 = AgentTask(id=str(uuid.uuid4()), agent_type="DiagramAgent", input={"topic": user_request, "diagram_type": "auto"}, dependencies=[1], can_parallel_with=[1], retry_on_low_quality=True, priority="medium")
+            task3 = AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[1], can_parallel_with=[], retry_on_low_quality=True, priority="medium")
+            task4 = AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[1, 2, 3], can_parallel_with=[], retry_on_low_quality=False, priority="medium")
+            return ExecutionPlan(goal=goal, reasoning="Fallback (complex): research + write + diagram + SEO + review", estimated_steps=5, tasks=[task0, task1, task2, task3, task4], plan_method="template")
+
+    # Alias for backward compatibility with api.py
+    _build_template_plan = _build_fallback_plan
 
     async def _decompose(self, user_request: str, context: dict) -> ExecutionPlan:
-        """将用户请求拆解为子任务列表（用于 /agent/plan 预览）"""
+        """Decompose user request into execution plan for /agent/plan preview.
+
+        LLM is the primary path; template is emergency fallback.
+        """
         force_template = context.get("force_template", "")
         if force_template in ("simple", "medium", "complex"):
-            return self._build_template_plan(user_request, force_template)
+            return self._build_fallback_plan(user_request, force_template)
 
         complexity = self._classify_complexity(user_request)
-        if complexity == "simple":
-            return self._build_template_plan(user_request, complexity)
 
-        context_str = json.dumps(context, ensure_ascii=False, indent=2) if context else "{}"
-        prompt = f"""User request: {user_request}
+        # PRIMARY PATH: Always try LLM (not just for non-simple complexity)
+        if self.llm_gateway:
+            try:
+                context_str = json.dumps(context, ensure_ascii=False, indent=2) if context else "{}"
+                prompt = f"""User request: {user_request}
 
 Complexity: {complexity}
 Additional context:
 {context_str}
 
-Break this down into sub-tasks for the available agents.
-Since this is a {complexity} complexity request, create an appropriately detailed plan."""
+Break this down into sub-tasks for the available agents."""
 
-        try:
-            response = await self.llm_gateway.generate_sync(
-                messages=[
-                    {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
-                    {"role": "user", "content": prompt},
-                ],
-                temperature=self.temperature,
-                max_tokens=3000,
-            )
-            plan = self._parse_plan(response, user_request)
-            if complexity == "medium" and len(plan.tasks) > 8:
-                return self._build_template_plan(user_request, complexity)
-            if complexity == "complex" and len(plan.tasks) < 2:
-                return self._build_template_plan(user_request, complexity)
-            return plan
-        except Exception as e:
-            logger.warning("LLM decompose failed, falling back to template", error=str(e))
-            return self._build_template_plan(user_request, complexity)
+                response = await self.llm_gateway.generate_sync(
+                    messages=[
+                        {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=self.temperature,
+                    max_tokens=3000,
+                )
+                plan = self._parse_plan(response, user_request)
+
+                # Validate task count before accepting
+                if complexity == "medium" and len(plan.tasks) > 8:
+                    logger.warning("LLM plan has %d tasks for medium, using template", len(plan.tasks))
+                    return self._build_fallback_plan(user_request, complexity)
+                if complexity == "complex" and len(plan.tasks) < 2:
+                    logger.warning("LLM plan has %d tasks for complex, using template", len(plan.tasks))
+                    return self._build_fallback_plan(user_request, complexity)
+
+                logger.info("LLM plan generated: %d tasks", len(plan.tasks))
+                return plan
+
+            except Exception as e:
+                logger.warning("LLM decompose failed in orchestrator, using template", error=str(e))
+
+        # FALLBACK PATH
+        return self._build_fallback_plan(user_request, complexity)
 
     def _parse_plan(self, response: str, goal: str) -> ExecutionPlan:
         """解析 LLM 返回的计划 JSON"""
         try:
-            json_str = response.strip()
-            if "```json" in json_str:
-                json_str = json_str.split("```json")[1].split("```")[0].strip()
-            elif "```" in json_str:
-                json_str = json_str.split("```")[1].strip()
-            data = json.loads(json_str)
+            plan_dict = extract_plan_from_llm_response(response)
+            is_valid, error_msg = validate_plan_structure(plan_dict)
+            if not is_valid:
+                raise ValueError(f"Invalid plan structure: {error_msg}")
+
             tasks = []
-            for i, t in enumerate(data.get("tasks", [])):
+            for i, t in enumerate(plan_dict.get("tasks", [])):
                 tasks.append(AgentTask(
                     id=str(uuid.uuid4()),
                     agent_type=t.get("agent_type", "WritingAgent"),
                     input=t.get("input", {}),
                     dependencies=t.get("dependencies", []),
-                    config={"reasoning": t.get("reasoning", ""), "priority": t.get("priority", 0)},
+                    can_parallel_with=t.get("can_parallel_with", []),
+                    retry_on_low_quality=t.get("retry_on_low_quality", False),
+                    priority=t.get("priority", "medium"),
+                    config={"reasoning": t.get("reasoning", ""), "priority": i},
                 ))
             return ExecutionPlan(
-                goal=data.get("goal", goal),
+                goal=plan_dict.get("goal", goal),
                 tasks=tasks,
-                reasoning=data.get("reasoning", ""),
+                reasoning=plan_dict.get("reasoning", ""),
                 estimated_steps=len(tasks),
+                plan_method="llm",
             )
-        except (json.JSONDecodeError, KeyError) as e:
-            return ExecutionPlan(
-                goal=goal,
-                tasks=[
-                    AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": goal}, dependencies=[]),
-                    AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": goal}, dependencies=[0]),
-                ],
-                reasoning=f"Auto-generated fallback plan (parse error: {e})",
-                estimated_steps=2,
-            )
+        except Exception as e:
+            logger.warning("Parse plan failed in orchestrator: %s", e)
+            task0 = AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": goal}, dependencies=[], can_parallel_with=[], retry_on_low_quality=True, priority="high")
+            task1 = AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": goal}, dependencies=[0], can_parallel_with=[], retry_on_low_quality=False, priority="medium")
+            return ExecutionPlan(goal=goal, tasks=[task0, task1], reasoning=f"Auto-generated fallback plan (parse error: {e})", estimated_steps=2, plan_method="template")
 
     async def _fallback_llm_call(
         self, task: AgentTask, context: dict, previous_results: dict[str, AgentResult]

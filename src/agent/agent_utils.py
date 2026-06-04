@@ -59,25 +59,107 @@ Available agents and their capabilities:
 - ImageAgent: Generates images and cover art
 - HotTopicAgent: Analyzes trending topics and hot searches from social platforms
 - CodeAgent: Generates code examples, tutorials, and technical documentation
+- TranslationAgent: Translates content between languages
 
 Rules:
-1. Break complex requests into sequential sub-tasks with clear dependencies
-2. Tasks that can run in parallel should have no dependency on each other
-3. For simple requests, a single WritingAgent task may be sufficient
-4. Always include a ReviewAgent task for quality assurance
-5. Response must be valid JSON
+1. ALWAYS analyze the actual user request — do NOT just apply templates. Think about what the user really needs.
+2. Simple requests (short, single topic): usually just WritingAgent + ReviewAgent is enough. Do NOT add unnecessary agents.
+3. Medium requests (blog posts, platform-specific content): include WebSearch for research, WritingAgent, and ReviewAgent. Add SEOAgent if search visibility matters.
+4. Complex requests (multi-part, architecture topics, long-form): WebSearch + WritingAgent + DiagramAgent + SEOAgent + ReviewAgent. Consider PlatformAdapter for multi-platform.
+5. Tasks that can run in parallel must have NO dependencies on each other. Put them in the same parallel group.
+6. Tasks that MUST wait for others must declare those dependencies explicitly.
+7. Always include ReviewAgent at the END as the final quality gate.
+8. ALWAYS include WritingAgent for any content creation request.
+9. Mark creative tasks (WritingAgent, DiagramAgent) as `retry_on_low_quality: true` so they can improve if quality is low.
+10. Response must be valid JSON — no markdown, no explanation, just the JSON object.
 
 Output format:
 ```json
 {
   "goal": "summary of the user's goal",
-  "reasoning": "why you chose this plan",
+  "reasoning": "why you chose this plan (2-3 sentences)",
   "tasks": [
     {
-      "agent_type": "WebSearch",
-      "input": {"query": "search query"},
+      "agent_type": "WritingAgent",
+      "input": {"topic": "the topic from the user request"},
       "dependencies": [],
-      "reasoning": "why this task is needed"
+      "reasoning": "why this specific agent is needed for this request"
     }
   ]
-}```"""
+}
+```
+
+Important: `dependencies` must be empty arrays `[]` for parallel tasks, or arrays of indices `[0, 1]` referring to tasks that must complete first. Output JSON only — no text before or after."""
+
+
+# ── Plan validation helpers ────────────────────────────────────────────────
+
+
+_VALID_AGENT_TYPES = {
+    "ManagerAgent", "WritingAgent", "ReviewAgent", "SEOAgent",
+    "DiagramAgent", "ImageAgent", "WebSearch", "HotTopicAgent",
+    "CodeAgent", "TranslationAgent", "PlatformAdapter",
+}
+
+
+def validate_plan_structure(plan: dict) -> tuple[bool, str]:
+    """
+    Validate that a plan dict has all required fields and correct structure.
+    Returns (is_valid, error_message).
+    """
+    required_keys = {"goal", "reasoning", "tasks"}
+    missing = required_keys - set(plan.keys())
+    if missing:
+        return False, f"Missing required keys: {missing}"
+
+    if not isinstance(plan["tasks"], list):
+        return False, "tasks must be a list"
+
+    if len(plan["tasks"]) == 0:
+        return False, "tasks cannot be empty"
+
+    task_ids_seen = set()
+    for i, task in enumerate(plan["tasks"]):
+        if "agent_type" not in task:
+            return False, f"Task {i} missing agent_type"
+        if task["agent_type"] not in _VALID_AGENT_TYPES:
+            return False, f"Unknown agent_type: {task['agent_type']}"
+        if "input" not in task:
+            return False, f"Task {i} missing input"
+
+        task_ids_seen.add(i)
+        for dep in task.get("dependencies", []):
+            if not isinstance(dep, int) or dep < 0 or dep >= len(plan["tasks"]):
+                return False, f"Task {i} has invalid dependency index: {dep}"
+
+    return True, ""
+
+
+def extract_plan_from_llm_response(response_content: str) -> dict:
+    """
+    Extract JSON plan from LLM response. Handles markdown code blocks, plain JSON, etc.
+    """
+    import json as _json, re as _re
+
+    content = response_content.strip()
+
+    # Try to extract from markdown code block
+    code_block_match = _re.search(r"```(?:json)?\s*([\s\S]+?)```", content)
+    if code_block_match:
+        content = code_block_match.group(1)
+
+    # Try direct JSON parse
+    try:
+        return _json.loads(content)
+    except _json.JSONDecodeError:
+        pass
+
+    # Try to find JSON object anywhere in the string
+    json_match = _re.search(r"\{[\s\S]*\}", content)
+    if json_match:
+        try:
+            return _json.loads(json_match.group(0))
+        except _json.JSONDecodeError:
+            pass
+
+    raise ValueError(f"Could not extract valid JSON plan from response: {response_content[:200]}")

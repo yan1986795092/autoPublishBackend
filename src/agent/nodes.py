@@ -12,7 +12,7 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 from .state import AgentGraphState
-from .agent_utils import PLANNER_SYSTEM_PROMPT
+from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, validate_plan_structure
 from .handlers import HANDLER_MAP, handle_fallback
 
 from .cache import agent_cache
@@ -87,43 +87,49 @@ def _classify_complexity(user_request: str) -> str:
     return "simple"
 
 
-def _build_template_plan(user_request: str, complexity: str) -> dict:
-    """根据复杂度返回预设模板计划"""
-    plans = {
-        "simple": {
-            "goal": user_request[:200],
-            "reasoning": "简单任务：直接写作 + 质量审核",
-            "estimated_steps": 2,
-            "tasks": [
-                {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [0]},
-            ],
-        },
-        "medium": {
-            "goal": user_request[:200],
-            "reasoning": "中等任务：搜索 → 写作 → SEO → 审核",
-            "estimated_steps": 4,
-            "tasks": [
-                {"id": str(uuid.uuid4()), "agent_type": "WebSearch", "input": {"query": user_request, "count": 5}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [0]},
-                {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": [1]},
-                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [1, 2]},
-            ],
-        },
-        "complex": {
-            "goal": user_request[:200],
-            "reasoning": "复杂任务：搜索 → 写作 → 图表 → SEO → 审核",
-            "estimated_steps": 6,
-            "tasks": [
-                {"id": str(uuid.uuid4()), "agent_type": "WebSearch", "input": {"query": user_request, "count": 8}, "dependencies": []},
-                {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [0]},
-                {"id": str(uuid.uuid4()), "agent_type": "DiagramAgent", "input": {"topic": user_request, "diagram_type": "auto"}, "dependencies": [1]},
-                {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": [1]},
-                {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [1, 2, 3]},
-            ],
-        },
-    }
-    return plans.get(complexity, plans["simple"])
+def _build_fallback_plan(user_request: str, complexity: str) -> dict:
+    """
+    Emergency fallback when LLM planning fails.
+    Produces the same task structure that _parse_plan returns.
+    IMPORTANT: dependencies are integer indices, NOT string UUIDs.
+    The graph's _resolve_dep_id handles the conversion.
+    """
+    goal = user_request[:200]
+
+    if complexity == "simple":
+        task0 = {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "high"}
+        task1 = {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [0], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "medium"}
+        return {
+            "goal": goal,
+            "reasoning": "Fallback (simple): direct write + review",
+            "tasks": [task0, task1],
+            "plan_method": "template",
+        }
+
+    elif complexity == "medium":
+        task0 = {"id": str(uuid.uuid4()), "agent_type": "WebSearch", "input": {"query": user_request, "count": 5}, "dependencies": [], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "high"}
+        task1 = {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [0], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "high"}
+        task2 = {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": [1], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "medium"}
+        task3 = {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [1, 2], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "medium"}
+        return {
+            "goal": goal,
+            "reasoning": "Fallback (medium): research + write + SEO + review",
+            "tasks": [task0, task1, task2, task3],
+            "plan_method": "template",
+        }
+
+    else:  # complex
+        task0 = {"id": str(uuid.uuid4()), "agent_type": "WebSearch", "input": {"query": user_request, "count": 8}, "dependencies": [], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "high"}
+        task1 = {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [0], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "high"}
+        task2 = {"id": str(uuid.uuid4()), "agent_type": "DiagramAgent", "input": {"topic": user_request, "diagram_type": "auto"}, "dependencies": [1], "can_parallel_with": [1], "retry_on_low_quality": True, "priority": "medium"}
+        task3 = {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": [1], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "medium"}
+        task4 = {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [1, 2, 3], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "medium"}
+        return {
+            "goal": goal,
+            "reasoning": "Fallback (complex): research + write + diagram + SEO + review",
+            "tasks": [task0, task1, task2, task3, task4],
+            "plan_method": "template",
+        }
 
 
 def _get_llm(state: AgentGraphState, agent_type: str) -> ChatOpenAI:
@@ -299,11 +305,13 @@ def _serialize_context_for_prompt(ctx: dict, agent_type: str) -> str:
 # ──────────────────────────────────────────────
 
 async def classify_and_decompose(state: AgentGraphState) -> dict:
-    """复杂度分类 + 任务分解
+    """
+    复杂度分类 + 任务分解。
 
-    复用原有系统的分类器逻辑：
-    - 简单任务 → 模板计划（跳过 LLM）
-    - 中等/复杂任务 → LLM 拆解 + 模板兜底
+    核心改变：LLM 是主路径，模板是紧急兜底。
+    - 所有复杂度都尝试 LLM 分解（不只是 medium/complex）
+    - 模板仅在 LLM 完全失败后使用
+    - plan_method 字段记录使用的路径: "llm" | "template"
     """
     tracer = _get_tracer()
     user_request = state.get("user_request", "")
@@ -321,6 +329,8 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
         },
     ) as span:
         span.add_event("complexity_classified", {"complexity": complexity})
+
+        # 如果上游已经提供了计划（来自 SSE 端点），直接复用
         existing_plan = state.get("plan")
         if existing_plan and existing_plan.get("tasks"):
             logger.info("Using pre-computed plan from SSE, skipping re-decomposition")
@@ -360,64 +370,83 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
         logger.info("Classified request complexity", complexity=complexity, preview=user_request[:80])
         span.set_attribute("agent.complexity", complexity)
 
-        if complexity == "simple":
-            plan = _build_template_plan(user_request, complexity)
-            updates["plan"] = plan
-            updates["plan_reasoning"] = plan["reasoning"]
-            updates["task_queue"] = plan["tasks"]
-            step = {
-                "step_number": 1,
-                "agent": "ManagerAgent",
-                "action": "任务拆解完成",
-                "reasoning": f"简单任务，使用模板计划（{len(plan['tasks'])} 步）",
-                "input_summary": user_request[:200],
-                "output_summary": f"执行计划：{plan['reasoning'][:80]}...",
-                "tokens_used": 0,
-                "time_elapsed": 0,
-                "status": "done",
-            }
-            updates["thinking_steps"] = [step]
-            span.add_event("plan_built", {"task_count": len(plan["tasks"]), "method": "template"})
-            span.set_status(Status(StatusCode.OK))
-            return updates
-
+        # ══════════════════════════════════════════════
+        # 主路径：始终尝试 LLM 分解（所有复杂度等级）
+        # ══════════════════════════════════════════════
         llm = _get_llm(state, "ManagerAgent")
+        if llm:
+            try:
+                context_str = json.dumps(state.get("context", {}), ensure_ascii=False, indent=2) if state.get("context") else "{}"
+                response = await llm.ainvoke([
+                    SystemMessage(content=PLANNER_SYSTEM_PROMPT),
+                    HumanMessage(content=f"User request: {user_request}\n\nComplexity: {complexity}\nContext: {context_str}\n\nBreak this down into sub-tasks."),
+                ])
+                plan = _parse_plan(response.content, user_request)
+
+                # 如果 LLM 返回的任务数明显异常，回退到模板
+                if complexity == "medium" and len(plan.get("tasks", [])) > 8:
+                    logger.warning("LLM plan has too many tasks (%d) for medium complexity, using template", len(plan["tasks"]))
+                    plan = _build_fallback_plan(user_request, complexity)
+                elif complexity == "complex" and len(plan.get("tasks", [])) < 2:
+                    logger.warning("LLM plan has too few tasks (%d) for complex, using template", len(plan["tasks"]))
+                    plan = _build_fallback_plan(user_request, complexity)
+                else:
+                    # LLM 成功，添加 plan_method
+                    plan["plan_method"] = "llm"
+                    logger.info("LLM plan generated: %d tasks", len(plan.get("tasks", [])))
+
+                updates["plan"] = plan
+                updates["plan_reasoning"] = plan.get("reasoning", "")
+                updates["task_queue"] = plan.get("tasks", [])
+                updates["thinking_steps"].append({
+                    "step_number": len(updates["thinking_steps"]) + 1,
+                    "agent": "ManagerAgent",
+                    "action": "任务拆解完成",
+                    "reasoning": f"{plan.get('plan_method', 'llm')} 规划完成，共 {len(plan.get('tasks', []))} 个任务",
+                    "input_summary": user_request[:200],
+                    "output_summary": f"执行计划：{plan.get('reasoning', '')[:80]}...",
+                    "tokens_used": 0,
+                    "time_elapsed": 0,
+                    "status": "done",
+                })
+                span.add_event("plan_built", {"task_count": len(plan.get("tasks", [])), "method": plan.get("plan_method", "llm")})
+                span.set_attribute("plan.method", plan.get("plan_method", "llm"))
+                span.set_attribute("agent.task_count", len(plan.get("tasks", [])))
+                span.set_status(Status(StatusCode.OK))
+                return updates
+
+            except Exception as e:
+                logger.warning("LLM decompose failed, using template fallback", error=str(e))
+                span.record_exception(e)
+                # LLM 失败，进入模板兜底路径
+
+        # ══════════════════════════════════════════════
+        # 兜底路径：模板（仅在 LLM 完全不可用/失败时使用）
+        # ══════════════════════════════════════════════
         if not llm:
-            plan = _build_template_plan(user_request, complexity)
-            updates["plan"] = plan
-            updates["plan_reasoning"] = plan["reasoning"]
-            updates["task_queue"] = plan["tasks"]
-            span.set_status(Status(StatusCode.OK))
-            return updates
+            logger.warning("No LLM available for planning, using template fallback")
+            span.add_event("llm_unavailable", {"complexity": complexity})
+        else:
+            span.add_event("llm_failed", {"error": str(e) if 'e' in dir() else "unknown"})
 
-        span.add_event("llm_decomposition_started")
-        try:
-            context_str = json.dumps(state.get("context", {}), ensure_ascii=False, indent=2) if state.get("context") else "{}"
-            response = await llm.ainvoke([
-                SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-                HumanMessage(content=f"User request: {user_request}\n\nComplexity: {complexity}\nContext: {context_str}\n\nBreak this down into sub-tasks."),
-            ])
-            plan = _parse_plan(response.content, user_request)
-
-            if complexity == "medium" and len(plan.get("tasks", [])) > 8:
-                plan = _build_template_plan(user_request, complexity)
-            elif complexity == "complex" and len(plan.get("tasks", [])) < 2:
-                plan = _build_template_plan(user_request, complexity)
-
-            updates["plan"] = plan
-            updates["plan_reasoning"] = plan.get("reasoning", "")
-            updates["task_queue"] = plan.get("tasks", [])
-            span.add_event("llm_decomposition_completed", {"task_count": len(plan.get("tasks", []))})
-        except Exception as e:
-            logger.warning("LLM decompose failed, using template", error=str(e))
-            plan = _build_template_plan(user_request, complexity)
-            updates["plan"] = plan
-            updates["plan_reasoning"] = plan["reasoning"]
-            updates["task_queue"] = plan["tasks"]
-            span.record_exception(e)
-            span.set_status(Status(StatusCode.ERROR, str(e)))
-
-        span.set_attribute("agent.task_count", len(updates.get("task_queue", [])))
+        plan = _build_fallback_plan(user_request, complexity)
+        updates["plan"] = plan
+        updates["plan_reasoning"] = plan["reasoning"]
+        updates["task_queue"] = plan["tasks"]
+        updates["thinking_steps"].append({
+            "step_number": len(updates["thinking_steps"]) + 1,
+            "agent": "ManagerAgent",
+            "action": "任务拆解完成（模板兜底）",
+            "reasoning": f"LLM 不可用/失败，使用模板兜底 ({complexity})，共 {len(plan['tasks'])} 个任务",
+            "input_summary": user_request[:200],
+            "output_summary": f"执行计划：{plan['reasoning'][:80]}...",
+            "tokens_used": 0,
+            "time_elapsed": 0,
+            "status": "done",
+        })
+        span.add_event("plan_built", {"task_count": len(plan["tasks"]), "method": "template"})
+        span.set_attribute("plan.method", "template")
+        span.set_attribute("agent.task_count", len(plan["tasks"]))
         span.set_status(Status(StatusCode.OK))
         return updates
 
@@ -425,24 +454,32 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
 def _parse_plan(response: str, goal: str) -> dict:
     """解析 LLM 返回的计划 JSON"""
     try:
-        json_str = response.strip()
-        if "```json" in json_str:
-            json_str = json_str.split("```json")[1].split("```")[0].strip()
-        elif "```" in json_str:
-            json_str = json_str.split("```")[1].strip()
-        data = json.loads(json_str)
+        plan_dict = extract_plan_from_llm_response(response)
+        is_valid, error_msg = validate_plan_structure(plan_dict)
+        if not is_valid:
+            raise ValueError(f"Invalid plan structure: {error_msg}")
+
         tasks = []
-        for i, t in enumerate(data.get("tasks", [])):
+        for i, t in enumerate(plan_dict.get("tasks", [])):
             tasks.append({
                 "id": str(uuid.uuid4()),
                 "agent_type": t.get("agent_type", "WritingAgent"),
                 "input": t.get("input", {}),
                 "dependencies": t.get("dependencies", []),
+                "can_parallel_with": t.get("can_parallel_with", []),
+                "retry_on_low_quality": t.get("retry_on_low_quality", False),
+                "priority": t.get("priority", "medium"),
                 "config": {"reasoning": t.get("reasoning", ""), "priority": i},
             })
-        return {"goal": data.get("goal", goal), "tasks": tasks, "reasoning": data.get("reasoning", ""), "estimated_steps": len(tasks)}
-    except (json.JSONDecodeError, KeyError):
-        plan = _build_template_plan(goal, "simple")
+        return {
+            "goal": plan_dict.get("goal", goal),
+            "tasks": tasks,
+            "reasoning": plan_dict.get("reasoning", ""),
+            "estimated_steps": len(tasks),
+            "plan_method": "llm",
+        }
+    except Exception:
+        plan = _build_fallback_plan(goal, "simple")
         plan["reasoning"] = f"Auto-generated fallback plan (parse error)"
         return plan
 
@@ -594,6 +631,50 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
                 failed.append(task_id)
             if result.get("thinking_steps"):
                 new_steps.extend(result["thinking_steps"])
+
+        # ── Peer feedback: notify other agents of results ─────────────────────
+        message_bus = state.get("_message_bus")
+        if message_bus and state.get("enable_peer_feedback", True):
+            for task_id, result in results_list:
+                if isinstance(result, Exception):
+                    continue
+                task = next((t for t in ready_tasks if t.get("id") == task_id), None)
+                if not task:
+                    continue
+                agent_type = task.get("agent_type", "UnknownAgent")
+
+                # ReviewAgent → WritingAgent: revision needed
+                if result.get("status") in ("completed", "partial"):
+                    review_data = result.get("output", {})
+                    if agent_type == "ReviewAgent" and review_data.get("needs_revision"):
+                        for t in state.get("task_queue", []):
+                            if t.get("agent_type") == "WritingAgent":
+                                await message_bus.peer_feedback(
+                                    from_agent="ReviewAgent",
+                                    to_agent="WritingAgent",
+                                    feedback_content={
+                                        "type": "revision_needed",
+                                        "issues": review_data.get("issues", []),
+                                        "score": review_data.get("quality_score", 0),
+                                    },
+                                    related_task_id=t.get("id"),
+                                )
+
+                # Task failed → dependent tasks: blocked
+                if result.get("status") == "failed":
+                    failed_agent = agent_type
+                    for t in state.get("task_queue", []):
+                        if task_id in t.get("dependencies", []):
+                            await message_bus.peer_feedback(
+                                from_agent=failed_agent,
+                                to_agent=t.get("agent_type", "UnknownAgent"),
+                                feedback_content={
+                                    "type": "dependency_failed",
+                                    "failed_task_id": task_id,
+                                    "error": str(result.get("error", "")),
+                                },
+                                related_task_id=t.get("id"),
+                            )
 
         existing = state.get("thinking_steps", [])
         batch_span.add_event("batch_completed", {
