@@ -183,6 +183,23 @@ async def health_check():
     }
 
 
+@app.get("/metrics")
+async def prometheus_metrics():
+    """Prometheus metrics endpoint - returns basic metrics in Prometheus text format."""
+    from fastapi.responses import Response
+
+    # Basic metrics in Prometheus text format
+    metrics_text = """# HELP autopublish_up Whether the service is up (1) or down (0)
+# TYPE autopublish_up gauge
+autopublish_up 1
+
+# HELP autopublish_info Service info
+# TYPE autopublish_info gauge
+autopublish_info{version="2.0.0"} 1
+"""
+    return Response(content=metrics_text, media_type="text/plain; charset=utf-8")
+
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("src.main:app", host="0.0.0.0", port=8000)

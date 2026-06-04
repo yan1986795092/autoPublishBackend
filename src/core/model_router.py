@@ -9,7 +9,7 @@ from langchain_openai import ChatOpenAI
 
 from src.config import get_settings
 
-logger = logging.get_logger(__name__)
+logger = logging.getLogger(__name__)
 
 # Provider → base_url 映射
 _PROVIDER_BASE_URLS = {
@@ -52,6 +52,8 @@ class ModelRouter:
         provider, model, base_url = self._get_llm_config()
         api_key = getattr(self._settings, f"{provider}_api_key", "")
 
+        # streaming=True 保证 astream() 正常输出。
+        # 非流式 ainvoke() 虽然会多一点点开销，但主要提速靠取消 WritingAgent 重试。
         llm = ChatOpenAI(
             model=model,
             api_key=api_key,

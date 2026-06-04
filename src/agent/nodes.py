@@ -877,20 +877,21 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             _handler = handler
             if agent_type in retry_types:
                 if state.get("enable_reflection"):
-                    # Reflection 模式下跳过 retry 的质量评分，直接执行
-                    # 质量判断由 reflect_on_task_batch 统一负责
                     result = await _handler(t_input, llm, _mcp)
                 else:
-                    # 无 Reflection 时，retry 负责浅层质量检查和重试
-                    _adapter = lambda ti, llm, _st: _handler(ti, llm, _mcp)
-                    result = await run_agent_with_retry(
-                        agent_func=_adapter,
-                        task_input=t_input,
-                        llm=llm,
-                        state=state,
-                        max_retries=2,
-                        agent_type=agent_type,
-                    )
+                    # 仅重试 1 次（最多 2 次调用），质量检查跳过写小说/创意类（simple_quality_score 对中文创意内容误判严重）
+                    if agent_type == "WritingAgent":
+                        result = await _handler(t_input, llm, _mcp)
+                    else:
+                        _adapter = lambda ti, llm, _st: _handler(ti, llm, _mcp)
+                        result = await run_agent_with_retry(
+                            agent_func=_adapter,
+                            task_input=t_input,
+                            llm=llm,
+                            state=state,
+                            max_retries=1,
+                            agent_type=agent_type,
+                        )
             else:
                 result = await _handler(t_input, llm, _mcp)
 
