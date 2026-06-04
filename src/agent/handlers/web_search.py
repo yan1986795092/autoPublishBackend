@@ -1,8 +1,6 @@
-"""WebSearch Agent — 实时搜索 (MCP Server → DuckDuckGo → Bing/SerpAPI)"""
+"""WebSearch Agent — Bing中国 + 360搜索 并行降级"""
 
 import asyncio
-import os
-import re
 import logging
 import httpx
 from langchain_openai import ChatOpenAI
@@ -11,162 +9,67 @@ logger = logging.getLogger(__name__)
 
 
 async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
-    """网络搜索 — 支持通过 MCP 工具或直接调用
+    """网络搜索 — Bing中国 + 360搜索 并行降级，全部失败则 LLM 内部知识
 
-    优先级：
-    1. ToolRegistry 中的 search 工具（web_search）
-    2. MCP 工具列表（向后兼容）
-    3. 直接 DuckDuckGo 调用
-    4. 有 API Key 时使用 Bing / SerpAPI
+    路径：
+    1. 并行降级：Bing中国 + 360搜索同时试，最快返回（总超时 10s）
+    2. 全部失败 → LLM 内部知识（不阻塞链路）
     """
     query = task_input.get("query", "")
     count = task_input.get("count", 5)
 
-    # 优先：通过 ToolRegistry 查找 search 工具（统一工具入口）
-    tool_registry = task_input.get("_tool_registry")
-    if tool_registry is not None:
-        search_tool = tool_registry.get("web_search")
-        if search_tool is None:
-            # 也尝试通过 category 查找
-            search_tools = tool_registry.get_by_category("search")
-            search_tool = search_tools[0] if search_tools else None
-
-        if search_tool is not None:
+    # ── 并行降级：Bing中国 + 360搜索 同时发起，谁快用谁 ──
+    async def _parallel_search() -> tuple[str, list] | None:
+        async def _try_bing():
             try:
-                result = await search_tool.execute(query=query, max_results=count)
-                return {
-                    "status": "completed",
-                    "agent_type": "WebSearch",
-                    "output": {"content": result, "results": [], "source": "mcp"},
-                    "tokens_used": 0,
-                    "thinking_steps": [{
-                        "agent": "WebSearch",
-                        "action": "搜索完成",
-                        "reasoning": f"ToolRegistry 搜索：{query}",
-                        "output_summary": f"通过工具「{search_tool.name}」搜索到结果",
-                        "status": "done",
-                    }],
-                }
+                r = await _search_bing_cn(query, count)
+                return r if r else None
             except Exception as e:
-                logger.warning(f"ToolRegistry search failed, falling back: {e}")
-
-    # 兜底：从原始 mcp_tools 列表中查找（向后兼容）
-    if mcp_tools is None:
-        mcp_tools = task_input.get("_mcp_tools", [])
-    for tool in mcp_tools:
-        tool_name = getattr(tool, "name", None) or str(tool)
-        if "web_search" in tool_name or "search" in tool_name:
+                logger.warning("Bing CN search failed: %s", e)
+                return None
+        async def _try_360():
             try:
-                from langchain_core.runnables import RunnableConfig
-                result = await tool._arun(query=query, max_results=count, config=RunnableConfig())
-                return {
-                    "status": "completed",
-                    "agent_type": "WebSearch",
-                    "output": {"content": result, "results": [], "source": "mcp"},
-                    "tokens_used": 0,
-                    "thinking_steps": [{
-                        "agent": "WebSearch",
-                        "action": "搜索完成",
-                        "reasoning": f"MCP 搜索：{query}",
-                        "output_summary": f"通过 MCP 工具「{tool_name}」搜索到结果",
-                        "status": "done",
-                    }],
-                }
+                r = await _search_360(query, count)
+                return r if r else None
             except Exception as e:
-                logger.warning(f"MCP tool {tool_name} failed, falling back to direct search: {e}")
+                logger.warning("360 search failed: %s", e)
+                return None
 
-    # ── 直接搜索降级链（ToolRegistry/MCP 均不可用时）──
-    # 优先级：Bing中国（国内直连）→ 360搜索 → DuckDuckGo（境外）→ SerpAPI（需 key）→ LLM 知识
-
-    # Layer 1: Bing 中国版（国内可直连，完全免费）
-    try:
-        results = await _search_bing_cn(query, count)
-        if results:
-            content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: Bing中国）："]
-            for r in results:
-                content_parts.append("- [%s](%s): %s" % (r['title'], r['url'], r.get('snippet', '')))
-            return {
-                "status": "completed", "agent_type": "WebSearch",
-                "output": {"content": "\n".join(content_parts), "results": results, "source": "bing_cn", "query": query},
-                "tokens_used": 0,
-                "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": "搜索：%s" % query, "output_summary": "Bing中国搜索找到 %d 条结果" % len(results), "status": "done"}],
-            }
-    except Exception as e:
-        logger.warning("Bing CN direct search failed: %s" % e)
-
-    # Layer 2: 360搜索（国内可直连，完全免费）
-    try:
-        results = await _search_360(query, count)
-        if results:
-            content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: 360搜索）："]
-            for r in results:
-                content_parts.append("- [%s](%s): %s" % (r['title'], r['url'], r.get('snippet', '')))
-            return {
-                "status": "completed", "agent_type": "WebSearch",
-                "output": {"content": "\n".join(content_parts), "results": results, "source": "360", "query": query},
-                "tokens_used": 0,
-                "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": "搜索：%s" % query, "output_summary": "360搜索找到 %d 条结果" % len(results), "status": "done"}],
-            }
-    except Exception as e:
-        logger.warning("360 search failed: %s" % e)
-
-    # Layer 2: DuckDuckGo HTML (境外网络)
-    try:
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", RuntimeWarning)
-            from duckduckgo_search import DDGS
-        raw_results = await asyncio.to_thread(
-            lambda: list(DDGS(timeout=20).text(query, max_results=count))
+        done, pending = await asyncio.wait(
+            [asyncio.create_task(f()) for f in (_try_bing, _try_360)],
+            timeout=4.0,
+            return_when=asyncio.FIRST_COMPLETED,
         )
-        results = [
-            {"title": r.get("title", ""), "url": r.get("href", ""), "snippet": r.get("body", ""), "source": "duckduckgo"}
-            for r in raw_results
-        ]
-        if results:
-            content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: DuckDuckGo）："]
-            for r in results:
-                content_parts.append(f"- [{r['title']}]({r['url']}): {r.get('snippet', '')}")
-            return {
-                "status": "completed", "agent_type": "WebSearch",
-                "output": {"content": "\n".join(content_parts), "results": results, "source": "duckduckgo", "query": query},
-                "tokens_used": 0,
-                "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": f"DuckDuckGo 找到 {len(results)} 条结果", "status": "done"}],
-            }
-    except Exception as e:
-        logger.warning(f"DuckDuckGo failed: {e}")
+        for p in pending:
+            p.cancel()
+        for coro in done:
+            res = coro.result()
+            if res:
+                return ("parallel", res)
+        return None
 
-    # Layer 3: SerpAPI（需 API Key）
-    serpapi_key = os.getenv("SERPAPI_API_KEY")
-    if serpapi_key:
-        try:
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(
-                    "https://serpapi.com/search",
-                    params={"q": query, "num": count},
-                    headers={"Authorization": f"Bearer {serpapi_key}"},
-                )
-                data = resp.json()
-                results = [
-                    {"title": r.get("title", ""), "url": r.get("link", ""), "snippet": r.get("snippet", ""), "source": "serpapi"}
-                    for r in data.get("organic_results", [])[:count]
-                ]
-                if results:
-                    content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: SerpAPI）："]
-                    for r in results:
-                        content_parts.append(f"- [{r['title']}]({r['url']}): {r.get('snippet', '')}")
-                    return {
-                        "status": "completed", "agent_type": "WebSearch",
-                        "output": {"content": "\n".join(content_parts), "results": results, "source": "serpapi", "query": query},
-                        "tokens_used": 0,
-                        "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": f"SerpAPI 找到 {len(results)} 条结果", "status": "done"}],
-                    }
-        except Exception as e:
-            logger.warning(f"SerpAPI failed: {e}")
+    try:
+        parallel_result = await asyncio.wait_for(_parallel_search(), timeout=5.0)
+    except asyncio.TimeoutError:
+        parallel_result = None
 
-    # 全部失败：让 LLM 用自身知识生成（不阻塞链路）
+    if parallel_result:
+        source, results = parallel_result
+        label = "Bing中国" if source == "bing_cn" else "360搜索"
+        content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: {label}）："]
+        for r in results:
+            content_parts.append("- [%s](%s): %s" % (r['title'], r['url'], r.get('snippet', '')))
+        return {
+            "status": "completed", "agent_type": "WebSearch",
+            "output": {"content": "\n".join(content_parts), "results": results, "source": source, "query": query},
+            "tokens_used": 0,
+            "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": "搜索：%s" % query, "output_summary": "%s找到 %d 条结果" % (label, len(results)), "status": "done"}],
+        }
+
+    # 全部失败：LLM 内部知识（不阻塞链路）
     return {
         "status": "completed", "agent_type": "WebSearch",
-        "output": {"content": f"所有搜索引擎均不可用，Agent 将使用内部知识生成关于「{query}」的内容。", "results": [], "fallback": "llm_knowledge"},
+        "output": {"content": f"搜索引擎不可用，Agent 将使用内部知识生成关于「{query}」的内容。", "results": [], "fallback": "llm_knowledge"},
         "tokens_used": 0,
         "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": "搜索引擎不可用，将使用 LLM 内部知识生成", "status": "done"}],
     }
