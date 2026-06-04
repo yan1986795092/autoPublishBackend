@@ -175,10 +175,13 @@ class MemoryManager:
         # 提取输出内容
         output = result.get("output", {}) or {}
         content = output.get("content", "")
-        if not content or len(content.strip()) < 100:
+        if not content or not isinstance(content, str):
+            return
+        stripped = content.strip()
+        if len(stripped) < 100:
             return
 
-        content = content.strip()
+        content = stripped
 
         # 1. 写入语义记忆
         namespace = AGENT_NAMESPACE_MAP.get(agent_type, "general")

@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from typing import Optional
-import json
+import json, math
 
 from src.database import get_db
 from src.models import PromptTemplate
@@ -10,35 +10,79 @@ from src.api.auth import get_current_user
 router = APIRouter(prefix="/templates", tags=["模板"])
 
 
+# 分类 → 平台编码映射
+CATEGORY_PLATFORMS = {
+    "publishable": ["xiaohongshu", "wechat", "weibo", "douyin", "bilibili"],
+    "content": ["copywriting", "brand-story", "ad-copy", "fiction", "script"],
+    "professional": ["tech-doc", "tutorial", "seo", "email"],
+}
+
 @router.get("", response_model=dict)
 def list_templates(
     platform_code: Optional[str] = None,
+    category: Optional[str] = None,
+    search: Optional[str] = None,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(10, ge=1, le=100),
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """获取模板列表（系统模板 + 用户自定义模板）"""
+    """获取模板列表（支持分页+分类+搜索）"""
     query = db.query(PromptTemplate).filter(
         (PromptTemplate.user_id == current_user.id) | (PromptTemplate.is_public == True)
     )
 
     if platform_code:
         query = query.filter(PromptTemplate.platform_code == platform_code)
+    elif category and category in CATEGORY_PLATFORMS:
+        query = query.filter(PromptTemplate.platform_code.in_(CATEGORY_PLATFORMS[category]))
 
-    templates = query.order_by(PromptTemplate.use_count.desc()).all()
+    if search:
+        like = f"%{search}%"
+        query = query.filter(
+            (PromptTemplate.name.ilike(like)) | (PromptTemplate.description.ilike(like))
+        )
+
+    total = query.count()
+    total_pages = math.ceil(total / page_size) if total > 0 else 1
+
+    # Count distinct platforms across ALL templates (not just current page)
+    base = db.query(PromptTemplate).filter(
+        (PromptTemplate.user_id == current_user.id) | (PromptTemplate.is_public == True)
+    )
+    if platform_code:
+        base = base.filter(PromptTemplate.platform_code == platform_code)
+    elif category and category in CATEGORY_PLATFORMS:
+        base = base.filter(PromptTemplate.platform_code.in_(CATEGORY_PLATFORMS[category]))
+    if search:
+        like = f"%{search}%"
+        base = base.filter(
+            (PromptTemplate.name.ilike(like)) | (PromptTemplate.description.ilike(like))
+        )
+    total_platforms = base.with_entities(PromptTemplate.platform_code).distinct().count()
+
+    templates = query.order_by(PromptTemplate.use_count.desc()).offset((page - 1) * page_size).limit(page_size).all()
 
     return {
         "success": True,
-        "data": [
-            {
-                "id": t.id,
-                "name": t.name,
-                "platform_code": t.platform_code,
-                "description": t.description,
-                "is_public": t.is_public,
-                "use_count": t.use_count,
-            }
-            for t in templates
-        ]
+        "data": {
+            "items": [
+                {
+                    "id": t.id,
+                    "name": t.name,
+                    "platform_code": t.platform_code,
+                    "description": t.description,
+                    "is_public": t.is_public,
+                    "use_count": t.use_count,
+                }
+                for t in templates
+            ],
+            "total": total,
+            "page": page,
+            "page_size": page_size,
+            "total_pages": total_pages,
+            "total_platforms": total_platforms,
+        }
     }
 
 

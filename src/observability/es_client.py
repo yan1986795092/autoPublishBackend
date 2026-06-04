@@ -498,28 +498,36 @@ async def get_trace_stats(
             query=query,
             aggs=aggs,
             size=0,
+            ignore_unavailable=True,
         )
 
-        total_spans = resp["aggregations"]["total_spans"]["value"]
-        error_spans = resp["aggregations"]["error_spans"]["doc_count"]
-        total_traces = resp["hits"]["total"]["value"]
+        aggs_result = resp.get("aggregations", {})
+        total_spans = (aggs_result.get("total_spans", {}) or {}).get("value", 0)
+        error_spans = (aggs_result.get("error_spans", {}) or {}).get("doc_count", 0)
+        total_traces = (resp.get("hits", {}) or {}).get("total", {}).get("value", 0)
+
+        by_service = [
+            {"service": b["key"], "count": b["doc_count"]}
+            for b in (aggs_result.get("by_service", {}) or {}).get("buckets", [])
+        ]
+        by_operation = [
+            {"operation": b["key"], "count": b["doc_count"]}
+            for b in (aggs_result.get("by_operation", {}) or {}).get("buckets", [])
+        ]
+        p50 = (aggs_result.get("p50_duration", {}) or {}).get("values", {}).get("50.0")
+        p95 = (aggs_result.get("p50_duration", {}) or {}).get("values", {}).get("95.0")
+        p99 = (aggs_result.get("p50_duration", {}) or {}).get("values", {}).get("99.0")
 
         return {
             "total_traces": total_traces,
             "total_spans": total_spans,
             "error_count": error_spans,
             "error_rate": round(error_spans / total_spans * 100, 2) if total_spans else 0,
-            "by_service": [
-                {"service": b["key"], "count": b["doc_count"]}
-                for b in resp["aggregations"]["by_service"]["buckets"]
-            ],
-            "by_operation": [
-                {"operation": b["key"], "count": b["doc_count"]}
-                for b in resp["aggregations"]["by_operation"]["buckets"]
-            ],
-            "p50_duration_ms": resp["aggregations"]["p50_duration"]["values"]["50.0"],
-            "p95_duration_ms": resp["aggregations"]["p50_duration"]["values"]["95.0"],
-            "p99_duration_ms": resp["aggregations"]["p50_duration"]["values"]["99.0"],
+            "by_service": by_service,
+            "by_operation": by_operation,
+            "p50_duration_ms": p50,
+            "p95_duration_ms": p95,
+            "p99_duration_ms": p99,
         }
 
     except Exception as e:

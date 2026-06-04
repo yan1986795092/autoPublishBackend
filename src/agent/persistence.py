@@ -23,7 +23,7 @@ def save_agent_task(
     total_tokens: int = 0,
     thinking_trace: Optional[dict] = None,
 ) -> None:
-    """保存或更新 Agent 任务到数据库"""
+    """保存或更新 Agent 任务到数据库（幂等：重复 task_id 时覆盖而非报错）"""
     with SessionLocal() as db:
         try:
             task = db.query(AgentTaskModel).filter_by(id=task_id).first()
@@ -65,23 +65,39 @@ def save_agent_task(
 
 
 def save_thinking_trace(task_id: str, trace: dict) -> None:
-    """保存 Thinking Trace 到数据库"""
+    """保存 Thinking Trace 到数据库（幂等：已存在的 step_number 会被覆盖）"""
     with SessionLocal() as db:
         try:
             for step in trace.get("steps", []):
-                record = ThinkingTraceRecord(
-                    task_id=task_id,
-                    step_number=step.get("step_number", 0),
-                    agent=step.get("agent", ""),
-                    action=step.get("action", ""),
-                    reasoning=step.get("reasoning", ""),
-                    input_summary=step.get("input_summary", ""),
-                    output_summary=step.get("output_summary", ""),
-                    tokens_used=step.get("tokens_used", 0),
-                    time_elapsed=step.get("time_elapsed", 0.0),
-                    status=step.get("status", "done"),
-                )
-                db.add(record)
+                step_num = step.get("step_number", 0)
+                # 幂等：先查是否已有该 (task_id, step_number) 记录，有则覆盖
+                existing = db.query(ThinkingTraceRecord).filter_by(
+                    task_id=task_id, step_number=step_num
+                ).first()
+
+                if existing:
+                    existing.agent = step.get("agent", "")
+                    existing.action = step.get("action", "")
+                    existing.reasoning = step.get("reasoning", "")
+                    existing.input_summary = step.get("input_summary", "")
+                    existing.output_summary = step.get("output_summary", "")
+                    existing.tokens_used = step.get("tokens_used", 0)
+                    existing.time_elapsed = step.get("time_elapsed", 0.0)
+                    existing.status = step.get("status", "done")
+                else:
+                    record = ThinkingTraceRecord(
+                        task_id=task_id,
+                        step_number=step_num,
+                        agent=step.get("agent", ""),
+                        action=step.get("action", ""),
+                        reasoning=step.get("reasoning", ""),
+                        input_summary=step.get("input_summary", ""),
+                        output_summary=step.get("output_summary", ""),
+                        tokens_used=step.get("tokens_used", 0),
+                        time_elapsed=step.get("time_elapsed", 0.0),
+                        status=step.get("status", "done"),
+                    )
+                    db.add(record)
             db.commit()
         except Exception as e:
             db.rollback()
@@ -98,20 +114,38 @@ def save_subtask(
     time_elapsed: float = 0.0,
     error: Optional[str] = None,
 ) -> None:
-    """保存单个子 Agent 的执行结果"""
+    """保存单个子 Agent 的执行结果（幂等：相同 (task_id, agent_type) 且 input_json 相同时跳过）"""
     with SessionLocal() as db:
         try:
-            record = SubTaskModel(
+            input_json_str = json.dumps(input_data, ensure_ascii=False) if input_data else None
+            output_json_str = json.dumps(output_data, ensure_ascii=False) if output_data else None
+
+            # 幂等检查：相同 (task_id, agent_type) 且 input_json 相同则跳过
+            existing = db.query(SubTaskModel).filter_by(
                 task_id=task_id,
                 agent_type=agent_type,
-                status=status,
-                input_json=json.dumps(input_data, ensure_ascii=False) if input_data else None,
-                output_json=json.dumps(output_data, ensure_ascii=False) if output_data else None,
-                tokens_used=tokens_used,
-                time_elapsed=time_elapsed,
-                error_message=error,
-            )
-            db.add(record)
+                input_json=input_json_str,
+            ).first()
+
+            if existing:
+                existing.status = status
+                existing.output_json = output_json_str
+                existing.tokens_used = tokens_used
+                existing.time_elapsed = time_elapsed
+                existing.error_message = error
+            else:
+                record = SubTaskModel(
+                    task_id=task_id,
+                    agent_type=agent_type,
+                    status=status,
+                    input_json=input_json_str,
+                    output_json=output_json_str,
+                    tokens_used=tokens_used,
+                    time_elapsed=time_elapsed,
+                    error_message=error,
+                )
+                db.add(record)
+
             db.commit()
         except Exception as e:
             db.rollback()
@@ -153,21 +187,36 @@ def save_tool_call(
     time_elapsed: float = 0.0,
     subtask_id: Optional[str] = None,
 ) -> None:
-    """保存工具调用记录（AGENT_ARCHITECTURE.md §11.1 ToolCall 表）"""
+    """保存工具调用记录（幂等：相同 (task_id, tool_name, parameters_json) 则跳过）"""
     with SessionLocal() as db:
         try:
-            record = ToolCallModel(
+            params_json = json.dumps(parameters, ensure_ascii=False) if parameters else None
+            # 幂等检查
+            existing = db.query(ToolCallModel).filter_by(
                 task_id=task_id,
-                subtask_id=subtask_id,
                 tool_name=tool_name,
-                parameters_json=json.dumps(parameters, ensure_ascii=False) if parameters else None,
-                result_json=json.dumps(result, ensure_ascii=False) if result else None,
-                status=status,
-                error_message=error,
-                tokens_used=tokens_used,
-                time_elapsed=time_elapsed,
-            )
-            db.add(record)
+                parameters_json=params_json,
+            ).first()
+            if existing:
+                existing.status = status
+                existing.result_json = json.dumps(result, ensure_ascii=False) if result else None
+                existing.error_message = error
+                existing.tokens_used = tokens_used
+                existing.time_elapsed = time_elapsed
+            else:
+                record = ToolCallModel(
+                    task_id=task_id,
+                    subtask_id=subtask_id,
+                    tool_name=tool_name,
+                    parameters_json=params_json,
+                    result_json=json.dumps(result, ensure_ascii=False) if result else None,
+                    status=status,
+                    error_message=error,
+                    tokens_used=tokens_used,
+                    time_elapsed=time_elapsed,
+                )
+                db.add(record)
+
             db.commit()
         except Exception as e:
             db.rollback()

@@ -53,7 +53,7 @@ def setup_logging(settings) -> None:
         cache_logger_on_first_use=True,
     )
 
-    # Route standard library loggers through structlog (only uvicorn for now)
+    # Route standard library loggers through structlog
     for _name in ["uvicorn", "uvicorn.error", "uvicorn.access"]:
         _l = logging.getLogger(_name)
         if not _l.handlers:
@@ -61,3 +61,8 @@ def setup_logging(settings) -> None:
             _h.setFormatter(logging.Formatter("%(message)s"))
             _l.addHandler(_h)
         _l.setLevel(level)
+
+    # Suppress noisy third-party logs
+    for _name in ["elasticsearch", "elastic_transport", "opentelemetry", "urllib3",
+                  "sqlalchemy.engine", "sqlalchemy", "httpx", "httpcore"]:
+        logging.getLogger(_name).setLevel(logging.WARNING)

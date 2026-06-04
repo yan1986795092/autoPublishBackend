@@ -10,9 +10,9 @@ class GatewaySettings(BaseSettings):
     rate_limit_backend: str = "memory"
 
     provider_limits: dict = Field(default_factory=lambda: {
-        "openai":    {"rpm": 500,  "tpm": 1000000},
-        "zhipuai":   {"rpm": 60,   "tpm": 100000},
-        "qwen-plus": {"rpm": 120,  "tpm": 200000},
+        "openai":  {"rpm": 500,  "tpm": 1000000},
+        "zhipu":   {"rpm": 60,   "tpm": 100000},
+        "qwen":    {"rpm": 120,  "tpm": 200000},
     })
 
     source_app_limits: dict = Field(default_factory=lambda: {

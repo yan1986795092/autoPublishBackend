@@ -173,7 +173,7 @@ class GatewayContainer:
             "qwen": 1200,
         }
 
-        for provider_key in ["openai", "zhipu", "qwen"]:
+        for provider_key, provider_name in [("openai", "openai"), ("zhipu", "zhipuai"), ("qwen", "qwen")]:
             api_key = getattr(main_settings, f"{provider_key}_api_key", None)
             if not api_key:
                 continue
@@ -181,7 +181,7 @@ class GatewayContainer:
             base_url = getattr(main_settings, f"{provider_key}_base_url", "") or ""
 
             candidates.append(ModelCandidate(
-                provider=provider_key,
+                provider=provider_name,
                 model=model,
                 api_key=api_key,
                 base_url=base_url,

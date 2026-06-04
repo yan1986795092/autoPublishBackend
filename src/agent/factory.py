@@ -163,13 +163,17 @@ def _build_tool_registry(
         for tool in create_hitl_tools(hitl_manager):
             registry.register(tool)
 
-    # 5. MCP 工具
+    # 5. MCP 工具（仅限搜索类 Agent 使用，避免污染写作/审核 Agent 的 LLM 调用）
     if mcp_tools:
         for lc_tool in mcp_tools:
             from .tools import AgentToolMeta
             registry.register_from_langchain(
                 lc_tool,
-                meta=AgentToolMeta(category="search", builtin=False),
+                meta=AgentToolMeta(
+                    category="search",
+                    agent_types=["WebSearch", "HotTopicAgent"],
+                    builtin=False,
+                ),
             )
 
     logger.info(

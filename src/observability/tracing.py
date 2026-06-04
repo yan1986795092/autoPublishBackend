@@ -109,15 +109,38 @@ def get_meter(name: str = "autopublish") -> Meter:
 
 
 def setup_local_dev(settings=None) -> tuple[Tracer, Meter]:
-    """Local dev mode: console-only tracing, no OTLP export.
+    """Local dev mode: file-based tracing, no console output.
 
-    Useful when running without Docker (e.g., IDE debugger).
-    Delegates logging to ``src.core.logging.setup_logging``.
+    Spans/metrics are saved to logs/traces.jsonl and logs/metrics.jsonl
+    instead of printing to stdout.
     """
-    from opentelemetry.sdk.trace.export import ConsoleSpanExporter
-    from opentelemetry.sdk.metrics.export import ConsoleMetricExporter, PeriodicExportingMetricReader
+    import json
+    from pathlib import Path
+    from opentelemetry.sdk.trace.export import SpanExporter
+    from opentelemetry.sdk.metrics.export import MetricExporter
 
-    # Configure logging (dev defaults: console format, debug level)
+    logs_dir = Path(__file__).resolve().parents[3] / "logs"
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    class JsonlSpanExporter(SpanExporter):
+        def export(self, spans, timeout_millis=30000):
+            import json
+            with open(logs_dir / "traces.jsonl", "a", encoding="utf-8") as f:
+                for span in spans:
+                    data = json.loads(span.to_json())
+                    f.write(json.dumps({"name": data.get("name", ""), "trace_id": data.get("context", {}).get("trace_id", "")[:16], "status": data.get("status", {}).get("status_code", "")}) + "\n")
+            return False
+
+        def shutdown(self): pass
+
+    class NoopMetricExporter(MetricExporter):
+        def __init__(self):
+            super().__init__()
+        def export(self, metrics_data, timeout_millis=30000):
+            return True
+        def shutdown(self): pass
+        def force_flush(self, timeout_millis=30000): return True
+
     if settings is not None:
         setup_logging(settings)
     else:
@@ -127,11 +150,11 @@ def setup_local_dev(settings=None) -> tuple[Tracer, Meter]:
     resource = Resource.create({SERVICE_NAME: "autopublish-api-dev"})
 
     tracer_provider = TracerProvider(resource=resource)
-    tracer_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
+    tracer_provider.add_span_processor(BatchSpanProcessor(JsonlSpanExporter()))
     trace.set_tracer_provider(tracer_provider)
     set_global_textmap(TraceContextTextMapPropagator())
 
-    metric_reader = PeriodicExportingMetricReader(ConsoleMetricExporter(), export_interval_millis=10000)
+    metric_reader = PeriodicExportingMetricReader(NoopMetricExporter(), export_interval_millis=30000)
     meter_provider = MeterProvider(resource=resource, metric_readers=[metric_reader])
     metrics.set_meter_provider(meter_provider)
 
