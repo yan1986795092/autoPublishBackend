@@ -50,11 +50,7 @@ async def lifespan(app: FastAPI):
     await loop.run_in_executor(None, lambda: Base.metadata.create_all(bind=engine))
     await loop.run_in_executor(None, lambda: migration_manager.run_all(engine))
 
-    # Start Gateway 管线（worker 内也会调用，幂等安全）
-    from src.core.gateway.core.container import GatewayContainer
-    await GatewayContainer.get_instance()
-    logger.info("GatewayContainer started (lifespan)")
-
+    # Worker handles lifecycle internally
     await worker.start()
     logger.info("Agent Worker started")
     yield
@@ -62,7 +58,6 @@ async def lifespan(app: FastAPI):
     await close_es()
     await worker.stop()
     logger.info("Agent Worker stopped")
-    # GatewayContainer.stop() 已在 worker.stop() 中调用
 
 
 app = FastAPI(

@@ -289,14 +289,15 @@ class TestShouldContinue:
 
 class TestOrchestratorDecompose:
     @pytest.mark.asyncio
-    async def test_decompose_simple_uses_template(self, orchestrator):
-        """简单任务（< 80 字符，无关键词）使用模板计划，跳过 LLM"""
+    async def test_decompose_simple_uses_llm(self, orchestrator):
+        """简单任务现在也通过 LLM 拆解（之前跳过 LLM）"""
         plan = await orchestrator._decompose("write about AI", {"user": "test"})
         assert isinstance(plan, ExecutionPlan)
-        assert plan.goal == "write about AI"
+        # LLM path uses its own goal from the plan, not the truncated user request
         assert len(plan.tasks) == 2
         assert plan.tasks[0].agent_type == "WritingAgent"
         assert plan.tasks[1].agent_type == "ReviewAgent"
+        assert plan.plan_method == "llm"
 
     @pytest.mark.asyncio
     async def test_decompose_medium_uses_llm(self, orchestrator):

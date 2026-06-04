@@ -1,147 +1,84 @@
-"""ModelRouter: 按 Agent 角色创建 GatewaySession 实例。
-
-每个 GatewaySession 通过完整的 Gateway 管线调用 LLM：
-  EnhancedRouter → CircuitBreaker → RateLimiter → LiteLLMClient → CostTracker
-"""
+"""ModelRouter — 按 Agent 角色创建 LangChain ChatOpenAI 实例。"""
 
 from __future__ import annotations
+
 import logging
-from typing import Any, Optional
+from typing import Any
+
+from langchain_openai import ChatOpenAI
 
 from src.config import get_settings
 
-logger = logging.getLogger(__name__)
+logger = logging.get_logger(__name__)
 
-# Agent 类型 → routing hint 映射（决定 EnhancedRouter 的评分权重）
-HINT_MAP: dict[str, str] = {
-    "ManagerAgent": "complex",
-    "WritingAgent": "complex",
-    "DiagramAgent": "simple",
-    "ImageAgent": "simple",
-    "ReviewAgent": "simple",
-    "SEOAgent": "simple",
-    "HotTopicAgent": "simple",
-    "CodeAgent": "balanced",
-    "WebSearch": "simple",
-    "PlatformAdapter": "simple",
-    "TranslationAgent": "balanced",
-}
-
-# Agent 类型 → 配置角色名映射
-ROLE_MAP: dict[str, str] = {
-    "ManagerAgent": "manager",
-    "WritingAgent": "writing",
-    "DiagramAgent": "writing",
-    "ImageAgent": "image",
-    "ReviewAgent": "subagent",
-    "SEOAgent": "subagent",
-    "HotTopicAgent": "subagent",
-    "CodeAgent": "subagent",
-    "WebSearch": "subagent",
-    "PlatformAdapter": "subagent",
-    "TranslationAgent": "subagent",
+# Provider → base_url 映射
+_PROVIDER_BASE_URLS = {
+    "openai": "https://api.openai.com/v1",
+    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
+    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
 }
 
 
 class ModelRouter:
-    """按角色创建并缓存 GatewaySession 实例。
-
-    每个 GatewaySession 暴露 LangChain 兼容接口（ainvoke/astream/bind_tools），
-    但内部通过完整的 Gateway 管线调用 LLM。
-    """
+    """按角色创建并缓存 ChatOpenAI 实例。"""
 
     def __init__(self):
         self._settings = get_settings()
-        # Lazy init — GatewayContainer may not be started yet
-        self._container: Any = None
-        self._cache: dict[str, Any] = {}  # GatewaySession cache
+        self._cache: dict[str, Any] = {}
 
-    def _get_container(self) -> Any:
-        """Lazy-init the GatewayContainer singleton."""
-        if self._container is None:
-            from src.core.gateway.core.container import GatewayContainer
-            self._container = GatewayContainer.get_instance_sync()
-        return self._container
+    def _get_llm_config(self) -> tuple[str, str, str]:
+        """Return (provider, model, base_url) from settings."""
+        s = self._settings
+        for key, provider in [("openai", "openai"), ("zhipu", "zhipu"), ("qwen", "qwen")]:
+            api_key = getattr(s, f"{key}_api_key", None)
+            if api_key:
+                model = getattr(s, f"{key}_model", "") or self._default_model(provider)
+                base_url = getattr(s, f"{key}_base_url", "") or _PROVIDER_BASE_URLS.get(provider, "")
+                return provider, model, base_url
 
-    def get_chat_model(self, agent_type: str):
-        """返回 GatewaySession 实例（替代 ChatOpenAI）。
+        raise RuntimeError(
+            "No LLM provider configured. Set OPENAI_API_KEY, ZHIPUAI_API_KEY, or QWEN_API_KEY."
+        )
 
-        GatewaySession 提供 ainvoke/astream/bind_tools 三个方法，
-        与 ChatOpenAI 接口兼容，所有 handler 无需修改。
+    def _default_model(self, provider: str) -> str:
+        defaults = {"openai": "gpt-4o-mini", "zhipu": "glm-4-flash", "qwen": "qwen-plus"}
+        return defaults.get(provider, "gpt-4o-mini")
 
-        Args:
-            agent_type: Agent 类型，决定 routing hint 和温度等参数
-        """
-        cache_key = agent_type
-        if cache_key in self._cache:
-            return self._cache[cache_key]
+    def get_chat_model(self, agent_type: str) -> ChatOpenAI:
+        """返回 ChatOpenAI 实例（替代 ChatOpenAI）。"""
+        if agent_type in self._cache:
+            return self._cache[agent_type]
 
-        container = self._get_container()
-        candidates = container.build_candidates_from_settings(self._settings)
+        provider, model, base_url = self._get_llm_config()
+        api_key = getattr(self._settings, f"{provider}_api_key", "")
 
-        # 如果该 agent_type 有专属 role 配置，prepend 为优先候选
-        role = ROLE_MAP.get(agent_type)
-        if role:
-            try:
-                role_cfg = self._settings.get_role_config(role)
-                if role_cfg.get("api_key"):
-                    from src.core.gateway.core.router import ModelCandidate
-
-                    static_latency = {"openai": 1000, "zhipu": 800, "qwen": 1200}
-                    role_candidate = ModelCandidate(
-                        provider=role_cfg["provider"],
-                        model=role_cfg["model"],
-                        api_key=role_cfg["api_key"],
-                        base_url=role_cfg["base_url"],
-                        input_price=container.settings.pricing.get(
-                            role_cfg["model"], {}
-                        ).get("input", 0.002),
-                        output_price=container.settings.pricing.get(
-                            role_cfg["model"], {}
-                        ).get("output", 0.002),
-                        static_latency_ms=static_latency.get(role_cfg["provider"], 1000),
-                    )
-                    # Prepend: role-specific candidate has priority
-                    candidates.insert(0, role_candidate)
-            except Exception as e:
-                logger.warning("ModelRouter: failed to build role candidate for %s: %s", role, e)
-
-        hint = HINT_MAP.get(agent_type, "balanced")
-
-        from src.core.gateway.core.session import GatewaySession
-        session = GatewaySession(
-            agent_type=agent_type,
-            candidates=candidates,
-            container=container,
-            hint=hint,
+        llm = ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=base_url or None,
             temperature=self._settings.default_temperature,
             max_tokens=self._settings.default_max_tokens,
+            streaming=True,
         )
-        self._cache[cache_key] = session
+
+        self._cache[agent_type] = llm
         logger.info(
-            "ModelRouter: created GatewaySession for %s (hint=%s, %d candidates)",
-            agent_type, hint, len(candidates),
+            "ModelRouter: created ChatOpenAI for %s (provider=%s, model=%s)",
+            agent_type, provider, model,
         )
-        return session
+        return llm
 
-    def get_gateway(self, agent_type: str):
-        """Alias for get_chat_model — 向后兼容 Orchestrator 的 llm_gateway 参数。
-
-        Orchestrator 使用 get_gateway("ManagerAgent") 获取 LLM 实例用于
-        _decompose 和 _fallback_llm_call。GatewaySession 的 ainvoke 完全兼容。
-        """
+    def get_gateway(self, agent_type: str) -> ChatOpenAI:
+        """Alias — 向后兼容。"""
         return self.get_chat_model(agent_type)
 
-    def get_all_models(self) -> dict[str, Any]:
-        """返回所有已知 agent_type 的 GatewaySession 字典。"""
-        models = {}
-        for agent_type in HINT_MAP:
-            try:
-                models[agent_type] = self.get_chat_model(agent_type)
-            except Exception as e:
-                logger.warning("ModelRouter: failed to create session for %s: %s", agent_type, e)
-        return models
+    def get_all_models(self) -> dict[str, ChatOpenAI]:
+        agent_types = [
+            "ManagerAgent", "WritingAgent", "DiagramAgent", "ImageAgent",
+            "ReviewAgent", "SEOAgent", "HotTopicAgent", "CodeAgent",
+            "WebSearch", "PlatformAdapter", "TranslationAgent",
+        ]
+        return {at: self.get_chat_model(at) for at in agent_types}
 
     def invalidate_cache(self) -> None:
-        """清空 GatewaySession 缓存，下次调用时重建。"""
         self._cache.clear()

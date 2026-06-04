@@ -169,6 +169,49 @@ class MessageBus:
         self._reply_events.clear()
         self._replies.clear()
 
+    # ── Agent-initiated communication ──
+
+    def agent_discovery_sync(self, requester: str, capability_needed: str) -> Optional[str]:
+        """Synchronous version of agent discovery."""
+        if self._registry:
+            matches = self._registry.find_by_expertise(capability_needed)
+            if matches:
+                logger.debug("Agent discovery: %s needs %s → %s", requester, capability_needed, matches[0].name)
+                return matches[0].name
+        return None
+
+    async def agent_discovery(
+        self,
+        requester: str,
+        capability_needed: str,
+    ) -> Optional[str]:
+        """Ask the agent registry who can handle a capability. Returns agent_type or None."""
+        return self.agent_discovery_sync(requester, capability_needed)
+
+    async def peer_feedback(
+        self,
+        from_agent: str,
+        to_agent: str,
+        feedback_content: dict,
+        related_task_id: Optional[str] = None,
+    ) -> None:
+        """
+        Send direct feedback from one agent to another (e.g., ReviewAgent → WritingAgent).
+        Fire-and-forget: does NOT wait for a reply.
+        """
+        msg = Message(
+            msg_id=str(uuid.uuid4()),
+            from_agent=from_agent,
+            to_agent=to_agent,
+            msg_type=MessageType.SUGGESTION,
+            content=feedback_content,
+            conversation_id=f"peer-{from_agent}-{to_agent}",
+            metadata={"related_task_id": related_task_id} if related_task_id else {},
+        )
+        self._append_history(msg)
+        self._ensure_outbox(to_agent).append(msg)
+        logger.debug("Peer feedback: %s → %s [%s]", from_agent, to_agent, feedback_content.get("type", "unknown"))
+
     def __repr__(self) -> str:
         total_msgs = sum(len(v) for v in self._history.values())
         return f"MessageBus({total_msgs} msgs, {len(self._outbox)} outboxes)"

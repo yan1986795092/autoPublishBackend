@@ -34,14 +34,6 @@ class AgentWorker:
         self._running = True
         self._last_cleanup_time = time.monotonic()
 
-        # 启动 Gateway 管线（路由/限流/熔断/成本追踪）
-        try:
-            from src.core.gateway.core.container import GatewayContainer
-            await GatewayContainer.get_instance()
-            logger.info("GatewayContainer started")
-        except Exception as e:
-            logger.error("Failed to start GatewayContainer", error=str(e), exc_info=True)
-
         # 启动 MCP WebSearch Client
         try:
             self._mcp_client = await get_mcp_client()
@@ -66,15 +58,6 @@ class AgentWorker:
             await shutdown_mcp_client()
         except Exception as e:
             logger.warning("MCP shutdown error", error=str(e))
-
-        # 关闭 Gateway 管线
-        try:
-            from src.core.gateway.core.container import GatewayContainer
-            container = GatewayContainer.get_instance_sync()
-            await container.stop()
-            logger.info("GatewayContainer stopped")
-        except Exception as e:
-            logger.warning("Gateway shutdown error", error=str(e))
 
     async def _run_loop(self):
         while self._running:
