@@ -1,4 +1,4 @@
-"""LLM 网关客户端 — 统一经过 LLM Gateway（8001）
+"""LLM 网关客户端 — 统一经过 LLM Gateway（9010）
 
 保持原有接口不变，内部实现从 LangChain 改为 httpx 直调 Gateway。
 """
@@ -18,7 +18,7 @@ from src.config import get_settings
 
 logger = structlog.get_logger(__name__)
 
-_GATEWAY_URL = "http://localhost:8001"
+_GATEWAY_URL = "http://localhost:9010"
 
 
 class LLMGateway:
