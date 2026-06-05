@@ -108,15 +108,6 @@ LLM Gateway：http://localhost:8001/docs
 └──────────────────────────────────────────────────────────────────────┘
 ```
 
-### 关键变化：LLM 调用链路
-
-| 变更前 | 变更后 |
-|--------|--------|
-| Backend 直接调用 LLM 提供商 | Backend → LLM Gateway (8001) → LLM 提供商 |
-| 后端各自记录 LLM 日志 | Gateway 统一记录，后端透传 trace_id |
-| 无统一限流/缓存 | Gateway 共享 RateLimiter + Cache + CircuitBreaker |
-| 各服务独立日志配置 | 共享 `logging_shared` 统一配置 |
-
 ## LangGraph 编排流程
 
 ```
@@ -490,6 +481,4 @@ curl http://localhost:8001/health
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
-| v2.1.0 | 2026-06 | 统一经 LLM Gateway 调用；shared-logging 统一日志；ES 异步写入 |
-| v2.0.0 | 2026-06 | 重构 LLM 调用层，使用 langchain_openai 直接调用 |
-| v1.x | 早期 | 初始架构，litellm + Model Gateway |
+| v2.1.0 | 2026-06 | LLM 调用统一经过 LLM Gateway；shared-logging 统一日志；ES 异步批量写入 |
