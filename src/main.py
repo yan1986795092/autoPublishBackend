@@ -45,6 +45,13 @@ async def lifespan(app: FastAPI):
 
     obs_metrics.create_meters()
 
+    # 启动 ES 异步日志写入器
+    try:
+        from src.logging_shared.es_writer import start_writer as _start_es
+        await _start_es()
+    except Exception:
+        pass
+
     # Start DB + migrations + worker
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: Base.metadata.create_all(bind=engine))
@@ -54,6 +61,13 @@ async def lifespan(app: FastAPI):
     await worker.start()
     logger.info("Agent Worker started")
     yield
+
+    # 关闭 ES 写入器
+    try:
+        from src.logging_shared.es_writer import stop_writer as _stop_es
+        await _stop_es()
+    except Exception:
+        pass
 
     await close_es()
     await worker.stop()
@@ -129,6 +143,10 @@ app.add_middleware(
     allow_headers=["*"],
     expose_headers=["*"],
 )
+
+# 请求日志中间件（统一结构化日志 + trace_id）
+from src.logging_shared.middleware import LoggingMiddleware
+app.add_middleware(LoggingMiddleware, service_name="autopublish-api")
 
 # 注册路由
 app.include_router(auth.router, prefix="/api/v1")
