@@ -23,17 +23,17 @@ AI 内容生产与发布工具后端 API 服务，基于 FastAPI + LangGraph 多
 ```bash
 # 1. 启动 LLM Gateway（必须先启动）
 cd llm-gateway
-uvicorn gateway.main:app --port 8001
+uvicorn gateway.main:app --port 9010
 
 # 2. 启动后端
 cd backend
 pip install -r requirements.txt
 cp .env.example .env    # 编辑 .env 填入实际配置
-uvicorn src.main:app --reload --port 8000
+uvicorn src.main:app --reload --port 9000
 ```
 
-API 文档：http://localhost:8000/docs
-LLM Gateway：http://localhost:8001/docs
+API 文档：http://localhost:9000/docs
+LLM Gateway：http://localhost:9010/docs
 
 ## 系统架构
 
@@ -79,11 +79,11 @@ LLM Gateway：http://localhost:8001/docs
 │  └───────────────────────────────────────────────────────────────┘  │
 └────────────────────────────┬─────────────────────────────────────────┘
                              │
-                             │  LangChain ChatOpenAI (base_url=localhost:8001)
+                             │  LangChain ChatOpenAI (base_url=localhost:9010)
                              │  httpx (LLMGateway / generate_sync)
                              ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│              LLM Gateway (8001) — 统一 LLM 出口                        │
+│              LLM Gateway (9010) — 统一 LLM 出口                        │
 │                                                                      │
 │  ┌──────────────────────────────────────────────────────────────┐   │
 │  │  Plugin Chain: RateLimiter → Cache → CircuitBreaker          │   │
@@ -261,14 +261,14 @@ backend/
 
 ### 架构说明
 
-所有 LLM 调用统一经过 LLM Gateway（8001），不再直连 LLM 提供商：
+所有 LLM 调用统一经过 LLM Gateway（9010），不再直连 LLM 提供商：
 
 ```
-Backend                    LLM Gateway (8001)            LLM 提供商
+Backend                    LLM Gateway (9010)            LLM 提供商
   │                              │                           │
   │  ModelRouter                 │                           │
   │  ChatOpenAI(                 │                           │
-  │    base_url=8001)            │                           │
+  │    base_url=9010)            │                           │
   │  ─────────────────────────► │  RateLimiter               │
   │                              │  Cache                     │
   │                              │  CircuitBreaker            │
@@ -425,7 +425,7 @@ LLM Gateway 自动按优先级选择可用的供应商：
 | `OPENAI_API_KEY` | OpenAI Key | - |
 | `OPENAI_MODEL` | OpenAI 模型 | `gpt-4o-mini` |
 | **Gateway 地址** | | |
-| `GATEWAY_URL` | LLM Gateway URL | `http://localhost:8001` |
+| `GATEWAY_URL` | LLM Gateway URL | `http://localhost:9010` |
 | **MCP 配置** | | |
 | `MCP_ENABLED` | 启用 MCP | `true` |
 | `MCP_ENABLE_SEARCH` | WebSearch Server | `true` |
@@ -458,11 +458,11 @@ pytest tests/ -v
 pytest tests/agents/ -v
 
 # 查看 Agent 指标
-curl http://localhost:8000/api/v1/agent/metrics
+curl http://localhost:9000/api/v1/agent/metrics
 
 # 健康检查
-curl http://localhost:8000/health
-curl http://localhost:8001/health
+curl http://localhost:9000/health
+curl http://localhost:9010/health
 ```
 
 ## 关键设计决策

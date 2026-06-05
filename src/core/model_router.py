@@ -11,7 +11,7 @@ from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_GATEWAY_URL = "http://localhost:8001"
+_GATEWAY_URL = "http://localhost:9010"
 
 
 class ModelRouter:
