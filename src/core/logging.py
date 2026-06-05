@@ -1,68 +1,29 @@
-"""Centralized logging configuration for the agent system.
+"""Centralized logging configuration — 委托给 shared-logging 模块。
 
-This is THE single entry point for all logging configuration.
-Call ``setup_logging(settings)`` once at application startup.
-All other modules should use ``import structlog; logger = structlog.get_logger(__name__)``.
+This module re-exports shared-logging's config to avoid breaking existing
+imports throughout the codebase. All actual configuration is in
+src.logging_shared.config.
 """
-
-import logging
-import sys
 
 import structlog
 
-_configured = False
+# 委托给 shared-logging
+from src.logging_shared.config import setup, get_logger as _sl_get_logger
+from src.logging_shared.middleware import LoggingMiddleware
 
 
 def setup_logging(settings) -> None:
     """Configure structlog + stdlib logging from application Settings.
 
-    Safe to call multiple times — only the first call takes effect.
+    Delegates to src.logging_shared.config.setup().
     Reads ``settings.log_level`` and ``settings.log_json_format``.
     """
-    from src.config import Settings  # lazy import to avoid circular deps
-
-    global _configured
-    if _configured:
-        return
-    _configured = True
-
-    level = getattr(logging, settings.log_level.upper(), logging.INFO)
-    logging.getLogger().setLevel(level)
-
-    processors = [
-        structlog.stdlib.filter_by_level,
-        structlog.stdlib.add_logger_name,
-        structlog.stdlib.add_log_level,
-        structlog.stdlib.PositionalArgumentsFormatter(),
-        structlog.processors.TimeStamper(fmt="iso"),
-        structlog.processors.StackInfoRenderer(),
-        structlog.processors.format_exc_info,
-        structlog.processors.UnicodeDecoder(),
-    ]
-
-    if settings.log_json_format:
-        processors.append(structlog.processors.JSONRenderer())
-    else:
-        processors.append(structlog.dev.ConsoleRenderer())
-
-    structlog.configure(
-        processors=processors,
-        wrapper_class=structlog.stdlib.BoundLogger,
-        context_class=dict,
-        logger_factory=structlog.stdlib.LoggerFactory(),
-        cache_logger_on_first_use=True,
+    setup(
+        log_level=getattr(settings, "log_level", "INFO"),
+        log_json=getattr(settings, "log_json_format", False),
+        service_name="autopublish-api",
     )
 
-    # Route standard library loggers through structlog
-    for _name in ["uvicorn", "uvicorn.error", "uvicorn.access"]:
-        _l = logging.getLogger(_name)
-        if not _l.handlers:
-            _h = logging.StreamHandler(sys.stderr)
-            _h.setFormatter(logging.Formatter("%(message)s"))
-            _l.addHandler(_h)
-        _l.setLevel(level)
 
-    # Suppress noisy third-party logs
-    for _name in ["elasticsearch", "elastic_transport", "opentelemetry", "urllib3",
-                  "sqlalchemy.engine", "sqlalchemy", "httpx", "httpcore"]:
-        logging.getLogger(_name).setLevel(logging.WARNING)
+def get_logger(name: str | None = None):
+    return _sl_get_logger(name)
