@@ -8,12 +8,12 @@
 
 from __future__ import annotations
 import asyncio
-import logging
 from typing import Any, Awaitable, Callable, Optional, TypeVar
 
 from .schemas import AgentResult, TaskStatus, UsageInfo
+from src.logging_shared.config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("agent.retry")
 
 T = TypeVar("T")
 
@@ -154,7 +154,7 @@ async def run_agent_with_retry(
             # 指数退避（第一次不等待）
             if attempt > 0:
                 wait = min(2 ** attempt, 30)
-                logger.info(f"[Retry] {agent_type} 第 {attempt + 1}/{max_retries} 次尝试，等待 {wait}s")
+                logger.info("重试中", agent_type=agent_type, attempt=attempt + 1, max_retries=max_retries, wait_s=wait)
                 await asyncio.sleep(wait)
 
             # 构建每次重试的输入（不修改原始 task_input）
@@ -168,7 +168,7 @@ async def run_agent_with_retry(
             # 检查是否失败
             if result.get("status") == "failed":
                 last_error = result.get("error", "Unknown error")
-                logger.warning(f"[Retry] {agent_type} 尝试 {attempt + 1} 失败: {last_error}")
+                logger.warning("Agent 执行失败", agent_type=agent_type, attempt=attempt + 1, error=last_error)
                 feedback_history.append(f"上一步执行失败，请修正: {last_error}")
                 continue
 
@@ -177,7 +177,7 @@ async def run_agent_with_retry(
             result["_quality_score"] = score
 
             if score < quality_threshold:
-                logger.info(f"[Retry] {agent_type} 质量评分 {score:.1f} 低于阈值 {quality_threshold}")
+                logger.info("质量评分不足", agent_type=agent_type, attempt=attempt + 1, score=score, threshold=quality_threshold)
                 feedback_history.append(f"质量评分 {score:.1f} 不足，请更详细地展开论述，增加深度和细节")
                 last_error = f"质量评分 {score:.1f} 低于阈值"
                 if "thinking_steps" in result:
@@ -185,23 +185,23 @@ async def run_agent_with_retry(
                         step["status"] = "retry"
                 continue
 
-            logger.info(f"[Retry] {agent_type} 通过质量检查，评分 {score:.1f}")
+            logger.info("通过质量检查", agent_type=agent_type, score=score)
             return result
 
         except (asyncio.TimeoutError, ConnectionError, OSError) as e:
             last_error = str(e)
-            logger.warning(f"[Retry] {agent_type} 网络/超时错误 (尝试 {attempt + 1}): {e}")
+            logger.warning("网络/超时错误", agent_type=agent_type, attempt=attempt + 1, error=str(e))
             feedback_history.append(f"网络/超时错误: {last_error}, 请重试")
             await asyncio.sleep(2 ** attempt)
 
         except QualityError as e:
             last_error = str(e)
             feedback_history.append(f"质量问题: {e}")
-            logger.warning(f"[Retry] {agent_type} 质量问题 (尝试 {attempt + 1}): {e}")
+            logger.warning("质量问题", agent_type=agent_type, attempt=attempt + 1, error=str(e))
 
         except Exception as e:
             last_error = str(e)
-            logger.error(f"[Retry] {agent_type} 意外错误 (尝试 {attempt + 1}): {e}")
+            logger.error("意外错误", agent_type=agent_type, attempt=attempt + 1, error=str(e))
             if attempt == max_retries - 1:
                 return {
                     "status": "failed",
@@ -220,7 +220,7 @@ async def run_agent_with_retry(
                 }
 
     # 所有重试耗尽，返回降级结果
-    logger.warning(f"[Retry] {agent_type} 所有 {max_retries} 次重试已耗尽")
+    logger.warning("重试耗尽，返回降级结果", agent_type=agent_type, max_retries=max_retries)
     return {
         "status": "partial",
         "agent_type": agent_type,

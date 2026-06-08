@@ -20,14 +20,15 @@
 from __future__ import annotations
 
 import json
-import logging
 import time as _time
 from typing import Any, Callable, Optional
 
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
-logger = logging.getLogger(__name__)
+from src.logging_shared.config import get_logger
+
+logger = get_logger("agent.tool_utils")
 
 # 最大工具调用轮次，防止无限循环
 MAX_TOOL_ROUNDS = 5

@@ -53,7 +53,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         )
 
         log.info(
-            EVENT,
             **{
                 EVENT: HTTP_REQUEST_START,
                 TRACE_ID: trace_id,
@@ -67,7 +66,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             response = await call_next(request)
             elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
             log.info(
-                EVENT,
                 **{
                     EVENT: HTTP_REQUEST_END,
                     STATUS_CODE: response.status_code,
@@ -79,7 +77,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         except Exception as exc:
             elapsed_ms = round((time.perf_counter() - started_at) * 1000, 2)
             log.error(
-                EVENT,
                 **{
                     EVENT: HTTP_REQUEST_ERROR,
                     STATUS_CODE: 500,

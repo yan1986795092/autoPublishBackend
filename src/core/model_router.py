@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from langchain_openai import ChatOpenAI
 
 from src.config import get_settings
+from src.logging_shared.config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("core.model_router")
 
 _GATEWAY_URL = "http://localhost:9010"
 
@@ -57,14 +57,12 @@ class ModelRouter:
             temperature=self._settings.default_temperature,
             max_tokens=self._settings.default_max_tokens,
             streaming=True,
-            http_async_client__timeout=120.0,
+            timeout=120.0,
         )
 
         self._cache[agent_type] = llm
-        logger.info(
-            "ModelRouter: 指向 LLM Gateway 用于 %s (provider=%s, model=%s, gateway=%s)",
-            agent_type, provider, model, base_url,
-        )
+        logger.info("ModelRouter 指向 LLM Gateway",
+                    agent_type=agent_type, provider=provider, model=model, gateway=base_url)
         return llm
 
     def get_gateway(self, agent_type: str) -> ChatOpenAI:

@@ -7,6 +7,9 @@ import asyncio
 from src.models import Content, ContentVersion, User, ContentStatus, Persona
 from src.schemas.content import GenerateRequest
 from src.utils.tokenizer import estimate_tokens
+from src.logging_shared.config import get_logger
+
+logger = get_logger("service.content")
 
 
 # 预设系统模板
@@ -905,8 +908,7 @@ class ContentService:
             yield f"data: {json.dumps(done_data)}\n\n"
 
         except (Exception, asyncio.CancelledError) as e:
-            import traceback
-            traceback.print_exc()
+            logger.error("流式生成内容异常", error=str(e))
             err_payload = {'type': 'error', 'message': str(e)}
             yield f"data: {json.dumps(err_payload)}\n\n"
 

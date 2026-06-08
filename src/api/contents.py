@@ -16,6 +16,9 @@ from src.schemas.content import (
 from src.api.auth import get_current_user
 from src.services.content_service import ContentService
 from src.core.exceptions import GenerateError
+from src.logging_shared.config import get_logger
+
+logger = get_logger("api.contents")
 
 router = APIRouter(prefix="/contents", tags=["内容管理"])
 
@@ -32,9 +35,7 @@ async def generate_content(
         result = await service.generate_content(current_user.id, request)
         return {"success": True, "data": result}
     except Exception as e:
-        import traceback
-        print(f"[ERROR] generate_content failed: {e}")
-        traceback.print_exc()
+        logger.error("generate_content 失败", error=str(e))
         raise GenerateError(message=f"生成失败: {str(e)}")
 
 
@@ -75,9 +76,7 @@ async def batch_generate_content(
         )
         return {"success": True, "data": {"contents": results}}
     except Exception as e:
-        import traceback
-        print(f"[ERROR] batch_generate failed: {e}")
-        traceback.print_exc()
+        logger.error("batch_generate 失败", error=str(e))
         raise GenerateError(message=f"批量生成失败: {str(e)}")
 
 

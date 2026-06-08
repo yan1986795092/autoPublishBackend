@@ -1,7 +1,6 @@
 """Permission-scoped context views for multi-agent context management."""
 from __future__ import annotations
 
-import logging
 from typing import Any, Dict, List, Optional
 
 from .context_store import (
@@ -15,8 +14,9 @@ from .context_store import (
     CreativeDecision,
     WriteResult,
 )
+from src.logging_shared.config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("memory.agent_scoped_view")
 
 # ──────────────────────────────────────────
 # Task field map
@@ -39,7 +39,7 @@ def filter_task_fields(agent_name: str, store: SharedContextStore) -> Dict[str, 
     """Return only the task-layer fields this agent is authorized to read."""
     perm = AGENT_PERMISSIONS.get(agent_name)
     if not perm:
-        logger.warning(f"Unknown agent type: {agent_name}, returning empty task context")
+        logger.warning("未知 Agent 类型，返回空上下文", agent_name=agent_name)
         return {}
 
     result = {}
