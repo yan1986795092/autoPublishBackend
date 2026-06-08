@@ -3,8 +3,6 @@
 使用 PromptEngine 构建 prompt，支持记忆上下文注入和工具调用（memory_search 等）。
 """
 
-import logging
-
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import extract_output
@@ -12,8 +10,9 @@ from src.utils.tokenizer import estimate_tokens
 from src.prompts import PromptBuilder, CONTENT_TYPE_PROMPTS, STYLE_GUIDES
 from src.core.exceptions import HandlerError
 from .tool_utils import call_llm
+from src.logging_shared.config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("agent.writing")
 
 
 async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -122,7 +121,7 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         if not content:
             content = raw.strip()
             if content:
-                logger.warning("WritingAgent: extract_output returned empty, using raw response")
+                logger.warning("extract_output 返回空，使用原始响应", agent="WritingAgent")
 
         tokens = estimate_tokens(raw)
 
@@ -139,5 +138,5 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             }],
         }
     except Exception as e:
-        logger.error("WritingAgent failed: %s", e, exc_info=True)
+        logger.error("WritingAgent 执行失败", error=str(e), exc_info=True)
         raise HandlerError(str(e), handler="WritingAgent") from e

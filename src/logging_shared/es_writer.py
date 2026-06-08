@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
 
-logger = logging.getLogger(__name__)
+from .config import get_logger
+
+logger = get_logger("logging.es_writer")
 
 _es_client: Any | None = None
 _queue: asyncio.Queue[dict] | None = None

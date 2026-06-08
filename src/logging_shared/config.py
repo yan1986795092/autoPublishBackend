@@ -25,6 +25,15 @@ def setup(
     level = getattr(logging, log_level.upper(), logging.INFO)
     logging.getLogger().setLevel(level)
 
+    # 清除 root logger 默认的 StreamHandler（会输出原始格式日志）
+    for h in logging.getLogger().handlers[:]:
+        logging.getLogger().removeHandler(h)
+
+    # 配置 root logger handler — 将所有 plain logging 输出格式化为与 structlog 一致
+    _root_handler = logging.StreamHandler(sys.stderr)
+    _root_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    logging.getLogger().addHandler(_root_handler)
+
     processors = [
         structlog.contextvars.merge_contextvars,
         structlog.stdlib.filter_by_level,
@@ -62,7 +71,8 @@ def setup(
             _h = logging.StreamHandler(sys.stderr)
             _h.setFormatter(logging.Formatter("%(message)s"))
             _l.addHandler(_h)
-        _l.setLevel(level)
+        _l.setLevel(logging.WARNING)
+        _l.propagate = False
 
     for _name in ["elasticsearch", "elastic_transport", "opentelemetry",
                   "urllib3", "sqlalchemy.engine", "httpx", "httpcore"]:

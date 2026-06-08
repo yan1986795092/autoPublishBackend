@@ -10,7 +10,7 @@ engine = create_engine(
     settings.database_url,
     connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
     poolclass=StaticPool if "sqlite" in settings.database_url else None,
-    echo=settings.debug,
+    echo=False,
 )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)

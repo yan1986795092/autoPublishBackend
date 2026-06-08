@@ -3,8 +3,6 @@
 使用 PromptEngine 构建审核 prompt，支持记忆上下文注入。
 """
 
-import logging
-
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import check_banned_words
@@ -12,8 +10,9 @@ from .factcheck import factcheck_report
 from src.prompts import PromptBuilder
 from src.core.exceptions import HandlerError
 from src.utils.tokenizer import estimate_tokens
+from src.logging_shared.config import get_logger
 
-logger = logging.getLogger(__name__)
+logger = get_logger("agent.review")
 
 
 async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -106,5 +105,5 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             }],
         }
     except Exception as e:
-        logger.error("ReviewAgent failed: %s", e, exc_info=True)
+        logger.error("ReviewAgent 执行失败", error=str(e), exc_info=True)
         raise HandlerError(str(e), handler="ReviewAgent") from e
