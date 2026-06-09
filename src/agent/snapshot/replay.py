@@ -31,7 +31,7 @@ class ReplayEngine:
         """根据快照重建当时的 prompt messages。"""
         snapshot = self.load(snapshot_id)
         if not snapshot:
-            raise ValueError(f"Snapshot not found: {snapshot_id}")
+            raise ValueError(f"快照未找到: {snapshot_id}")
 
         messages = []
         for msg in snapshot.prompt_messages:
@@ -50,7 +50,7 @@ class ReplayEngine:
                         content = rendered.text
                 except Exception:
                     logger.warning(
-                        "Rebuild failed for %s@%s, using cached content",
+                        "重建失败: %s@%s，使用缓存内容",
                         msg.template_name, msg.template_hash,
                     )
 
@@ -102,7 +102,7 @@ class ReplayEngine:
                         resolved_content=m["content"],
                     ) for m in messages
                 ],
-                result_summary="dry-run (no LLM call)",
+                result_summary="dry-run (无 LLM 调用)",
             )
 
         # 执行 LLM 调用
@@ -150,7 +150,7 @@ class ReplayEngine:
                 usage = response.usage if response.usage else {}
 
             collector.record_llm_call(
-                model=getattr(llm, 'model_name', 'unknown'),
+                model=getattr(llm, 'model_name', '未知'),
                 params={"temperature": getattr(llm, 'temperature', None)},
                 messages=messages,
                 response_content=content,

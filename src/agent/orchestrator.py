@@ -20,7 +20,6 @@ from langchain_openai import ChatOpenAI
 from .graph import build_agent_graph
 from .state import AgentGraphState
 from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
-from src.core.llm_gateway import LLMGateway
 from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, validate_plan_structure
 from src.observability import get_tracer
 from src.observability.metrics import record_agent_run
@@ -48,7 +47,7 @@ class _AsyncioTimeout:
             self._cancelled = True
             if self._task and not self._task.done():
                 self._task.cancel()
-            raise TimeoutError(f"async operation timed out after {self._timeout}s")
+            raise TimeoutError(f"异步操作在 {self._timeout}s 后超时")
         return False
 
 
@@ -68,7 +67,6 @@ class Orchestrator:
 
     def __init__(
         self,
-        llm_gateway: LLMGateway | None = None,
         chat_models: dict[str, ChatOpenAI] | None = None,
         agent_registry: dict[str, Any] | None = None,
         model: str = "",
@@ -82,9 +80,11 @@ class Orchestrator:
         reflection_engine: Any | None = None,
         tool_registry: Any | None = None,
     ):
-        self.llm_gateway = llm_gateway
         self.chat_models = chat_models or {}
-        self.model = model or (llm_gateway.model if llm_gateway else "")
+        self._planner_llm = self.chat_models.get("ManagerAgent")
+        self.model = model or (
+            getattr(self._planner_llm, "model_name", "") if self._planner_llm else ""
+        )
         self.temperature = temperature
         self.task_queue = task_queue
         self.async_task_id = async_task_id
@@ -100,7 +100,7 @@ class Orchestrator:
         self._context_store = None
 
     def register_agent(self, agent_type: str, agent: Any) -> None:
-        """No-op — agents are now registered via chat_models dict."""
+        """无操作 — 代理现通过 chat_models 字典注册。"""
         pass
 
     async def request_user_decision(
@@ -190,7 +190,7 @@ class Orchestrator:
                     agent_name="ManagerAgent",
                     event_type=EventType.AGENT_START.value,
                     level="INFO",
-                    message="ManagerAgent run started",
+                    message="ManagerAgent 运行已开始",
                     tool_output=user_request[:500],
                     llm_model=self.model,
                 )
@@ -314,7 +314,7 @@ class Orchestrator:
                             agent_name="ManagerAgent",
                             event_type=EventType.AGENT_FINISH.value,
                             level="INFO",
-                            message="ManagerAgent run completed",
+                            message="ManagerAgent 运行已完成",
                             tool_output=json.dumps(final_output or {}, ensure_ascii=False)[:500],
                             duration_ms=elapsed * 1000,
                             token_usage=TokenUsage(total_tokens=total_tokens),
@@ -340,15 +340,15 @@ class Orchestrator:
 
             except asyncio.TimeoutError:
                 elapsed = round(time.time() - start_time, 2)
-                root_span.set_status(Status(StatusCode.ERROR, "Graph execution timed out"))
-                root_span.record_exception(TimeoutError(f"Graph timed out after {timeout}s"))
+                root_span.set_status(Status(StatusCode.ERROR, "图执行超时"))
+                root_span.record_exception(TimeoutError(f"图在 {timeout}s 后超时"))
                 root_span.set_attribute("agent.status", "timeout")
                 record_agent_run(status="timeout", skill_name=skill_name, duration_s=elapsed)
                 return AgentResult(
                     task_id=task_id,
                     status=TaskStatus.FAILED,
                     agent_type="ManagerAgent",
-                    error="Graph execution timed out",
+                    error="图执行超时",
                     usage=UsageInfo(time_elapsed=elapsed),
                     agent_events={
                         "events": [
@@ -359,9 +359,9 @@ class Orchestrator:
                                 "agent_name": "ManagerAgent",
                                 "event_type": EventType.ERROR.value,
                                 "level": "ERROR",
-                                "message": "Graph execution timed out",
+                                "message": "图执行超时",
                                 "error_type": "TimeoutError",
-                                "error_message": "Graph execution timed out",
+                                "error_message": "图执行超时",
                             }
                         ]
                     },
@@ -372,7 +372,7 @@ class Orchestrator:
                 root_span.record_exception(e)
                 root_span.set_attribute("agent.status", "failed")
                 root_span.set_attribute("agent.error_type", type(e).__name__)
-                logger.error("Graph execution failed", error=str(e), exc_info=True)
+                logger.error("图执行失败", error=str(e), exc_info=True)
                 record_agent_run(status="failed", skill_name=skill_name, duration_s=elapsed)
                 return AgentResult(
                     task_id=task_id,
@@ -407,15 +407,14 @@ class Orchestrator:
         complex_keywords = [
             "图表", "架构图", "流程图", "思维导图", "配图", "封面",
             "多平台", "全平台", "报告", "分析报告", "行业分析",
-            "视频", "脚本", "分镜", "多格式", "全部",
+            "视频", "分镜", "多格式",
             "newsletter", "博客", "深度", "万字",
         ]
         medium_keywords = [
-            "搜索", "热点", "热搜", "趋势", "优化", "seo",
-            "小红书", "公众号", "知乎", "微博", "平台",
+            "搜索", "热点", "热搜", "趋势", "优化", "seo", "微博", "平台",
         ]
         simple_writing_keywords = [
-            "推广", "营销", "文案", "广告", "slogan", "copywriting",
+            "推广", "营销", "文案", "广告", "slogan",
         ]
         complex_count = sum(1 for kw in complex_keywords if kw in text)
         medium_count = sum(1 for kw in medium_keywords if kw in text)
@@ -429,82 +428,89 @@ class Orchestrator:
             return "simple"
         return "simple"
 
-    def _build_fallback_plan(self, user_request: str, complexity: str) -> ExecutionPlan:
-        """Emergency fallback when LLM planning fails. Returns ExecutionPlan dataclass."""
+    def _detect_platform(self, user_request: str) -> str | None:
+        """检测用户需求对应的平台，返回 code 或 None"""
+        from .platform_registry import detect_platform
+        return detect_platform(user_request)
+
+    def _build_fallback_plan(self, user_request: str) -> "ExecutionPlan":
+        """极简兜底：只用 WritingAgent + ReviewAgent。
+
+        Pipeline 完全由 LLM 自主决定，这里只在 LLM 不可用时保证系统能跑起来。
+        """
+        from .schemas import AgentTask, ExecutionPlan
+        from .platform_registry import PLATFORMS, detect_platform
+
         goal = user_request[:200]
+        detected = detect_platform(user_request)
+        p = PLATFORMS.get(detected) if detected else None
+        content_type = p.content_type if p else "blog"
 
-        if complexity == "simple":
-            task0 = AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[], can_parallel_with=[], retry_on_low_quality=True, priority="high")
-            task1 = AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[0], can_parallel_with=[], retry_on_low_quality=False, priority="medium")
-            return ExecutionPlan(goal=goal, reasoning="Fallback (simple): direct write + review", estimated_steps=2, tasks=[task0, task1], plan_method="template")
+        task0 = AgentTask(
+            id=str(uuid.uuid4()), agent_type="WritingAgent",
+            input={"topic": user_request, "content_type": content_type},
+            dependencies=[], can_parallel_with=[], retry_on_low_quality=True, priority="high",
+        )
+        task1 = AgentTask(
+            id=str(uuid.uuid4()), agent_type="ReviewAgent",
+            input={"topic": user_request, "content_type": content_type},
+            dependencies=[0], can_parallel_with=[], retry_on_low_quality=False, priority="medium",
+        )
+        platform_hint = f"（{p.name}）" if p else ""
+        return ExecutionPlan(
+            goal=goal, tasks=[task0, task1],
+            reasoning=f"兜底计划{platform_hint}：写作 + 审核",
+            estimated_steps=2, plan_method="template",
+        )
 
-        elif complexity == "medium":
-            task0 = AgentTask(id=str(uuid.uuid4()), agent_type="WebSearch", input={"query": user_request, "count": 5}, dependencies=[], can_parallel_with=[], retry_on_low_quality=False, priority="high")
-            task1 = AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[0], can_parallel_with=[], retry_on_low_quality=True, priority="high")
-            task2 = AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[1], can_parallel_with=[], retry_on_low_quality=True, priority="medium")
-            task3 = AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[1, 2], can_parallel_with=[], retry_on_low_quality=False, priority="medium")
-            return ExecutionPlan(goal=goal, reasoning="Fallback (medium): research + write + SEO + review", estimated_steps=4, tasks=[task0, task1, task2, task3], plan_method="template")
-
-        else:  # complex
-            task0 = AgentTask(id=str(uuid.uuid4()), agent_type="WebSearch", input={"query": user_request, "count": 8}, dependencies=[], can_parallel_with=[], retry_on_low_quality=False, priority="high")
-            task1 = AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": user_request, "content_type": "blog"}, dependencies=[0], can_parallel_with=[], retry_on_low_quality=True, priority="high")
-            task2 = AgentTask(id=str(uuid.uuid4()), agent_type="DiagramAgent", input={"topic": user_request, "diagram_type": "auto"}, dependencies=[1], can_parallel_with=[1], retry_on_low_quality=True, priority="medium")
-            task3 = AgentTask(id=str(uuid.uuid4()), agent_type="SEOAgent", input={"topic": user_request}, dependencies=[1], can_parallel_with=[], retry_on_low_quality=True, priority="medium")
-            task4 = AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": user_request}, dependencies=[1, 2, 3], can_parallel_with=[], retry_on_low_quality=False, priority="medium")
-            return ExecutionPlan(goal=goal, reasoning="Fallback (complex): research + write + diagram + SEO + review", estimated_steps=5, tasks=[task0, task1, task2, task3, task4], plan_method="template")
-
-    # Alias for backward compatibility with api.py
-    _build_template_plan = _build_fallback_plan
+    # 保留向后兼容（api.py 使用）
+    _build_default_plan = _build_fallback_plan
+    _build_platform_plan = _build_fallback_plan
 
     async def _decompose(self, user_request: str, context: dict) -> ExecutionPlan:
-        """Decompose user request into execution plan for /agent/plan preview.
+        """将用户请求分解为执行计划。
 
-        LLM is the primary path; template is emergency fallback.
+        LLM 是主路径，完全自主决定 Agent 组合和流程。
+        只有在 LLM 完全不可用时才用极简兜底（只保证系统能跑起来）。
         """
-        force_template = context.get("force_template", "")
-        if force_template in ("simple", "medium", "complex"):
-            return self._build_fallback_plan(user_request, force_template)
+        detected = self._detect_platform(user_request)
+        detected_name = ""
+        if detected:
+            from .platform_registry import PLATFORMS
+            detected_name = PLATFORMS.get(detected, type("", (), {"name": ""})()).name
 
-        complexity = self._classify_complexity(user_request)
-
-        # PRIMARY PATH: Always try LLM (not just for non-simple complexity)
-        if self.llm_gateway:
+        if self._planner_llm:
             try:
+                complexity = self._classify_complexity(user_request)
                 context_str = json.dumps(context, ensure_ascii=False, indent=2) if context else "{}"
-                prompt = f"""User request: {user_request}
+                prompt = f"""用户请求: {user_request}
 
-Complexity: {complexity}
-Additional context:
+复杂度: {complexity}
+检测到的平台: {detected_name or "无"}
+额外上下文:
 {context_str}
 
-Break this down into sub-tasks for the available agents."""
+请将其分解为可分配给可用代理的子任务。"""
 
-                response = await self.llm_gateway.generate_sync(
-                    messages=[
+                llm_result = await self._planner_llm.ainvoke(
+                    [
                         {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
                         {"role": "user", "content": prompt},
                     ],
-                    temperature=self.temperature,
-                    max_tokens=3000,
+                    config={"temperature": self.temperature},
                 )
-                plan = self._parse_plan(response, user_request)
-
-                # Validate task count before accepting
-                if complexity == "medium" and len(plan.tasks) > 8:
-                    logger.warning("LLM plan has %d tasks for medium, using template", len(plan.tasks))
-                    return self._build_fallback_plan(user_request, complexity)
-                if complexity == "complex" and len(plan.tasks) < 2:
-                    logger.warning("LLM plan has %d tasks for complex, using template", len(plan.tasks))
-                    return self._build_fallback_plan(user_request, complexity)
-
-                logger.info("LLM plan generated: %d tasks", len(plan.tasks))
+                plan = self._parse_plan(llm_result.content, user_request)
+                if len(plan.tasks) == 0:
+                    logger.warning("LLM 计划无任务，使用兜底方案")
+                    return self._build_fallback_plan(user_request)
+                logger.info("LLM 生成了计划: %d 个任务", len(plan.tasks))
                 return plan
 
             except Exception as e:
-                logger.warning("LLM decompose failed in orchestrator, using template", error=str(e))
+                logger.warning("编排器中 LLM 分解失败，使用兜底方案", error=str(e))
 
-        # FALLBACK PATH
-        return self._build_fallback_plan(user_request, complexity)
+        # LLM 不可用时的极简兜底
+        return self._build_fallback_plan(user_request)
 
     def _parse_plan(self, response: str, goal: str) -> ExecutionPlan:
         """解析 LLM 返回的计划 JSON"""
@@ -512,7 +518,7 @@ Break this down into sub-tasks for the available agents."""
             plan_dict = extract_plan_from_llm_response(response)
             is_valid, error_msg = validate_plan_structure(plan_dict)
             if not is_valid:
-                raise ValueError(f"Invalid plan structure: {error_msg}")
+                raise ValueError(f"无效的计划结构: {error_msg}")
 
             tasks = []
             for i, t in enumerate(plan_dict.get("tasks", [])):
@@ -534,10 +540,8 @@ Break this down into sub-tasks for the available agents."""
                 plan_method="llm",
             )
         except Exception as e:
-            logger.warning("Parse plan failed in orchestrator: %s", e)
-            task0 = AgentTask(id=str(uuid.uuid4()), agent_type="WritingAgent", input={"topic": goal}, dependencies=[], can_parallel_with=[], retry_on_low_quality=True, priority="high")
-            task1 = AgentTask(id=str(uuid.uuid4()), agent_type="ReviewAgent", input={"topic": goal}, dependencies=[0], can_parallel_with=[], retry_on_low_quality=False, priority="medium")
-            return ExecutionPlan(goal=goal, tasks=[task0, task1], reasoning=f"Auto-generated fallback plan (parse error: {e})", estimated_steps=2, plan_method="template")
+            logger.warning("编排器中解析计划失败: %s", e)
+            return self._build_fallback_plan(goal)
 
     async def _fallback_llm_call(
         self, task: AgentTask, context: dict, previous_results: dict[str, AgentResult]
@@ -550,19 +554,19 @@ Break this down into sub-tasks for the available agents."""
             res = previous_results[dep_id]
             previous_text += f"\n## Previous: {dep_id}\n{res.output.get('content', '')}"
 
-        prompt = f"Task type: {task.agent_type}\nInput: {json.dumps(task.input, ensure_ascii=False, indent=2)}"
+        prompt = f"任务类型: {task.agent_type}\n输入: {json.dumps(task.input, ensure_ascii=False, indent=2)}"
         if previous_text:
-            prompt += f"\n\nContext from previous tasks:{previous_text}"
+            prompt += f"\n\n前置任务的上下文:{previous_text}"
 
         try:
-            response = await self.llm_gateway.generate_sync(
-                messages=[
-                    {"role": "system", "content": f"You are acting as a {task.agent_type}. Complete the assigned task."},
+            llm_result = await self._planner_llm.ainvoke(
+                [
+                    {"role": "system", "content": f"你正在扮演一个 {task.agent_type}。请完成分配的任务。"},
                     {"role": "user", "content": prompt},
                 ],
-                temperature=0.7,
-                max_tokens=2000,
+                config={"temperature": 0.7},
             )
+            response = llm_result.content
 
             return AgentResult(
                 task_id=task.id,
@@ -578,7 +582,7 @@ Break this down into sub-tasks for the available agents."""
                             "agent_name": str(task.agent_type),
                             "event_type": EventType.AGENT_FINISH.value,
                             "level": "INFO",
-                            "message": "Fallback LLM task completed",
+                            "message": "兜底 LLM 任务已完成",
                             "tool_output": response[:500],
                         }
                     ]

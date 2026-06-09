@@ -66,7 +66,7 @@ async def handle_platform_adapter(task_input: dict, llm: ChatOpenAI, mcp_tools: 
                 "thinking_steps": [{"agent": "PlatformAdapter", "action": "adapt", "reasoning": f"Adapting for {target_platform}", "output_summary": f"Adapted for {target_platform}", "status": "done"}],
             }
     except Exception as e:
-        logger.warning(f"PlatformAdapter failed for {target_platform}: {e}")
+        logger.warning(f"PlatformAdapter 处理 {target_platform} 失败: {e}")
 
     return {
         "status": "completed", "agent_type": "PlatformAdapter",

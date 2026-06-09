@@ -87,7 +87,6 @@ def create_orchestrator(
                 agent.bind_tools(tool_registry)
 
     orchestrator = Orchestrator(
-        llm_gateway=router.get_gateway("ManagerAgent"),
         chat_models=chat_models,
         mcp_tools=mcp_tools,
         agent_registry=agent_registry,

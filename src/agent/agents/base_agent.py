@@ -74,7 +74,7 @@ class BaseAgent:
                 agent_name=self.name,
                 event_type=EventType.AGENT_START.value,
                 level="INFO",
-                message=f"{self.name} started",
+                message=f"{self.name} 已启动",
                 tool_output=json.dumps({k: v for k, v in task_input.items() if not str(k).startswith("_")}, ensure_ascii=False)[:500],
                 llm_model=getattr(self._llm, "model_name", getattr(self._llm, "model", None)),
             )
@@ -119,7 +119,7 @@ class BaseAgent:
                     storage.save(snapshot)
                     result["_snapshot_id"] = snapshot.snapshot_id
                 except Exception as e:
-                    logger.warning("Failed to persist snapshot: %s", e)
+                    logger.warning("快照持久化失败: %s", e)
 
             duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
             await emitter.emit(
@@ -129,7 +129,7 @@ class BaseAgent:
                     agent_name=self.name,
                     event_type=EventType.AGENT_FINISH.value,
                     level="INFO",
-                    message=f"{self.name} finished",
+                    message=f"{self.name} 已完成",
                     tool_output=json.dumps(result, ensure_ascii=False, default=str)[:500],
                     duration_ms=duration_ms,
                     token_usage=TokenUsage(total_tokens=int(result.get("tokens_used", 0) or 0)),
@@ -146,7 +146,7 @@ class BaseAgent:
                     agent_name=self.name,
                     event_type=EventType.ERROR.value,
                     level="ERROR",
-                    message=f"{self.name} failed",
+                    message=f"{self.name} 执行失败",
                     duration_ms=duration_ms,
                     error_type=type(exc).__name__,
                     error_message=str(exc),
@@ -196,9 +196,9 @@ class BaseAgent:
                 self.profile.name, tool_registry,
             )
             logger.info(
-                "Agent tools bound",
+                "Agent 工具绑定完成",
                 agent_name=self.name,
-                tool_preview=self._tool_descriptions[:100] if self._tool_descriptions else "none",
+                tool_preview=self._tool_descriptions[:100] if self._tool_descriptions else "无",
             )
 
     # ── 内部 ──

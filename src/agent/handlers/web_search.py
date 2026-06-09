@@ -15,11 +15,11 @@ _BOCHA_API_URL = "https://api.bochaai.com/v1/web-search"
 
 
 def _prepare_bocha_query(query: str) -> str:
-    """Prepare the search query before sending it to Bocha.
+    """准备发送给博查的搜索查询。
 
-    This is intentionally isolated so we can align it with DeepSeek's
-    query handling strategy without changing the WebSearch call flow.
-    For now, preserve the user's original wording exactly.
+    故意隔离处理，以便后续与 DeepSeek 的查询策略对齐，
+    而无需改变 WebSearch 的调用流程。
+    目前保持用户原始表述不变。
     """
     return (query or "").strip()
 
@@ -53,7 +53,7 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
         return {
             "status": "failed",
             "agent_type": "WebSearch",
-            "error": "BOCHA_API_KEY is not configured",
+            "error": "未配置博查搜索 API Key",
             "output": {
                 "content": "未配置博查搜索 API Key。请设置 `BOCHA_API_KEY` 后重试。",
                 "results": [],
@@ -80,7 +80,7 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
             summary=summary,
         )
     except Exception as exc:
-        logger.warning("Bocha search failed: %s", exc)
+        logger.warning("博查搜索失败: %s", exc)
         return {
             "status": "failed",
             "agent_type": "WebSearch",
@@ -218,7 +218,7 @@ async def handle_url_crawl(task_input: dict, llm: ChatOpenAI | None = None, mcp_
     if not url:
         return {
             "status": "failed", "agent_type": "URLCrawler",
-            "error": "No URL provided",
+            "error": "未提供 URL",
             "output": {"content": ""},
             "tokens_used": 0, "thinking_steps": [],
         }
@@ -263,12 +263,12 @@ async def handle_url_crawl(task_input: dict, llm: ChatOpenAI | None = None, mcp_
     except httpx.TimeoutException:
         return {
             "status": "failed", "agent_type": "URLCrawler",
-            "error": "Request timeout",
+            "error": "请求超时",
             "output": {"content": f"抓取超时：{url}"},
             "tokens_used": 0, "thinking_steps": [],
         }
     except Exception as e:
-        logger.warning(f"URLCrawler failed: {e}")
+        logger.warning(f"URLCrawler 执行失败: {e}")
         return {
             "status": "failed", "agent_type": "URLCrawler",
             "error": str(e),

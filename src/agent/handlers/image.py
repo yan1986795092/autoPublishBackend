@@ -34,7 +34,7 @@ async def handle_image(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None
                             "thinking_steps": [{"agent": "ImageAgent", "action": "配图生成完成", "reasoning": f"DALL-E 3 为「{topic}」生成配图", "output_summary": "DALL-E 3 生成成功", "status": "done"}],
                         }
             except Exception as e:
-                logger.warning(f"DALL-E failed: {e}")
+                logger.warning(f"DALL-E 调用失败: {e}")
 
     if provider == "stability":
         api_key = os.getenv("STABILITY_API_KEY")
@@ -56,7 +56,7 @@ async def handle_image(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None
                             "thinking_steps": [{"agent": "ImageAgent", "action": "配图生成完成", "reasoning": f"SDXL 为「{topic}」生成配图", "output_summary": "Stable Diffusion 生成成功", "status": "done"}],
                         }
             except Exception as e:
-                logger.warning(f"Stability failed: {e}")
+                logger.warning(f"Stable Diffusion 调用失败: {e}")
 
     return {
         "status": "completed", "agent_type": "ImageAgent",

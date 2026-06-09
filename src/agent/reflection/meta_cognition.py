@@ -75,7 +75,7 @@ async def meta_reflect(
         raw = response.content.strip()
         return _parse_meta_result(raw)
     except Exception as e:
-        logger.warning("meta_reflect LLM failed: %s", e)
+        logger.warning("meta_reflect LLM 失败: %s", e)
         return _rule_based_meta(goal, completed_count, total_count)
 
 

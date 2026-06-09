@@ -63,6 +63,7 @@ class AgentEvent:
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
+            "@timestamp": self.timestamp,
             "timestamp": self.timestamp,
             "session_id": self.session_id,
             "run_id": self.run_id,

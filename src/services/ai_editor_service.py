@@ -1,41 +1,32 @@
-from src.core.llm_gateway import LLMGateway
+"""AI Editor Service — 提供文章改写、扩写、翻译、SEO 等能力"""
+
+from __future__ import annotations
+
+import re
+from typing import AsyncGenerator
+
+from langchain_openai import ChatOpenAI
+
 from src.config import get_settings
+from src.core.model_router import ModelRouter
 
 
 class AIEditorService:
-    def __init__(self):
-        self._gateway: LLMGateway | None = None
+    def __init__(self, router: ModelRouter | None = None):
+        self._router = router or ModelRouter()
+        self._llm: ChatOpenAI = self._router.get_chat_model("AIEditorService")
         self._mock_mode = False
 
-    def _get_gateway(self) -> LLMGateway | None:
-        if not self._gateway:
-            settings = get_settings()
-            default_provider = settings.default_llm_provider
-            api_key = getattr(settings, f"{default_provider}_api_key", "")
-            model = getattr(settings, f"{default_provider}_model", "")
-            base_url = getattr(settings, f"{default_provider}_base_url", "")
-            if not api_key:
-                for provider in ["openai", "zhipu", "qwen"]:
-                    api_key = getattr(settings, f"{provider}_api_key", "")
-                    if api_key:
-                        default_provider = provider
-                        model = getattr(settings, f"{provider}_model", "")
-                        base_url = getattr(settings, f"{provider}_base_url", "")
-                        break
-            if not api_key:
-                self._mock_mode = True
-                return None
-            self._gateway = LLMGateway(
-                api_key=api_key,
-                provider=default_provider,
-                model=model,
-                base_url=base_url,
-            )
-        return self._gateway
+    def _is_mock_mode(self) -> bool:
+        try:
+            self._llm.invoke([{"role": "user", "content": "test"}])
+            return False
+        except Exception:
+            self._mock_mode = True
+            return True
 
     async def rewrite(self, text: str, instruction: str) -> str:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return "[Mock] 改写完成"
         prompt = f"""请根据以下要求改写这段文字，只返回改写后的内容，不要添加额外说明。
 
@@ -44,30 +35,22 @@ class AIEditorService:
 改写要求：{instruction}
 
 改写后的内容："""
-        return await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=2000,
-        )
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        return result.content
 
     async def expand(self, text: str) -> str:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return "[Mock] 扩写完成"
         prompt = f"""请扩写以下段落，丰富细节和论证，保持风格一致。只返回扩写后的内容。
 
 原文：{text}
 
 扩写后的内容："""
-        return await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
-            max_tokens=2000,
-        )
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        return result.content
 
     async def improve_tone(self, text: str, target_tone: str) -> str:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return "[Mock] 语调调整完成"
         tone_desc = {
             "professional": "专业严谨，使用行业术语，引用数据支撑",
@@ -80,30 +63,22 @@ class AIEditorService:
 原文：{text}
 
 调整后的内容："""
-        return await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.7,
-            max_tokens=2000,
-        )
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        return result.content
 
     async def summarize(self, text: str) -> str:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return "[Mock] 这是对原文的简要总结。"
         prompt = f"""请对以下内容进行简洁总结，保留核心观点。控制在 100 字以内。只返回总结内容。
 
 原文：{text}
 
 总结："""
-        return await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-            max_tokens=500,
-        )
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        return result.content
 
     async def translate(self, text: str, target_lang: str) -> str:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return f"[Mock] Translation to {target_lang}"
         lang_name = {"en": "英语", "zh": "中文", "ja": "日语", "ko": "韩语"}
         name = lang_name.get(target_lang, target_lang)
@@ -112,32 +87,23 @@ class AIEditorService:
 原文：{text}
 
 翻译："""
-        return await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=2000,
-        )
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        return result.content
 
     async def suggest_tags(self, text: str) -> list[str]:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return ["mock_tag_1", "mock_tag_2", "mock_tag_3"]
         prompt = f"""根据以下内容，提取 3-5 个最相关的标签。只返回标签列表，用逗号分隔，不要添加额外说明。
 
 内容：{text}
 
 标签："""
-        result = await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=200,
-        )
-        tags = [t.strip().lstrip("#") for t in result.replace("，", ",").split(",") if t.strip()]
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        tags = [t.strip().lstrip("#") for t in result.content.replace("，", ",").split(",") if t.strip()]
         return tags[:5]
 
     async def generate_headlines(self, text: str, count: int = 5) -> list[str]:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return [f"[Mock] 标题{i}" for i in range(1, min(count, 5) + 1)]
         prompt = f"""根据以下内容，生成 {count} 个吸引人的标题，每个标题控制在 20 字以内。
         要求：有吸引力、覆盖核心内容、适合社交媒体平台。
@@ -146,17 +112,12 @@ class AIEditorService:
         内容：{text}
 
         标题列表："""
-        result = await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.8,
-            max_tokens=300,
-        )
-        headlines = [line.strip().lstrip("0123456789.、. ") for line in result.split("\n") if line.strip()]
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        headlines = [line.strip().lstrip("0123456789.、. ") for line in result.content.split("\n") if line.strip()]
         return headlines[:count]
 
     async def adapt_content(self, text: str, source_platform: str, target_platform: str) -> str:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return f"[Mock] 内容从{source_platform}适配到{target_platform}"
         platform_names = {
             "xiaohongshu": "小红书",
@@ -184,15 +145,11 @@ class AIEditorService:
 {text}
 
 适配后的内容："""
-        return await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.5,
-            max_tokens=3000,
-        )
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        return result.content
 
     async def analyze_seo(self, text: str, platform: str = "xiaohongshu") -> dict:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return {
                 "overall": 60, "title_score": 50, "keyword_score": 50,
                 "readability_score": 70, "engagement_score": 50,
@@ -223,20 +180,15 @@ class AIEditorService:
         }}
 
         内容：{text}"""
-        import json
-        import re
 
-        result = await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=500,
-        )
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
 
         try:
-            json_match = re.search(r'\{.*\}', result, re.DOTALL)
+            json_match = re.search(r'\{.*\}', result.content, re.DOTALL)
             if json_match:
+                import json
                 return json.loads(json_match.group())
-        except (json.JSONDecodeError, AttributeError):
+        except (Exception):
             pass
 
         return {
@@ -249,8 +201,7 @@ class AIEditorService:
         }
 
     async def expand_keywords(self, seed_keywords: str) -> list[str]:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return [f"mock_{seed_keywords}_keyword_{i}" for i in range(1, 6)]
         prompt = f"""作为 SEO 关键词研究专家，请根据以下种子关键词，扩展出 10-15 个长尾关键词。
 
@@ -263,17 +214,12 @@ class AIEditorService:
 种子关键词：{seed_keywords}
 
 只返回关键词列表，每行一个，不要编号和额外说明："""
-        result = await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.6,
-            max_tokens=400,
-        )
-        keywords = [line.strip().lstrip("0123456789.、. -") for line in result.split("\n") if line.strip() and len(line.strip()) > 2]
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        keywords = [line.strip().lstrip("0123456789.、. -") for line in result.content.split("\n") if line.strip() and len(line.strip()) > 2]
         return keywords[:15]
 
     async def analyze_viral_potential(self, text: str) -> dict:
-        gateway = self._get_gateway()
-        if self._mock_mode:
+        if self._is_mock_mode():
             return {
                 "overall": 65, "topic_heat": 60, "headline_appeal": 60,
                 "content_quality": 70, "engagement_potential": 60, "share_potential": 60,
@@ -304,20 +250,15 @@ class AIEditorService:
 }}
 
 内容：{text}"""
-        import json
-        import re
 
-        result = await gateway.generate_sync(
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0.3,
-            max_tokens=500,
-        )
+        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
 
         try:
-            json_match = re.search(r'\{.*\}', result, re.DOTALL)
+            json_match = re.search(r'\{.*\}', result.content, re.DOTALL)
             if json_match:
+                import json
                 return json.loads(json_match.group())
-        except (json.JSONDecodeError, AttributeError):
+        except (Exception):
             pass
 
         return {

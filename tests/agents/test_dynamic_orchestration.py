@@ -41,7 +41,7 @@ class TestFallbackPlan:
         assert "ReviewAgent" in agent_types
 
     def test_pure_copywriting_request_should_classify_simple(self):
-        orch = Orchestrator(llm_gateway=None)
+        orch = Orchestrator()
         assert orch._classify_complexity("为一款智能笔记应用写产品推广文案") == "simple"
 
     def test_complex_includes_diagram_agent(self):
@@ -315,29 +315,31 @@ class TestOrchestratorLLMPrimary:
     @pytest.mark.asyncio
     async def test_decompose_simple_uses_llm(self):
         """Orchestrator._decompose 对 simple 复杂度也用 LLM"""
-        mock_gateway = AsyncMock()
-        mock_gateway.generate_sync = AsyncMock(return_value=json.dumps({
-            "goal": "simple blog",
-            "reasoning": "dynamic plan",
-            "tasks": [
-                {"agent_type": "WritingAgent", "input": {"topic": "test"}, "dependencies": []},
-                {"agent_type": "ReviewAgent", "input": {"topic": "test"}, "dependencies": [0]},
-            ],
-        }))
-        orch = Orchestrator(llm_gateway=mock_gateway)
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(return_value=MagicMock(
+            content=json.dumps({
+                "goal": "simple blog",
+                "reasoning": "dynamic plan",
+                "tasks": [
+                    {"agent_type": "WritingAgent", "input": {"topic": "test"}, "dependencies": []},
+                    {"agent_type": "ReviewAgent", "input": {"topic": "test"}, "dependencies": [0]},
+                ],
+            })
+        ))
+        orch = Orchestrator(chat_models={"ManagerAgent": mock_llm})
 
         result = await orch._decompose("写博客", {})
 
-        mock_gateway.generate_sync.assert_called_once()
+        mock_llm.ainvoke.assert_called_once()
         assert result.plan_method == "llm"
         assert len(result.tasks) == 2
 
     @pytest.mark.asyncio
     async def test_decompose_fallback_on_error(self):
         """Orchestrator._decompose 在 LLM 失败时回退"""
-        mock_gateway = AsyncMock()
-        mock_gateway.generate_sync = AsyncMock(side_effect=Exception("fail"))
-        orch = Orchestrator(llm_gateway=mock_gateway)
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock(side_effect=Exception("fail"))
+        orch = Orchestrator(chat_models={"ManagerAgent": mock_llm})
 
         result = await orch._decompose("写博客", {})
 
@@ -346,13 +348,13 @@ class TestOrchestratorLLMPrimary:
     @pytest.mark.asyncio
     async def test_decompose_force_template_skips_llm(self):
         """force_template 参数跳过 LLM"""
-        mock_gateway = AsyncMock()
-        mock_gateway.generate_sync = AsyncMock()
-        orch = Orchestrator(llm_gateway=mock_gateway)
+        mock_llm = AsyncMock()
+        mock_llm.ainvoke = AsyncMock()
+        orch = Orchestrator(chat_models={"ManagerAgent": mock_llm})
 
         result = await orch._decompose("写博客", {"force_template": "simple"})
 
-        mock_gateway.generate_sync.assert_not_called()
+        mock_llm.ainvoke.assert_not_called()
         assert result.plan_method == "template"
         assert len(result.tasks) == 2
 

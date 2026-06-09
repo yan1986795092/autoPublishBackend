@@ -43,7 +43,10 @@ class ModelRouter:
         return defaults.get(provider, "gpt-4o-mini")
 
     def get_chat_model(self, agent_type: str) -> ChatOpenAI:
-        """返回 ChatOpenAI 实例（base_url 指向 LLM Gateway 的 OpenAI 兼容 `/v1` 根路径）。"""
+        """返回 ChatOpenAI 实例（base_url 指向 LLM Gateway 的 OpenAI 兼容 `/v1` 根路径）。
+
+        支持所有注册的 Agent 类型，也支持 Service 层传入的任意 agent_type（走默认配置）。
+        """
         if agent_type in self._cache:
             return self._cache[agent_type]
 

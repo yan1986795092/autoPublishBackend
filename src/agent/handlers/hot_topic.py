@@ -32,7 +32,7 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | 
                 if topics:
                     source = "weibo"
         except Exception as e:
-            logger.warning(f"Weibo hot topics failed: {e}")
+            logger.warning(f"微博热搜获取失败: {e}")
 
     if platform == "zhihu" or (not topics and platform != "weibo"):
         try:
@@ -50,7 +50,7 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | 
                     topics = zhihu_topics
                     source = "zhihu"
         except Exception as e:
-            logger.warning(f"Zhihu hot topics failed: {e}")
+            logger.warning(f"知乎热搜获取失败: {e}")
 
     if not topics:
         topics = [{"title": f"#热点话题{i}#", "heat": f"🔥 {500 - i * 30}万", "tag": "社会"} for i in range(count)]

@@ -621,10 +621,22 @@ class ContentService:
             parts.append(f"风格指南：{persona.style_notes}")
         return "\n".join(parts)
 
+    def _get_llm_for_request(self, provider: str, api_key: str, model: str) -> "ChatOpenAI":
+        """经 ModelRouter 统一入口获取 LLM（流向 LLM Gateway）"""
+        from langchain_openai import ChatOpenAI
+        _GATEWAY_OPENAI_BASE_URL = "http://localhost:9010/v1"
+        return ChatOpenAI(
+            model=model,
+            api_key=api_key,
+            base_url=_GATEWAY_OPENAI_BASE_URL,
+            temperature=0.7,
+            streaming=True,
+            timeout=120.0,
+        )
+
     async def generate_content(self, user_id: str, request: GenerateRequest) -> dict:
         """生成内容"""
         from src.core.prompt_engine import prompt_engine
-        from src.core.llm_gateway import LLMGateway
         from src.config import get_settings
 
         settings = get_settings()
@@ -703,14 +715,11 @@ class ContentService:
             result = self._generate_mock_content(request.topic, request.platform_code)
             model_name = "mock"
         else:
-            # 真实 API 调用
-            gateway = LLMGateway(api_key=api_key, provider=provider, model=model_name)
-            full_content = ""
-
+            # 真实 API 调用 — 经 ModelRouter 统一入口到 Gateway
+            llm = self._get_llm_for_request(provider, api_key, model_name)
             temperature = variables["creativity"]
-            async for chunk in gateway.generate(messages, temperature=temperature):
-                full_content += chunk
-
+            llm_result = await llm.ainvoke(messages)
+            full_content = llm_result.content
             result = self._parse_generated_content(full_content)
 
         # 保存到数据库
@@ -764,7 +773,6 @@ class ContentService:
     ) -> AsyncGenerator[str, None]:
         """SSE 流式生成内容（逐 token 推送）"""
         from src.core.prompt_engine import prompt_engine
-        from src.core.llm_gateway import LLMGateway
         from src.config import get_settings
 
         settings = get_settings()
@@ -849,12 +857,15 @@ class ContentService:
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
                     await asyncio.sleep(0.01)
             else:
-                gateway = LLMGateway(api_key=api_key, provider=provider, model=model_name)
+                llm = self._get_llm_for_request(provider, api_key, model_name)
                 temperature = variables["creativity"]
 
-                async for chunk in gateway.generate(messages, temperature=temperature):
-                    full_content += chunk
-                    yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
+                async for event in llm.astream_events(messages, config={"temperature": temperature}):
+                    if event["event"] == "chat_model_stream":
+                        content = event["data"]["chunk"].content
+                        if content:
+                            full_content += content
+                            yield f"data: {json.dumps({'type': 'token', 'content': content})}\n\n"
 
                 parsed = self._parse_generated_content(full_content)
                 title = parsed["title"]

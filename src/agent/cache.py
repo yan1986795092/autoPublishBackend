@@ -93,7 +93,7 @@ class AgentCache:
         self._misses = 0
 
     def _make_key(self, agent_type: str, task_input: dict) -> str:
-        # Sanitize: remove non-serializable objects (e.g. StructuredTool) before hashing
+        # 清理：哈希前移除不可序列化的对象（如 StructuredTool）
         sanitized = self._sanitize_for_json(task_input)
         normalized = json.dumps(sanitized, sort_keys=True, ensure_ascii=False)
         input_hash = hashlib.sha256(normalized.encode()).hexdigest()[:16]
@@ -101,7 +101,7 @@ class AgentCache:
 
     @staticmethod
     def _sanitize_for_json(obj: object) -> object:
-        """Recursively remove non-JSON-serializable objects."""
+        """递归移除不可 JSON 序列化的对象。"""
         if obj is None or isinstance(obj, (str, int, float, bool)):
             return obj
         if isinstance(obj, dict):

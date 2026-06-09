@@ -119,7 +119,7 @@ async def run_agent(
     except ValidationError as e:
         raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Agent error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Agent 错误: {str(e)}")
 
 
 @router.post("/agent/plan", response_model=AgentRunResponse)
@@ -298,7 +298,7 @@ async def repurpose_content(
                         )
                         platform_outputs[platform_code] = platform_task.output.get("content", output_content)
                     except Exception as e:
-                        logger.warning(f"Platform adapt failed for {platform_code}: {e}")
+                        logger.warning(f"平台适配失败 {platform_code}: {e}")
                         platform_outputs[platform_code] = output_content
 
             sections.append({
@@ -377,7 +377,7 @@ async def get_agent_task_status(
     """查询异步任务状态"""
     task = task_queue.get_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="未找到任务")
     return AgentAsyncStatusResponse(
         success=True,
         data=task.to_dict(),
@@ -408,7 +408,7 @@ async def cancel_agent_task(
     """取消异步任务"""
     task = task_queue.get_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="未找到任务")
     success = task_queue.cancel_task(task_id)
     return {
         "success": success,
@@ -428,9 +428,9 @@ async def submit_decision(
     """提交用户决策，让等待中的 Agent 任务继续执行"""
     task = task_queue.get_task(task_id)
     if not task:
-        raise HTTPException(status_code=404, detail="Task not found")
+        raise HTTPException(status_code=404, detail="未找到任务")
     if task.state.value != "awaiting_input":
-        raise HTTPException(status_code=400, detail="Task is not awaiting input")
+        raise HTTPException(status_code=400, detail="任务不在等待输入状态")
 
     success = task_queue.submit_decision(
         task_id=task_id,
@@ -438,14 +438,14 @@ async def submit_decision(
         choice=request.choice,
     )
     if not success:
-        raise HTTPException(status_code=400, detail="Decision rejected")
+        raise HTTPException(status_code=400, detail="决策被拒绝")
 
     return {
         "success": True,
         "data": {
             "task_id": task_id,
             "state": "running",
-            "message": "Decision accepted, task resumed",
+            "message": "决策已接受，任务已恢复",
         },
     }
 
@@ -469,8 +469,7 @@ async def agent_stream(
     核心改进：不再轮询 TaskQueue，改为订阅 EventBus，事件驱动的实时推送。
     支持事件类型：plan, task_created, thinking_step, llm_chunk, reasoning, progress, result, error, done
     """
-
-    task_id_str = ""  # actual task_id set after enqueue
+    task_id_str = ""  # 实际 task_id 在入队后设置
 
     async def event_generator() -> AsyncGenerator[dict, None]:
         nonlocal task_id_str
@@ -493,7 +492,7 @@ async def agent_stream(
                             "skill_user_template": skill_data.get("user_prompt_template", ""),
                         }
                     else:
-                        logger.warning(f"Skill not found: {request.skill_id}")
+                        logger.warning(f"未找到 Skill: {request.skill_id}")
                 finally:
                     db.close()
 
@@ -505,7 +504,7 @@ async def agent_stream(
                 template = template.replace("{content}", user_prompt)
                 user_prompt = template
 
-            # 1. 生成执行计划（支持 Skill preset_plan 覆盖）
+            # 1. 生成执行计划（支持 Skill preset_plan + 平台感知覆盖）
             orchestrator = _create_orchestrator()
 
             # 优先使用 skill preset_plan
@@ -516,11 +515,12 @@ async def agent_stream(
                     complexity=preset.get("complexity", "medium"),
                 )
             else:
-                complexity = orchestrator._classify_complexity(user_prompt)
-                plan = orchestrator._build_template_plan(
-                    user_request=user_prompt,
-                    complexity=complexity,
-                )
+                # 平台感知：检测平台类型，使用平台注册表
+                platform_code = orchestrator._detect_platform(user_prompt)
+                if platform_code:
+                    plan = orchestrator._build_platform_plan(user_prompt, platform_code)
+                else:
+                    plan = orchestrator._build_default_plan(user_prompt)
             yield {
                 "event": "plan",
                 "data": json.dumps({
@@ -741,7 +741,7 @@ async def crawl_url(
         }, llm=None)
 
         if crawl_result.get("status") == "failed":
-            return AgentRunResponse(success=False, error=crawl_result.get("error", "Crawl failed"))
+            return AgentRunResponse(success=False, error=crawl_result.get("error", "抓取失败"))
 
         if not request.analyze:
             return AgentRunResponse(success=True, data=crawl_result)
@@ -758,7 +758,7 @@ async def crawl_url(
             data={"crawl": crawl_result, "analysis": result.to_dict()},
         )
     except Exception as e:
-        logger.error(f"crawl_url failed: {e}", exc_info=True)
+        logger.error(f"crawl_url 失败: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -844,7 +844,7 @@ async def invalidate_cache(
     agent_cache.invalidate(agent_type)
     if not agent_type:
         llm_cache.invalidate()
-    return AgentRunResponse(success=True, data={"message": "Cache invalidated"})
+    return AgentRunResponse(success=True, data={"message": "缓存已清空"})
 
 
 @router.get("/agent/metrics")
@@ -896,7 +896,7 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
             if task is None:
                 await websocket.send_json({
                     "type": "error",
-                    "message": "Task not found",
+                    "message": "未找到任务",
                 })
                 break
 

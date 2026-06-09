@@ -52,7 +52,7 @@ class RedisTaskQueue:
                 self._redis = aioredis.from_url(self._redis_url, decode_responses=True)
                 await self._redis.ping()
             except Exception as e:
-                logger.warning(f"Redis connection failed: {e}, falling back to in-memory queue")
+                logger.warning(f"Redis 连接失败: {e}，回退到内存队列")
                 self._available = False
                 return None
         return self._redis
@@ -85,7 +85,7 @@ class RedisTaskQueue:
             await pipe.execute()
             return task
 
-        # Fallback to in-memory
+        # 回退到内存队列
         from .task_queue import task_queue
         async_task = await task_queue.enqueue(prompt=prompt, user_id=user_id)
         return async_task.to_dict()
