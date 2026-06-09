@@ -78,6 +78,16 @@ class AgentRegistry:
         """查找可缓存的 Agent 列表"""
         return [name for name, a in self._agents.items() if a.profile.cacheable]
 
+    def find_by_communication_enabled(self) -> list[str]:
+        """查找启用了通信能力的 Agent 列表"""
+        return [
+            name for name, a in self._agents.items()
+            if a.profile.tools_enabled or name in {
+                "WritingAgent", "EditorAgent", "ReviewAgent",
+                "SEOAgent", "ResearcherAgent",
+            }
+        ]
+
     def find_tool_enabled(self) -> list[str]:
         """查找可使用 MCP 工具的 Agent 列表"""
         return [name for name, a in self._agents.items() if a.profile.tools_enabled]

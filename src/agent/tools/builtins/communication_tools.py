@@ -14,12 +14,15 @@ from ..base import AgentTool, AgentToolMeta
 logger = logging.getLogger(__name__)
 
 
-def create_communication_tools(message_bus: Any) -> list[AgentTool]:
+def create_communication_tools(message_bus: Any, agent_type: str = "") -> list[AgentTool]:
     """创建所有通信相关工具
 
     Args:
         message_bus: MessageBus 实例（由 factory 传入）
+        agent_type: 当前 Agent 类型（用于 mailbox 感知，默认为空时使用全局 mailbox）
     """
+    # 闭包捕获的 agent_type，可在 _check_messages 中使用
+    _current_agent = agent_type
 
     async def _send_message(
         to_agent: str,
@@ -73,7 +76,7 @@ def create_communication_tools(message_bus: Any) -> list[AgentTool]:
             return "错误：MessageBus 未启用。"
 
         try:
-            pending = message_bus.get_pending("")  # will be filtered by agent_type at runtime
+            pending = message_bus.get_pending(_current_agent)
             if not pending:
                 return "无待处理消息。"
             lines = [f"你有 {len(pending)} 条待处理消息："]
@@ -103,13 +106,48 @@ def create_communication_tools(message_bus: Any) -> list[AgentTool]:
             lines = [f"对话 {conversation_id} 共 {len(history)} 条消息："]
             for msg in history:
                 lines.append(
-                    f"  [{msg.timestamp}] {msg.from_agent} → {msg.to_agent}: "
+                    f"  [{msg.created_at}] {msg.from_agent} → {msg.to_agent}: "
                     f"{str(msg.content)[:200]}"
                 )
             return "\n".join(lines)
         except Exception as e:
             logger.warning("get_conversation 失败: %s", e)
             return f"对话获取失败: {e}"
+
+    async def _peer_call(
+        target_agent: str,
+        content: str,
+        context: str = "",
+    ) -> str:
+        """向对等 Agent 发起协作请求并等待回复
+
+        Args:
+            target_agent: 目标 Agent 名称（如 WritingAgent / EditorAgent）
+            content: 请求内容（描述你需要什么帮助）
+            context: 额外的上下文信息（可选）
+        """
+        if message_bus is None:
+            return "错误：MessageBus 未启用，无法进行对等协作。"
+
+        try:
+            from ..communication.models import Message, MessageType
+
+            msg_id = str(uuid.uuid4())
+            msg = Message(
+                msg_id=msg_id,
+                from_agent=_current_agent,
+                to_agent=target_agent,
+                msg_type=MessageType.REQUEST,
+                content={"text": content, "context": context},
+                conversation_id=f"peer-{msg_id[:8]}",
+            )
+            reply = await message_bus.send_and_wait(msg, timeout=30.0)
+            if reply is None:
+                return f"错误：{target_agent} 未在 30.0s 内回复。"
+            reply_content = reply.content.get("text", "") if isinstance(reply.content, dict) else str(reply.content)
+            return f"[{target_agent} 回复]: {reply_content}"
+        except Exception as e:
+            return f"对等协作失败: {e}"
 
     return [
         AgentTool(
@@ -139,6 +177,16 @@ def create_communication_tools(message_bus: Any) -> list[AgentTool]:
             meta=AgentToolMeta(
                 category="communication",
                 agent_types=["ManagerAgent"],
+                builtin=True,
+            ),
+        ),
+        AgentTool(
+            name="peer_call",
+            description="向对等 Agent 发起协作请求并等待回复（如 WritingAgent→EditorAgent 润色、EditorAgent→ResearcherAgent 事实核查）",
+            execute_func=_peer_call,
+            meta=AgentToolMeta(
+                category="communication",
+                agent_types=["WritingAgent", "EditorAgent", "ReviewAgent", "SEOAgent"],
                 builtin=True,
             ),
         ),
