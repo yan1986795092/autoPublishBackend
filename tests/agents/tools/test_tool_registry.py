@@ -234,11 +234,12 @@ class TestCreateBuiltinTools:
 
     def test_create_communication_tools(self):
         tools = create_communication_tools(message_bus=None)
-        assert len(tools) == 3
+        assert len(tools) == 4
         names = [t.name for t in tools]
         assert "send_message" in names
         assert "check_messages" in names
         assert "get_conversation" in names
+        assert "peer_call" in names
 
         for t in tools:
             assert t.meta.builtin is True
@@ -393,7 +394,7 @@ class TestMemoryCommunicationReflectionTools:
         return r
 
     def test_total_count(self, full_registry):
-        assert full_registry.count == 12  # 3 memory + 3 comm + 2 reflection + 4 hitl
+        assert full_registry.count == 13  # 3 memory + 4 comm + 2 reflection + 4 hitl
 
     def test_writer_agent_tools(self, full_registry):
         tools = full_registry.get_for_agent("WritingAgent")
