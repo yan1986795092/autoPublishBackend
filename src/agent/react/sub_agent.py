@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import time
 import uuid
 from typing import Any, Optional
@@ -26,7 +25,7 @@ from ..communication.bus import MessageBus
 from ..tools.registry import ToolRegistry
 from langchain_openai import ChatOpenAI
 
-logger = logging.get_logger(__name__)
+logger = structlog.get_logger(__name__)
 
 
 class SubAgent(BaseAgent):
