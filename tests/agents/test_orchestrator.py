@@ -310,6 +310,7 @@ class TestOrchestratorDecompose:
     @pytest.mark.asyncio
     async def test_classify_complexity(self, orchestrator):
         assert orchestrator._classify_complexity("写一篇笔记") == "simple"
+        assert orchestrator._classify_complexity("为一款智能笔记应用写产品推广文案") == "simple"
         assert orchestrator._classify_complexity("搜索AI趋势并优化小红书文章") == "medium"
         assert orchestrator._classify_complexity("生成带架构图和分析报告的技术博客") == "complex"
         assert orchestrator._classify_complexity("你好") == "simple"

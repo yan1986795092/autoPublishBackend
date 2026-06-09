@@ -132,6 +132,42 @@ class PlatformAccount(Base):
     platform = relationship("Platform", back_populates="accounts")
 
 
+class ChatConversation(Base):
+    __tablename__ = "chat_conversations"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    title = Column(String(255), nullable=False, default="新对话")
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    user = relationship("User", backref="chat_conversations")
+    messages = relationship(
+        "ChatMessageRecord",
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+    )
+
+
+class ChatMessageRecord(Base):
+    __tablename__ = "chat_message_records"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    conversation_id = Column(
+        String(36), ForeignKey("chat_conversations.id"), nullable=False, index=True
+    )
+    role = Column(String(20), nullable=False)
+    content = Column(Text, nullable=False)
+    status = Column(String(20), default="completed")
+    result_json = Column(Text)
+    task_id = Column(String(36), nullable=True)
+    plan_json = Column(Text)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
+
+    conversation = relationship("ChatConversation", back_populates="messages")
+
+
 class PublishRecord(Base):
     __tablename__ = "publish_records"
 

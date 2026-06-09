@@ -40,6 +40,10 @@ class TestFallbackPlan:
         assert "SEOAgent" in agent_types
         assert "ReviewAgent" in agent_types
 
+    def test_pure_copywriting_request_should_classify_simple(self):
+        orch = Orchestrator(llm_gateway=None)
+        assert orch._classify_complexity("为一款智能笔记应用写产品推广文案") == "simple"
+
     def test_complex_includes_diagram_agent(self):
         plan = _build_fallback_plan("创建微服务架构全面指南", "complex")
         agent_types = {t["agent_type"] for t in plan["tasks"]}

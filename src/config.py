@@ -1,7 +1,16 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field, AliasChoices
 from functools import lru_cache
+from pathlib import Path
 from typing import Optional
+
+
+def _env_file_path() -> Path:
+    """Return absolute path to backend/.env, resolved from this file's location.
+
+    Works regardless of the process current working directory.
+    """
+    return Path(__file__).resolve().parent.parent / ".env"
 
 
 class Settings(BaseSettings):
@@ -30,6 +39,8 @@ class Settings(BaseSettings):
     zhipu_api_key: Optional[str] = None
     zhipu_model: str = "glm-4-flash"
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+
+    bocha_api_key: Optional[str] = Field(default=None, validation_alias=AliasChoices("bocha_api_key", "BOCHA_API_KEY", "BOCHA_SEARCH_API_KEY"))
 
     default_llm_provider: str = "zhipu"
     default_temperature: float = 0.7
@@ -137,7 +148,11 @@ class Settings(BaseSettings):
         "URLCrawler": 0,
     }
 
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_file=str(_env_file_path()),
+        env_file_encoding="utf-8",
+        extra="ignore",
+    )
 
 
 @lru_cache()

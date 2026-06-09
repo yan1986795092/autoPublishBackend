@@ -26,6 +26,7 @@ from typing import Any, Callable, Optional
 from langchain_core.messages import AIMessage, BaseMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
+from src.logging_shared import AgentEvent, EventType, TokenUsage, get_agent_event_emitter
 from src.logging_shared.config import get_logger
 
 logger = get_logger("agent.tool_utils")
@@ -101,6 +102,10 @@ async def execute_tool_calls(
     tool_calls: list[dict],
     tool_registry: Any,
     messages: list[BaseMessage],
+    *,
+    agent_name: str = "",
+    session_id: str = "default",
+    run_id: str = "",
 ) -> list[BaseMessage]:
     """执行 tool_calls 并追加 ToolMessage 到消息列表
 
@@ -108,18 +113,19 @@ async def execute_tool_calls(
         tool_calls: LLM 返回的 tool_calls 列表
         tool_registry: ToolRegistry 实例
         messages: 当前消息列表（会被追加 ToolMessage）
-
+    
     Returns:
         追加了 ToolMessage 后的消息列表
     """
     import json as _json
+
+    emitter = get_agent_event_emitter()
 
     for tc in tool_calls:
         tool_name = tc.get("name", "")
         raw_args = tc.get("args", {})
         tool_id = tc.get("id", "") or tc.get("tool_call_id", "")
 
-        # args 可能是 dict 或 JSON 字符串，统一转为 dict
         if isinstance(raw_args, str):
             try:
                 tool_args = _json.loads(raw_args)
@@ -129,6 +135,21 @@ async def execute_tool_calls(
             tool_args = raw_args
         else:
             tool_args = {"_raw": str(raw_args)}
+
+        started_at = _time.monotonic()
+        await emitter.emit(
+            AgentEvent(
+                session_id=session_id,
+                run_id=run_id,
+                parent_span_id=tool_id,
+                agent_name=agent_name or "tool-caller",
+                event_type=EventType.TOOL_CALL.value,
+                level="INFO",
+                message=f"Calling tool {tool_name}",
+                tool_name=tool_name,
+                tool_input=tool_args,
+            )
+        )
 
         if tool_registry is None:
             result_text = f"错误: 工具系统未启用"
@@ -144,6 +165,22 @@ async def execute_tool_calls(
                     logger.warning("工具执行失败 %s: %s", tool_name, e)
                     result_text = f"错误: {e}"
 
+        duration_ms = round((_time.monotonic() - started_at) * 1000, 2)
+        await emitter.emit(
+            AgentEvent(
+                session_id=session_id,
+                run_id=run_id,
+                parent_span_id=tool_id,
+                agent_name=agent_name or "tool-caller",
+                event_type=EventType.TOOL_RESULT.value,
+                level="INFO",
+                message=f"Tool {tool_name} completed",
+                tool_name=tool_name,
+                tool_output=str(result_text),
+                duration_ms=duration_ms,
+            )
+        )
+
         messages.append(ToolMessage(
             content=str(result_text)[:4000],
             tool_call_id=tool_id,
@@ -158,6 +195,8 @@ async def call_llm(
     *,
     tool_registry: Any = None,
     agent_type: str = "",
+    session_id: str = "default",
+    run_id: str = "",
     stream: bool = False,
     on_chunk: Optional[Callable] = None,
     max_tool_rounds: int = MAX_TOOL_ROUNDS,
@@ -199,11 +238,47 @@ async def call_llm(
         _start = _time.monotonic()
         result = await llm.ainvoke(messages)
         _record_llm_to_collector(collector, llm, messages, result, _start)
-        return result.content or ""
+        duration_ms = round((_time.monotonic() - _start) * 1000, 2)
+        content = result.content or ""
+        usage = getattr(result, "usage_metadata", {}) or getattr(result, "usage", {}) or {}
+        await get_agent_event_emitter().emit(
+            AgentEvent(
+                session_id=session_id,
+                run_id=run_id,
+                agent_name=agent_type or "llm",
+                event_type=EventType.TOOL_RESULT.value,
+                level="INFO",
+                message=f"LLM response generated for {agent_type or 'llm'}",
+                tool_name="langchain_llm",
+                tool_output=content,
+                duration_ms=duration_ms,
+                token_usage=TokenUsage(
+                    prompt_tokens=int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0),
+                    completion_tokens=int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0),
+                    total_tokens=int(usage.get("total_tokens", 0) or 0),
+                ),
+                llm_model=getattr(llm, "model_name", getattr(llm, "model", None)),
+            )
+        )
+        return content
 
     # ── 有工具：绑定工具并执行工具循环 ──
     tool_llm = bind_tools(llm, tool_registry, agent_type)
     current_messages = list(messages)
+    emitter = get_agent_event_emitter()
+
+    await emitter.emit(
+        AgentEvent(
+            session_id=session_id,
+            run_id=run_id,
+            agent_name=agent_type or "llm",
+            event_type=EventType.TOOL_CALL.value,
+            level="INFO",
+            message=f"LLM tool-capable request started for {agent_type or 'llm'}",
+            tool_name="langchain_llm",
+            llm_model=getattr(tool_llm, "model_name", getattr(tool_llm, "model", None)),
+        )
+    )
 
     # Phase 1: 工具调用循环（非流式）
     for _round in range(max_tool_rounds):
@@ -216,6 +291,27 @@ async def call_llm(
         if not tool_calls:
             # 纯文本回复 — 结束工具循环
             final_text = response.content or ""
+            usage = getattr(response, "usage_metadata", {}) or getattr(response, "usage", {}) or {}
+            duration_ms = round((_time.monotonic() - _start) * 1000, 2)
+            await emitter.emit(
+                AgentEvent(
+                    session_id=session_id,
+                    run_id=run_id,
+                    agent_name=agent_type or "llm",
+                    event_type=EventType.TOOL_RESULT.value,
+                    level="INFO",
+                    message=f"LLM tool-capable response completed for {agent_type or 'llm'}",
+                    tool_name="langchain_llm",
+                    tool_output=final_text,
+                    duration_ms=duration_ms,
+                    token_usage=TokenUsage(
+                        prompt_tokens=int(usage.get("input_tokens", usage.get("prompt_tokens", 0)) or 0),
+                        completion_tokens=int(usage.get("output_tokens", usage.get("completion_tokens", 0)) or 0),
+                        total_tokens=int(usage.get("total_tokens", 0) or 0),
+                    ),
+                    llm_model=getattr(tool_llm, "model_name", getattr(tool_llm, "model", None)),
+                )
+            )
             # 如果请求了流式，用流式重新生成文本（给前端实时感）
             if stream and on_chunk:
                 return await _stream_final(llm, current_messages, on_chunk)
@@ -223,7 +319,12 @@ async def call_llm(
 
         # 执行工具调用
         current_messages = await execute_tool_calls(
-            tool_calls, tool_registry, current_messages,
+            tool_calls,
+            tool_registry,
+            current_messages,
+            agent_name=agent_type,
+            session_id=session_id,
+            run_id=run_id,
         )
 
     # 超轮次兜底

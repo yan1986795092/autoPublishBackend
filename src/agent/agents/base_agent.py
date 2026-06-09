@@ -6,11 +6,16 @@ Handler 函数保持不变，BaseAgent 只是在其上包装一层 profile 上�
 """
 from __future__ import annotations
 
+import json
+import time
+import traceback
+import uuid
 from typing import Any, Callable, Optional
 
 import structlog
 from langchain_openai import ChatOpenAI
 
+from src.logging_shared import AgentEvent, EventType, TokenUsage, get_agent_event_emitter
 from .profile import AgentProfile
 from ..handlers import HANDLER_MAP, handle_fallback
 
@@ -56,6 +61,24 @@ class BaseAgent:
         自动采集执行快照。
         """
         enriched = {**task_input, "_agent_profile": self.profile}
+        run_id = str(task_input.get("_task_id") or uuid.uuid4())
+        session_id = str(task_input.get("_session_id") or task_input.get("session_id") or "default")
+        emitter = get_agent_event_emitter()
+        emitter.reset_counter(run_id)
+        started_at = time.perf_counter()
+
+        await emitter.emit(
+            AgentEvent(
+                session_id=session_id,
+                run_id=run_id,
+                agent_name=self.name,
+                event_type=EventType.AGENT_START.value,
+                level="INFO",
+                message=f"{self.name} started",
+                tool_output=json.dumps({k: v for k, v in task_input.items() if not str(k).startswith("_")}, ensure_ascii=False)[:500],
+                llm_model=getattr(self._llm, "model_name", getattr(self._llm, "model", None)),
+            )
+        )
 
         # ── 创建 SnapshotCollector ──
         collector = None
@@ -76,7 +99,6 @@ class BaseAgent:
         except ImportError:
             pass
 
-        # 获取 handler（原有逻辑不变）
         handler = self._resolve_handler()
 
         try:
@@ -89,7 +111,6 @@ class BaseAgent:
                 }
                 result = await handle_fallback(fallback_input, self._llm, None)
 
-            # ── 采集快照并持久化 ──
             if collector is not None:
                 snapshot = collector.finalize(result)
                 try:
@@ -100,9 +121,41 @@ class BaseAgent:
                 except Exception as e:
                     logger.warning("Failed to persist snapshot: %s", e)
 
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            await emitter.emit(
+                AgentEvent(
+                    session_id=session_id,
+                    run_id=run_id,
+                    agent_name=self.name,
+                    event_type=EventType.AGENT_FINISH.value,
+                    level="INFO",
+                    message=f"{self.name} finished",
+                    tool_output=json.dumps(result, ensure_ascii=False, default=str)[:500],
+                    duration_ms=duration_ms,
+                    token_usage=TokenUsage(total_tokens=int(result.get("tokens_used", 0) or 0)),
+                    llm_model=getattr(self._llm, "model_name", getattr(self._llm, "model", None)),
+                )
+            )
             return result
+        except Exception as exc:
+            duration_ms = round((time.perf_counter() - started_at) * 1000, 2)
+            await emitter.emit(
+                AgentEvent(
+                    session_id=session_id,
+                    run_id=run_id,
+                    agent_name=self.name,
+                    event_type=EventType.ERROR.value,
+                    level="ERROR",
+                    message=f"{self.name} failed",
+                    duration_ms=duration_ms,
+                    error_type=type(exc).__name__,
+                    error_message=str(exc),
+                    error_stack=traceback.format_exc(),
+                    llm_model=getattr(self._llm, "model_name", getattr(self._llm, "model", None)),
+                )
+            )
+            raise
         finally:
-            # 清理 context
             if collector is not None:
                 try:
                     from src.agent.snapshot.collector import set_collector

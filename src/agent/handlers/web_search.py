@@ -1,174 +1,212 @@
-"""WebSearch Agent — Bing中国 + 360搜索 并行降级"""
+"""WebSearch Agent — Bocha 搜索"""
 
-import asyncio
 import logging
+import os
+from typing import Any
+
 import httpx
 from langchain_openai import ChatOpenAI
 
+from src.config import get_settings
+
 logger = logging.getLogger(__name__)
+
+_BOCHA_API_URL = "https://api.bochaai.com/v1/web-search"
+
+
+def _prepare_bocha_query(query: str) -> str:
+    """Prepare the search query before sending it to Bocha.
+
+    This is intentionally isolated so we can align it with DeepSeek's
+    query handling strategy without changing the WebSearch call flow.
+    For now, preserve the user's original wording exactly.
+    """
+    return (query or "").strip()
+
+
+def _get_bocha_api_key() -> str:
+    settings = get_settings()
+    return (
+        settings.bocha_api_key
+        or os.getenv("BOCHA_API_KEY")
+        or os.getenv("BOCHA_SEARCH_API_KEY")
+        or ""
+    )
 
 
 async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
-    """网络搜索 — Bing中国 + 360搜索 并行降级，全部失败则 LLM 内部知识
+    """使用博查执行联网搜索。
 
-    路径：
-    1. 并行降级：Bing中国 + 360搜索同时试，最快返回（总超时 10s）
-    2. 全部失败 → LLM 内部知识（不阻塞链路）
+    约束：
+    1. 仅使用博查，不降级到其他搜索引擎
+    2. 搜索词先经过统一预处理，再提交给博查
+    3. 若未配置博查 Key，则明确返回失败
     """
-    query = task_input.get("query", "")
-    count = task_input.get("count", 5)
+    original_query = task_input.get("query", "")
+    query = _prepare_bocha_query(original_query)
+    count = max(1, min(int(task_input.get("count", 5) or 5), 50))
+    freshness = task_input.get("freshness", "noLimit") or "noLimit"
+    summary = bool(task_input.get("summary", True))
 
-    # ── 并行降级：Bing中国 + 360搜索 同时发起，谁快用谁 ──
-    async def _parallel_search() -> tuple[str, list] | None:
-        async def _try_bing():
-            try:
-                r = await _search_bing_cn(query, count)
-                return r if r else None
-            except Exception as e:
-                logger.warning("Bing CN search failed: %s", e)
-                return None
-        async def _try_360():
-            try:
-                r = await _search_360(query, count)
-                return r if r else None
-            except Exception as e:
-                logger.warning("360 search failed: %s", e)
-                return None
-
-        done, pending = await asyncio.wait(
-            [asyncio.create_task(f()) for f in (_try_bing, _try_360)],
-            timeout=4.0,
-            return_when=asyncio.FIRST_COMPLETED,
-        )
-        for p in pending:
-            p.cancel()
-        for coro in done:
-            res = coro.result()
-            if res:
-                return ("parallel", res)
-        return None
-
-    try:
-        parallel_result = await asyncio.wait_for(_parallel_search(), timeout=5.0)
-    except asyncio.TimeoutError:
-        parallel_result = None
-
-    if parallel_result:
-        source, results = parallel_result
-        label = "Bing中国" if source == "bing_cn" else "360搜索"
-        content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: {label}）："]
-        for r in results:
-            content_parts.append("- [%s](%s): %s" % (r['title'], r['url'], r.get('snippet', '')))
+    api_key = _get_bocha_api_key()
+    if not api_key:
         return {
-            "status": "completed", "agent_type": "WebSearch",
-            "output": {"content": "\n".join(content_parts), "results": results, "source": source, "query": query},
+            "status": "failed",
+            "agent_type": "WebSearch",
+            "error": "BOCHA_API_KEY is not configured",
+            "output": {
+                "content": "未配置博查搜索 API Key。请设置 `BOCHA_API_KEY` 后重试。",
+                "results": [],
+                "source": "bocha",
+                "query": query,
+                "original_query": original_query,
+            },
             "tokens_used": 0,
-            "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": "搜索：%s" % query, "output_summary": "%s找到 %d 条结果" % (label, len(results)), "status": "done"}],
+            "thinking_steps": [{
+                "agent": "WebSearch",
+                "action": "搜索失败",
+                "reasoning": f"搜索：{original_query}",
+                "output_summary": "缺少 BOCHA_API_KEY",
+                "status": "failed",
+            }],
         }
 
-    # 全部失败：LLM 内部知识（不阻塞链路）
+    try:
+        results = await _search_bocha(
+            query=query,
+            api_key=api_key,
+            max_results=count,
+            freshness=freshness,
+            summary=summary,
+        )
+    except Exception as exc:
+        logger.warning("Bocha search failed: %s", exc)
+        return {
+            "status": "failed",
+            "agent_type": "WebSearch",
+            "error": str(exc),
+            "output": {
+                "content": f"博查搜索失败：{exc}",
+                "results": [],
+                "source": "bocha",
+                "query": query,
+                "original_query": original_query,
+            },
+            "tokens_used": 0,
+            "thinking_steps": [{
+                "agent": "WebSearch",
+                "action": "搜索失败",
+                "reasoning": f"搜索：{original_query}",
+                "output_summary": f"博查请求失败：{exc}",
+                "status": "failed",
+            }],
+        }
+
+    content_parts = [f"搜索「{query}」找到 {len(results)} 条结果（来源: 博查）："]
+    for result in results:
+        content_parts.append(
+            "- [%s](%s): %s" % (
+                result["title"],
+                result["url"],
+                result.get("snippet", ""),
+            )
+        )
+
     return {
-        "status": "completed", "agent_type": "WebSearch",
-        "output": {"content": f"搜索引擎不可用，Agent 将使用内部知识生成关于「{query}」的内容。", "results": [], "fallback": "llm_knowledge"},
+        "status": "completed",
+        "agent_type": "WebSearch",
+        "output": {
+            "content": "\n".join(content_parts),
+            "results": results,
+            "source": "bocha",
+            "query": query,
+            "original_query": original_query,
+        },
         "tokens_used": 0,
-        "thinking_steps": [{"agent": "WebSearch", "action": "搜索完成", "reasoning": f"搜索：{query}", "output_summary": "搜索引擎不可用，将使用 LLM 内部知识生成", "status": "done"}],
+        "thinking_steps": [{
+            "agent": "WebSearch",
+            "action": "搜索完成",
+            "reasoning": f"搜索：{original_query}",
+            "output_summary": f"博查找到 {len(results)} 条结果",
+            "status": "done",
+        }],
     }
 
 
-async def _search_bing_cn(query: str, max_results: int = 5) -> list[dict]:
-    """Bing 中国版网页爬取 — 国内可直连，完全免费"""
-    import httpx
-
+async def _search_bocha(
+    query: str,
+    api_key: str,
+    max_results: int = 5,
+    freshness: str = "noLimit",
+    summary: bool = True,
+) -> list[dict[str, Any]]:
+    payload = {
+        "query": query,
+        "count": max_results,
+        "freshness": freshness,
+        "summary": summary,
+    }
     headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
     }
 
-    results = []
+    async with httpx.AsyncClient(timeout=20.0) as client:
+        resp = await client.post(_BOCHA_API_URL, json=payload, headers=headers)
+        resp.raise_for_status()
+        data = resp.json()
 
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        resp = await client.get(
-            "https://cn.bing.com/search",
-            params={"q": query, "ensearch": "0"},
-            headers=headers,
+    return _extract_bocha_results(data)
+
+
+def _extract_bocha_results(data: dict[str, Any]) -> list[dict[str, Any]]:
+    candidates = []
+    if isinstance(data.get("data"), dict):
+        payload = data["data"]
+
+        web_pages = payload.get("webPages")
+        if isinstance(web_pages, dict) and isinstance(web_pages.get("value"), list):
+            candidates = web_pages["value"]
+        else:
+            for key in ("items", "results", "value"):
+                value = payload.get(key)
+                if isinstance(value, list):
+                    candidates = value
+                    break
+    elif isinstance(data.get("data"), list):
+        candidates = data["data"]
+    elif isinstance(data.get("results"), list):
+        candidates = data["results"]
+
+    normalized: list[dict[str, Any]] = []
+    for item in candidates:
+        if not isinstance(item, dict):
+            continue
+        title = item.get("name") or item.get("title") or ""
+        url = item.get("url") or item.get("link") or item.get("href") or ""
+        snippet = (
+            item.get("summary")
+            or item.get("snippet")
+            or item.get("description")
+            or item.get("body")
+            or ""
         )
+        site_name = item.get("siteName") or item.get("site") or ""
+        publish_time = item.get("datePublished") or item.get("publishTime") or item.get("date") or ""
 
-        if resp.status_code != 200:
-            return []
+        if not title or not url:
+            continue
 
-        try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(resp.text, "html.parser")
-        except ImportError:
-            soup = __import__("bs4").BeautifulSoup(resp.text, "html.parser")
+        normalized.append({
+            "title": title,
+            "url": url,
+            "snippet": snippet,
+            "site_name": site_name,
+            "publish_time": publish_time,
+            "source": "bocha",
+        })
 
-        for item in soup.select("li.b_algo, .b_algo"):
-            title_elem = item.select_one("h2 a") or item.select_one("a")
-            if not title_elem:
-                continue
-            url = title_elem.get("href", "")
-            if not url or not url.startswith("http"):
-                continue
-            title = title_elem.get_text(strip=True)
-            snippet_elem = item.select_one(".b_paractl") or item.select_one(".b_caption p")
-            snippet = snippet_elem.get_text(separator=" ", strip=True) if snippet_elem else ""
-            results.append({"title": title, "url": url, "snippet": snippet, "source": "bing_cn"})
-            if len(results) >= max_results:
-                break
-
-    return results
-
-
-async def _search_360(query: str, max_results: int = 5) -> list[dict]:
-    """360 搜索爬取 — 国内可直连，完全免费"""
-    import httpx
-
-    headers = {
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept-Language": "zh-CN,zh;q=0.9",
-    }
-
-    results = []
-
-    async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-        resp = await client.get(
-            "https://www.so.com/s",
-            params={"q": query},
-            headers=headers,
-        )
-
-        if resp.status_code != 200:
-            return []
-
-        try:
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(resp.text, "html.parser")
-        except ImportError:
-            soup = __import__("bs4").BeautifulSoup(resp.text, "html.parser")
-
-        for item in soup.select(".res-list, .result"):
-            title_elem = item.select_one("h3 a") or item.select_one(".res-title a")
-            if not title_elem:
-                continue
-            url = title_elem.get("href", "")
-            if not url or not url.startswith("http"):
-                continue
-            title = title_elem.get_text(strip=True)
-            snippet_elem = item.select_one(".res-desc, .res-con")
-            snippet = snippet_elem.get_text(separator=" ", strip=True) if snippet_elem else ""
-            results.append({"title": title, "url": url, "snippet": snippet, "source": "360"})
-            if len(results) >= max_results:
-                break
-
-    return results
+    return normalized
 
 
 async def handle_url_crawl(task_input: dict, llm: ChatOpenAI | None = None, mcp_tools: list | None = None) -> dict:

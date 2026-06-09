@@ -1,23 +1,23 @@
-"""Observability module: unified tracing, metrics, and structured logging.
+"""Observability module: lightweight tracing, metrics, and ES query helpers.
 
-Usage in your FastAPI lifespan:
+HTTP spans are written by ``LoggingMiddleware`` directly to ES traces-*.
+OTel SDK is only used by agent code for in-process span context.
 
-    from src.observability import setup_observability
+Usage in FastAPI lifespan::
 
-    @asynccontextmanager
-    async def lifespan(app: FastAPI):
-        tracer, meter = setup_observability(
-            service_name="autopublish-api",
-            log_json=os.getenv("LOG_JSON", "true").lower() == "true",
-        )
-        from src.observability import metrics as obs_metrics
-        obs_metrics.create_meters()
-        yield
+    from src.observability import setup_observability, metrics as obs_metrics
 
-Or for local development without Docker:
+    tracer, meter = setup_observability(
+        service_name="autopublish-api",
+        service_version="2.0.0",
+        settings=settings,
+    )
+    obs_metrics.create_meters()
+
+For local dev without Docker::
 
     from src.observability import setup_local_dev
-    tracer, meter = setup_local_dev()
+    tracer, meter = setup_local_dev(settings)
 """
 
 from .tracing import (
@@ -28,15 +28,10 @@ from .tracing import (
 )
 from . import metrics
 
-# es_client is lazy — requires elasticsearch which may not be installed
-# in all environments (e.g., local dev). Access via module attribute or
-# explicit import: from src.observability.es_client import ...
-
 __all__ = [
     "setup_observability",
     "setup_local_dev",
     "get_tracer",
     "get_meter",
     "metrics",
-    "es_client",
 ]

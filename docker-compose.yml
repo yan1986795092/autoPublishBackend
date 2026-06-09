@@ -16,12 +16,6 @@ services:
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
       # Observability
       - OTEL_SERVICE_NAME=autopublish-api
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
-      - OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
-      - OTEL_TRACES_SAMPLER=parentbased_traceidratio
-      - OTEL_TRACES_SAMPLER_ARG=1.0
-      - LOG_JSON=true
-      # Elasticsearch
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - JAEGER_HOST=http://jaeger:16686
       - PROMETHEUS_HOST=http://prometheus:9090
@@ -98,9 +92,7 @@ services:
       # Jaeger Query 从 ES 读取 trace 数据
       - SPAN_STORAGE_TYPE=elasticsearch
       - ES_SERVER_URLS=http://elasticsearch:9200
-      - ES_INDEX_PREFIX=jaeger
-      - ES_USERNAME=
-      - ES_PASSWORD=
+      - ES_INDEX_PREFIX=traces
       # Collector 配置
       - COLLECTOR_OTLP_ENABLED=true
     depends_on:

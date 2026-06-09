@@ -47,6 +47,8 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
             llm, lc_messages,
             tool_registry=task_input.get("_tool_registry"),
             agent_type="CodeAgent",
+            session_id=str(task_input.get("_session_id") or task_input.get("session_id") or "default"),
+            run_id=str(task_input.get("_task_id") or ""),
             stream=False,
         )
 
