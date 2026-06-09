@@ -29,8 +29,6 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-3.5-turbo-16k"
     openai_base_url: str = "https://api.openai.com/v1"
 
-    # anthropic config removed — was never used at runtime
-
     # 阿里通义千问 — 兼容 QWEN_API_KEY / DASHSCOPE_API_KEY 两种环境变量名
     qwen_api_key: Optional[str] = Field(default=None, validation_alias=AliasChoices("qwen_api_key", "QWEN_API_KEY", "DASHSCOPE_API_KEY"))
     qwen_model: str = "qwen-plus"
@@ -39,6 +37,11 @@ class Settings(BaseSettings):
     zhipu_api_key: Optional[str] = None
     zhipu_model: str = "glm-4-flash"
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
+
+    # DeepSeek — OpenAI 协议兼容
+    deepseek_api_key: Optional[str] = None
+    deepseek_model: str = "deepseek-chat"
+    deepseek_base_url: str = "https://api.deepseek.com/v1"
 
     bocha_api_key: Optional[str] = Field(default=None, validation_alias=AliasChoices("bocha_api_key", "BOCHA_API_KEY", "BOCHA_SEARCH_API_KEY"))
 
@@ -90,7 +93,7 @@ class Settings(BaseSettings):
 
         # 如果还没有 key，遍历所有已知 provider 找第一个有效的
         if not api_key:
-            for p in ["openai", "zhipu", "qwen"]:
+            for p in ["openai", "zhipu", "qwen", "deepseek"]:
                 api_key = getattr(self, f"{p}_api_key", "")
                 if api_key:
                     provider = p
