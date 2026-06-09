@@ -71,3 +71,7 @@ class AgentGraphState(TypedDict):
     _context_store: Any = None    # SharedContextStore 实例
     _context_manager: Any = None  # ContextManager 实例
     enable_context_management: bool = False
+
+    # === SubAgent ReAct (Multi-Agent Collaboration) ===
+    _subagent_factory: Any = None  # SubAgentFactory 实例
+    enable_subagent_react: bool = False  # 是否启用 SubAgent 独立 ReAct 循环

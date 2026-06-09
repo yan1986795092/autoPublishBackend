@@ -79,6 +79,7 @@ class Orchestrator:
         message_bus: Any | None = None,
         reflection_engine: Any | None = None,
         tool_registry: Any | None = None,
+        subagent_factory: Any | None = None,
     ):
         self.chat_models = chat_models or {}
         self._planner_llm = self.chat_models.get("ManagerAgent")
@@ -95,6 +96,7 @@ class Orchestrator:
         self.message_bus = message_bus
         self.reflection_engine = reflection_engine
         self.tool_registry = tool_registry
+        self.subagent_factory = subagent_factory
         self._graph = build_agent_graph()
         self._context_manager = None
         self._context_store = None
@@ -242,6 +244,8 @@ class Orchestrator:
                         "enable_context_management": True,
                         "_context_store": None,
                         "_context_manager": None,
+                        "_subagent_factory": self.subagent_factory,
+                        "enable_subagent_react": self.subagent_factory is not None,
                     }
 
                     from src.memory import ContextManager, SharedContextStore
