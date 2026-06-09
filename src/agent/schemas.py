@@ -93,3 +93,36 @@ class ExecutionPlan:
     estimated_steps: int = 0
     parallel_groups: list[list[str]] = field(default_factory=list)
     plan_method: str = "llm"
+
+
+@dataclass
+class ReActStep:
+    """ReAct 循环中的一次 Think-Act-Observe 步骤"""
+    step_index: int
+    thought: str                        # LLM 思考：我当前要做什么
+    action: str                        # 决定调用的工具或 peer_call
+    action_input: dict                 # 工具参数
+    observation: str                   # 观察结果
+    raw_response: str = ""              # LLM 原始响应
+    tool_name: Optional[str] = None     # 如果是工具调用，记录工具名
+    peer_target: Optional[str] = None   # 如果是对等调用，记录目标 Agent
+
+
+@dataclass
+class PeerCallResult:
+    """对等调用的结果"""
+    target_agent: str
+    call_id: str
+    response: dict
+    success: bool
+    error: Optional[str] = None
+
+
+@dataclass
+class SubAgentConfig:
+    """SubAgent 的配置参数"""
+    max_react_steps: int = 8           # ReAct 最大迭代次数
+    max_peer_calls: int = 5            # 单次任务中最多对等调用次数
+    react_timeout: float = 60.0        # ReAct 循环超时（秒）
+    enable_peer_collaboration: bool = True  # 是否启用对等协作
+    peer_call_timeout: float = 30.0     # 单次 peer_call 超时
