@@ -875,10 +875,8 @@ async def agent_metrics():
                 "debug": settings.debug,
                 "log_level": settings.log_level,
                 "default_llm_provider": settings.default_llm_provider,
-                "enable_reflection": settings.enable_reflection,
-                "enable_message_bus": settings.enable_message_bus,
-                "enable_hitl": settings.enable_hitl,
                 "worker_max_retries": settings.worker_max_retries,
+                "mcp_enabled": settings.mcp_enabled,
             },
         },
     }

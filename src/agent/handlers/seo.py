@@ -233,10 +233,7 @@ async def _handle_seo_rewrite(task_input: dict, llm: ChatOpenAI, mcp_tools: list
 
         raw = await call_llm(
             llm, lc_messages,
-            tool_registry=task_input.get("_tool_registry"),
             agent_type="SEOAgent",
-            session_id=str(task_input.get("_session_id") or task_input.get("session_id") or "default"),
-            run_id=str(task_input.get("_task_id") or ""),
             stream=True,
             on_chunk=on_chunk,
         )

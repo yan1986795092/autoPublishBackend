@@ -1,6 +1,5 @@
 """Agent 角色化对话智能体"""
 from .profile import AgentProfile, PREDEFINED_PROFILES
 from .base_agent import BaseAgent
-from .registry import AgentRegistry
 
-__all__ = ["AgentProfile", "PREDEFINED_PROFILES", "BaseAgent", "AgentRegistry"]
+__all__ = ["AgentProfile", "PREDEFINED_PROFILES", "BaseAgent"]
