@@ -27,14 +27,10 @@ class AgentGraphState(TypedDict):
     ready_tasks: list[dict]       # 依赖已就绪、可执行的任务
     concurrency_limit: int        # 最大并行数
 
-    # === 可观测性（逐步迁移到结构化 agent events，当前仍复用 thinking_steps 作为中间态）===
+    # === 可观测性 ===
     thinking_steps: list[dict]
     trace_task_id: str
     start_time: float
-
-    # === 人机协作 ===
-    pending_decision: Optional[dict]
-    decision_result: Optional[str]
 
     # === 输出 ===
     final_output: Optional[dict]
@@ -46,32 +42,4 @@ class AgentGraphState(TypedDict):
     _task_queue_ref: Any          # TaskQueue 实例引用
     _llm_models: dict             # agent_type -> ChatOpenAI
     _mcp_tools: list              # MCP Server 加载的工具（LangChain BaseTool 列表）
-    _streaming_mode: bool = False  # 是否开启实时流式推送（LLM token 级）
-    _agent_registry: Any = None    # AgentRegistry 实例（Phase 1）
-    _tool_registry: Any = None     # ToolRegistry 实例（Tool System）
-
-    # === P2P 通信（Phase 2） ===
-    use_message_bus: bool = False
-    _message_bus: Any = None       # MessageBus 实例
-    _messages: list[dict] = []     # 消息日志（可序列化）
-
-    # === 反思（Phase 3） ===
-    enable_reflection: bool = False
-    reflection_config: Any = None  # ReflectionConfig dict
-    _reflection_engine: Any = None # ReflectionEngine 实例
-    reflection_results: list[dict] = []   # serialized ReflectionResult
-    self_reflection_rounds: dict = {}     # task_id -> round count
-
-    # === HITL（Phase 4） ===
-    enable_hitl: bool = False
-    _hitl_manager: Any = None      # HITLManager 实例
-    pending_gates: list[dict] = [] # 序列化的 pending gates
-
-    # === Context Management (Layered Multi-Agent) ===
-    _context_store: Any = None    # SharedContextStore 实例
-    _context_manager: Any = None  # ContextManager 实例
-    enable_context_management: bool = False
-
-    # === SubAgent ReAct (Multi-Agent Collaboration) ===
-    _subagent_factory: Any = None  # SubAgentFactory 实例
-    enable_subagent_react: bool = False  # 是否启用 SubAgent 独立 ReAct 循环
+    _streaming_mode: bool

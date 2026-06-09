@@ -22,8 +22,6 @@ async def handle_fallback(task: dict, llm: ChatOpenAI, mcp_tools: list | None = 
             "warning": f"{agent_type} 未配置 LLM，返回模拟结果",
         }
 
-    tool_registry = task.get("_tool_registry")
-
     try:
         skill_system_prompt = task_input.get("_skill_system_prompt", "")
         skill_note = f"\n\n=== 创作指导 (Skill: {task_input.get('_skill_name', 'Custom')}) ===\n{skill_system_prompt}\n===" if skill_system_prompt else ""
@@ -33,10 +31,7 @@ async def handle_fallback(task: dict, llm: ChatOpenAI, mcp_tools: list | None = 
         ]
         response_text = await call_llm(
             llm, lc_messages,
-            tool_registry=tool_registry,
             agent_type=agent_type,
-            session_id=str(task_input.get("_session_id") or task_input.get("session_id") or "default"),
-            run_id=str(task_input.get("_task_id") or ""),
             stream=False,
         )
         return {

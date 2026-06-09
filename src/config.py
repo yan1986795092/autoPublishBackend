@@ -65,7 +65,7 @@ class Settings(BaseSettings):
     image_api_key: Optional[str] = None
     image_base_url: Optional[str] = None
 
-    # 子Agent模型 (ReviewAgent, SEOAgent, HotTopicAgent, CodeAgent 等)
+    # 子Agent模型 (ReviewAgent, SEOAgent 等)
     subagent_llm_provider: Optional[str] = None
     subagent_model: Optional[str] = None
     subagent_api_key: Optional[str] = None
@@ -109,24 +109,13 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     log_json_format: bool = False
 
-    # ========== Agent feature flags ==========
-    enable_reflection: bool = False
-    enable_message_bus: bool = False
-    enable_hitl: bool = False
-    enable_tools: bool = True
-    enable_agent_registry: bool = True
-
-    # ========== SubAgent ReAct (Multi-Agent Collaboration) ==========
-    enable_subagent_react: bool = False
-    subagent_max_react_steps: int = 8
-    subagent_max_peer_calls: int = 5
-    subagent_react_timeout: float = 60.0
-    subagent_peer_call_timeout: float = 30.0
+    # ========== Agent orchestration ==========
+    worker_max_retries: int = 3
+    orchestrator_timeout: float = 180.0
+    task_concurrency: int = 3
 
     # ========== MCP (Model Context Protocol) ==========
-    # MCP Server 总开关
     mcp_enabled: bool = True
-    # 各 MCP Server 独立开关（留空则从环境变量读取）
     mcp_enable_search: bool = True
     mcp_enable_brave: bool = False
     mcp_enable_jina: bool = True
@@ -134,25 +123,12 @@ class Settings(BaseSettings):
     mcp_enable_pexels: bool = False
     mcp_enable_github: bool = False
 
-    # ========== Worker / orchestration ==========
-    worker_max_retries: int = 3
-    orchestrator_timeout: float = 180.0
-    task_concurrency: int = 3
-
     # ========== Agent token budgets ==========
     agent_token_budgets: dict = {
         "ManagerAgent": 4000,
         "WritingAgent": 4000,
         "SEOAgent": 2500,
         "ReviewAgent": 3000,
-        "DiagramAgent": 2000,
-        "ImageAgent": 1500,
-        "HotTopicAgent": 1500,
-        "CodeAgent": 2500,
-        "WebSearch": 2000,
-        "PlatformAdapter": 2000,
-        "TranslationAgent": 2000,
-        "URLCrawler": 0,
     }
 
     model_config = SettingsConfigDict(
