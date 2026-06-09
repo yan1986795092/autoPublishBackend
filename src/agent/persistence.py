@@ -21,12 +21,13 @@ def save_agent_task(
     total_steps: int = 1,
     completed_steps: int = 0,
     total_tokens: int = 0,
-    thinking_trace: Optional[dict] = None,
+    agent_events: Optional[dict] = None,
 ) -> None:
     """保存或更新 Agent 任务到数据库（幂等：重复 task_id 时覆盖而非报错）"""
     with SessionLocal() as db:
         try:
             task = db.query(AgentTaskModel).filter_by(id=task_id).first()
+            events_json = json.dumps(agent_events, ensure_ascii=False) if agent_events else None
 
             if task:
                 task.status = status
@@ -36,8 +37,8 @@ def save_agent_task(
                 task.error_message = error
                 if result:
                     task.result_json = json.dumps(result, ensure_ascii=False)
-                if thinking_trace:
-                    task.thinking_trace_json = json.dumps(thinking_trace, ensure_ascii=False)
+                if events_json:
+                    task.agent_events_json = events_json
                 if status in ("completed", "failed"):
                     task.completed_at = datetime.utcnow()
             else:
@@ -53,7 +54,7 @@ def save_agent_task(
                     total_tokens=total_tokens,
                     result_json=json.dumps(result, ensure_ascii=False) if result else None,
                     error_message=error,
-                    thinking_trace_json=json.dumps(thinking_trace, ensure_ascii=False) if thinking_trace else None,
+                    agent_events_json=events_json,
                     completed_at=datetime.utcnow() if status in ("completed", "failed") else None,
                 )
                 db.add(task)
@@ -64,13 +65,26 @@ def save_agent_task(
             logger.error(f"Failed to save agent task: {e}")
 
 
+def save_agent_events(task_id: str, agent_events: dict) -> None:
+    """兼容旧接口：结构化事件先落在任务聚合 JSON 中。"""
+    with SessionLocal() as db:
+        try:
+            task = db.query(AgentTaskModel).filter_by(id=task_id).first()
+            if task:
+                task.agent_events_json = json.dumps(agent_events, ensure_ascii=False)
+                db.commit()
+        except Exception as e:
+            db.rollback()
+            logger.error(f"Failed to save agent events: {e}")
+
+
 def save_thinking_trace(task_id: str, trace: dict) -> None:
-    """保存 Thinking Trace 到数据库（幂等：已存在的 step_number 会被覆盖）"""
+    """兼容旧调用：将旧 thinking trace 归档到聚合 JSON，并尽量同步写明细表。"""
+    save_agent_events(task_id, {"events": trace.get("steps", [])})
     with SessionLocal() as db:
         try:
             for step in trace.get("steps", []):
                 step_num = step.get("step_number", 0)
-                # 幂等：先查是否已有该 (task_id, step_number) 记录，有则覆盖
                 existing = db.query(ThinkingTraceRecord).filter_by(
                     task_id=task_id, step_number=step_num
                 ).first()
@@ -119,8 +133,6 @@ def save_subtask(
         try:
             input_json_str = json.dumps(input_data, ensure_ascii=False) if input_data else None
             output_json_str = json.dumps(output_data, ensure_ascii=False) if output_data else None
-
-            # 幂等检查：相同 (task_id, agent_type) 且 input_json 相同则跳过
             existing = db.query(SubTaskModel).filter_by(
                 task_id=task_id,
                 agent_type=agent_type,
@@ -191,7 +203,6 @@ def save_tool_call(
     with SessionLocal() as db:
         try:
             params_json = json.dumps(parameters, ensure_ascii=False) if parameters else None
-            # 幂等检查
             existing = db.query(ToolCallModel).filter_by(
                 task_id=task_id,
                 tool_name=tool_name,
@@ -224,17 +235,7 @@ def save_tool_call(
 
 
 def cleanup_old_records(retention_days: Optional[dict] = None) -> dict[str, int]:
-    """清理过期的 Agent 数据（AGENT_ARCHITECTURE.md §11.3 数据保留策略）
-
-    Args:
-        retention_days: 各类型的保留天数，默认：
-            - thinking_traces: 7 天
-            - tool_calls: 30 天
-            - agent_tasks: 90 天
-
-    Returns:
-        各类型清理的记录数
-    """
+    """清理过期的 Agent 数据（AGENT_ARCHITECTURE.md §11.3 数据保留策略）"""
     retention = retention_days or {
         "thinking_traces": 7,
         "tool_calls": 30,
@@ -247,23 +248,20 @@ def cleanup_old_records(retention_days: Optional[dict] = None) -> dict[str, int]
         try:
             from datetime import timedelta
 
-            # 清理 ThinkingTrace（保留 7 天）
             trace_cutoff = now - timedelta(days=retention["thinking_traces"])
             old_traces = db.query(ThinkingTraceRecord).filter(
                 ThinkingTraceRecord.created_at < trace_cutoff
             ).delete(synchronize_session=False)
             counts["thinking_traces"] = old_traces
 
-            # 清理 ToolCall（保留 30 天）
             tool_cutoff = now - timedelta(days=retention["tool_calls"])
             old_tools = db.query(ToolCallModel).filter(
                 ToolCallModel.created_at < tool_cutoff
             ).delete(synchronize_session=False)
             counts["tool_calls"] = old_tools
 
-            # 清理已完成的 AgentTask（保留 90 天）
-            task_cutoff = now - timedelta(days=retention["agent_tasks"])
             from src.models import AgentTask as AgentTaskModel
+            task_cutoff = now - timedelta(days=retention["agent_tasks"])
             old_tasks = db.query(AgentTaskModel).filter(
                 AgentTaskModel.status.in_(["completed", "failed", "cancelled"]),
                 AgentTaskModel.completed_at < task_cutoff,

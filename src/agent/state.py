@@ -27,7 +27,7 @@ class AgentGraphState(TypedDict):
     ready_tasks: list[dict]       # 依赖已就绪、可执行的任务
     concurrency_limit: int        # 最大并行数
 
-    # === 可观测性（保持与原有 ThinkingTrace 一致的结构）===
+    # === 可观测性（逐步迁移到结构化 agent events，当前仍复用 thinking_steps 作为中间态）===
     thinking_steps: list[dict]
     trace_task_id: str
     start_time: float

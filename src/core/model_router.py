@@ -11,7 +11,7 @@ from src.logging_shared.config import get_logger
 
 logger = get_logger("core.model_router")
 
-_GATEWAY_URL = "http://localhost:9010"
+_GATEWAY_OPENAI_BASE_URL = "http://localhost:9010/v1"
 
 
 class ModelRouter:
@@ -20,7 +20,7 @@ class ModelRouter:
     def __init__(self, gateway_url: str | None = None):
         self._settings = get_settings()
         self._cache: dict[str, Any] = {}
-        self._gateway_url = gateway_url or _GATEWAY_URL
+        self._gateway_url = gateway_url or _GATEWAY_OPENAI_BASE_URL
 
     def _get_llm_config(self) -> tuple[str, str, str]:
         """Return (provider, model, base_url) from settings.
@@ -43,7 +43,7 @@ class ModelRouter:
         return defaults.get(provider, "gpt-4o-mini")
 
     def get_chat_model(self, agent_type: str) -> ChatOpenAI:
-        """返回 ChatOpenAI 实例（base_url 指向 LLM Gateway）。"""
+        """返回 ChatOpenAI 实例（base_url 指向 LLM Gateway 的 OpenAI 兼容 `/v1` 根路径）。"""
         if agent_type in self._cache:
             return self._cache[agent_type]
 

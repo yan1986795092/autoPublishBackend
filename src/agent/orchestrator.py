@@ -20,11 +20,11 @@ from langchain_openai import ChatOpenAI
 from .graph import build_agent_graph
 from .state import AgentGraphState
 from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
-from .thinking_trace import ThinkingTrace
 from src.core.llm_gateway import LLMGateway
 from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, validate_plan_structure
 from src.observability import get_tracer
 from src.observability.metrics import record_agent_run
+from src.logging_shared import AgentEvent, EventType, TokenUsage, get_agent_event_emitter
 
 logger = structlog.get_logger(__name__)
 
@@ -148,10 +148,11 @@ class Orchestrator:
     ) -> AgentResult:
         """执行一次完整的 Agent 编排流程（使用 LangGraph StateGraph）"""
         tracer = _get_tracer()
-        thinking_trace = ThinkingTrace(task_id=str(uuid.uuid4()))
-        thinking_trace.begin()
+        emitter = get_agent_event_emitter()
         start_time = time.time()
-        task_id = thinking_trace.task_id
+        task_id = str(uuid.uuid4())
+        session_id = ((context or {}).get("session_id") or (context or {}).get("conversation_id") or "default")
+        emitter.reset_counter(task_id)
 
         # ── [插桩] agent.run 根 Span ─────────────────────────────────────────
         run_span_name = f"agent.run"
@@ -182,6 +183,18 @@ class Orchestrator:
                 "custom.task_id": self.async_task_id or "",
             },
         ) as root_span:
+            await emitter.emit(
+                AgentEvent(
+                    session_id=session_id,
+                    run_id=task_id,
+                    agent_name="ManagerAgent",
+                    event_type=EventType.AGENT_START.value,
+                    level="INFO",
+                    message="ManagerAgent run started",
+                    tool_output=user_request[:500],
+                    llm_model=self.model,
+                )
+            )
             try:
                 # Python 3.10 兼容
                 async with asyncio.timeout(timeout) if hasattr(asyncio, 'timeout') else _AsyncioTimeout(timeout):
@@ -252,20 +265,29 @@ class Orchestrator:
                     error = final_state.get("error")
 
                     thinking_steps = final_state.get("thinking_steps", [])
-                    if thinking_steps:
-                        thinking_trace.steps = []
-                        for s in thinking_steps:
-                            step = thinking_trace.add_step(
-                                agent=s.get("agent", ""),
-                                action=s.get("action", ""),
-                                reasoning=s.get("reasoning", ""),
-                                input_summary=s.get("input_summary", ""),
-                            )
-                            thinking_trace.complete_step(
-                                step_index=step,
-                                output_summary=s.get("output_summary", ""),
-                                tokens_used=s.get("tokens_used", 0),
-                            )
+                    agent_events = {
+                        "events": [
+                            {
+                                "session_id": session_id,
+                                "run_id": task_id,
+                                "step_index": index,
+                                "agent_name": step.get("agent", "ManagerAgent"),
+                                "event_type": EventType.THOUGHT.value,
+                                "level": "DEBUG",
+                                "message": step.get("action", "thinking_step"),
+                                "thought": step.get("reasoning", ""),
+                                "tool_output": step.get("output_summary", ""),
+                                "duration_ms": None,
+                                "token_usage": {
+                                    "prompt_tokens": 0,
+                                    "completion_tokens": 0,
+                                    "total_tokens": step.get("tokens_used", 0),
+                                    "cost_usd": 0.0,
+                                },
+                            }
+                            for index, step in enumerate(thinking_steps)
+                        ]
+                    }
 
                     result_status = TaskStatus.COMPLETED
                     if status == "failed":
@@ -285,6 +307,21 @@ class Orchestrator:
                     root_span.set_attribute("agent.total_tokens", total_tokens)
                     root_span.set_attribute("agent.duration_ms", elapsed * 1000)
 
+                    await emitter.emit(
+                        AgentEvent(
+                            session_id=session_id,
+                            run_id=task_id,
+                            agent_name="ManagerAgent",
+                            event_type=EventType.AGENT_FINISH.value,
+                            level="INFO",
+                            message="ManagerAgent run completed",
+                            tool_output=json.dumps(final_output or {}, ensure_ascii=False)[:500],
+                            duration_ms=elapsed * 1000,
+                            token_usage=TokenUsage(total_tokens=total_tokens),
+                            llm_model=self.model,
+                        )
+                    )
+
                     record_agent_run(status=status, skill_name=skill_name, duration_s=elapsed)
 
                     return AgentResult(
@@ -298,7 +335,7 @@ class Orchestrator:
                             time_elapsed=elapsed,
                             model=self.model,
                         ),
-                        thinking_trace=thinking_trace.to_dict(),
+                        agent_events=agent_events,
                     )
 
             except asyncio.TimeoutError:
@@ -313,7 +350,21 @@ class Orchestrator:
                     agent_type="ManagerAgent",
                     error="Graph execution timed out",
                     usage=UsageInfo(time_elapsed=elapsed),
-                    thinking_trace=thinking_trace.to_dict(),
+                    agent_events={
+                        "events": [
+                            {
+                                "session_id": session_id,
+                                "run_id": task_id,
+                                "step_index": 0,
+                                "agent_name": "ManagerAgent",
+                                "event_type": EventType.ERROR.value,
+                                "level": "ERROR",
+                                "message": "Graph execution timed out",
+                                "error_type": "TimeoutError",
+                                "error_message": "Graph execution timed out",
+                            }
+                        ]
+                    },
                 )
             except Exception as e:
                 elapsed = round(time.time() - start_time, 2)
@@ -329,7 +380,21 @@ class Orchestrator:
                     agent_type="ManagerAgent",
                     error=str(e),
                     usage=UsageInfo(time_elapsed=elapsed),
-                    thinking_trace=trace.to_dict(),
+                    agent_events={
+                        "events": [
+                            {
+                                "session_id": session_id,
+                                "run_id": task_id,
+                                "step_index": 0,
+                                "agent_name": "ManagerAgent",
+                                "event_type": EventType.ERROR.value,
+                                "level": "ERROR",
+                                "message": str(e),
+                                "error_type": type(e).__name__,
+                                "error_message": str(e),
+                            }
+                        ]
+                    },
                 )
 
     # ══════════════════════════════════════════════
@@ -348,15 +413,20 @@ class Orchestrator:
         medium_keywords = [
             "搜索", "热点", "热搜", "趋势", "优化", "seo",
             "小红书", "公众号", "知乎", "微博", "平台",
-            "推广", "营销", "文案",
+        ]
+        simple_writing_keywords = [
+            "推广", "营销", "文案", "广告", "slogan", "copywriting",
         ]
         complex_count = sum(1 for kw in complex_keywords if kw in text)
         medium_count = sum(1 for kw in medium_keywords if kw in text)
+        simple_writing_count = sum(1 for kw in simple_writing_keywords if kw in text)
 
         if complex_count >= 2 or (complex_count >= 1 and len(text) > 50):
             return "complex"
         elif medium_count >= 1 or len(text) > 80:
             return "medium"
+        elif simple_writing_count >= 1:
+            return "simple"
         return "simple"
 
     def _build_fallback_plan(self, user_request: str, complexity: str) -> ExecutionPlan:
@@ -473,8 +543,7 @@ Break this down into sub-tasks for the available agents."""
         self, task: AgentTask, context: dict, previous_results: dict[str, AgentResult]
     ) -> AgentResult:
         """当子 Agent 未注册时，直接用 LLM 生成（用于 /agent/repurpose）"""
-        trace = ThinkingTrace(task_id=task.id)
-        trace.begin()
+        session_id = context.get("session_id", "default") if context else "default"
 
         previous_text = ""
         for dep_id in list(previous_results.keys()):
@@ -500,7 +569,20 @@ Break this down into sub-tasks for the available agents."""
                 status=TaskStatus.COMPLETED,
                 agent_type=task.agent_type,
                 output={"content": response, "type": "text"},
-                thinking_trace=trace.to_dict(),
+                agent_events={
+                    "events": [
+                        {
+                            "session_id": session_id,
+                            "run_id": task.id,
+                            "step_index": 0,
+                            "agent_name": str(task.agent_type),
+                            "event_type": EventType.AGENT_FINISH.value,
+                            "level": "INFO",
+                            "message": "Fallback LLM task completed",
+                            "tool_output": response[:500],
+                        }
+                    ]
+                },
             )
         except Exception as e:
             return AgentResult(
@@ -508,5 +590,19 @@ Break this down into sub-tasks for the available agents."""
                 status=TaskStatus.FAILED,
                 agent_type=task.agent_type,
                 error=str(e),
-                thinking_trace=trace.to_dict(),
+                agent_events={
+                    "events": [
+                        {
+                            "session_id": session_id,
+                            "run_id": task.id,
+                            "step_index": 0,
+                            "agent_name": str(task.agent_type),
+                            "event_type": EventType.ERROR.value,
+                            "level": "ERROR",
+                            "message": str(e),
+                            "error_type": type(e).__name__,
+                            "error_message": str(e),
+                        }
+                    ]
+                },
             )

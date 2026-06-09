@@ -1,4 +1,4 @@
-"""Elasticsearch client for querying traces and structured logs."""
+"""Elasticsearch client for querying traces, structured logs, and agent events."""
 
 from __future__ import annotations
 
@@ -47,8 +47,9 @@ async def close_es() -> None:
 
 
 # ── Index patterns ────────────────────────────────────────────────────────────
-_JAEGER_SPAN_INDEX = "jaeger-span-{date}"
-_JAEGER_INDEX_PATTERN = "jaeger-span-*"
+_TRACE_INDEX = "traces-{date}"
+_TRACE_INDEX_PATTERN = "traces-*,jaeger-*"
+_AGENT_EVENTS_INDEX_PATTERN = "agent-events-*"
 
 # Trace field mappings from Jaeger ES schema
 _TRACE_ID = "traceID"
@@ -72,6 +73,11 @@ _KIND = "kind"
 _STATUS_CODE = "status.code"
 _STATUS_MSG = "status.message"
 _ERROR = "error"
+
+
+def _keyword_field(field: str) -> str:
+    """Return the keyword subfield commonly used for exact-match aggregations."""
+    return f"{field}.keyword"
 
 _TAG_KEYS = [
     "agent.system", "agent.node", "agent.run.id", "agent.skill.name",
@@ -153,7 +159,7 @@ def _normalize_span(hit: dict) -> dict:
             "tags": {t.get("key"): t.get("value") for t in process.get("tags", [])},
         },
         "index": hit["_index"],
-        "score": hit.get("_score", 1.0),
+        "score": hit.get("_score") if hit.get("_score") is not None else 1.0,
     }
 
 
@@ -230,7 +236,7 @@ async def search_spans(
         filter_clauses.append({"range": {_START_TIME_MS: range_query}})
 
     if service:
-        filter_clauses.append({"term": {_SERVICE_NAME: service}})
+        filter_clauses.append({"term": {_keyword_field(_SERVICE_NAME): service}})
 
     if operation:
         filter_clauses.append({"wildcard": {_OPERATION_NAME: f"*{operation}*"}})
@@ -267,7 +273,7 @@ async def search_spans(
 
     try:
         resp = await es.search(
-            index=_JAEGER_INDEX_PATTERN,
+            index=_TRACE_INDEX_PATTERN,
             query=query,
             sort=[{_START_TIME_MS: "desc"}],
             from_=from_,
@@ -293,7 +299,7 @@ async def get_trace_spans(trace_id: str) -> list[dict]:
 
     try:
         resp = await es.search(
-            index=_JAEGER_INDEX_PATTERN,
+            index=_TRACE_INDEX_PATTERN,
             query={"term": {_TRACE_ID: trace_id}},
             sort=[{_START_TIME_MS: "asc"}],
             size=1000,
@@ -417,7 +423,7 @@ async def search_logs(
             {
                 **(_normalize_span(hit) if "fields" in hit["_source"] else {"_source": hit["_source"]}),
                 "index": hit["_index"],
-                "score": hit.get("_score", 1.0),
+                "score": hit.get("_score") if hit.get("_score") is not None else 1.0,
             }
             for hit in resp["hits"]["hits"]
         ]
@@ -441,6 +447,119 @@ def _parse_ts(ts: str) -> int:
         return 0
 
 
+def _normalize_agent_event(hit: dict) -> dict:
+    src = hit.get("_source", {})
+    return {
+        "timestamp": src.get("timestamp") or src.get("@timestamp", ""),
+        "session_id": src.get("session_id", ""),
+        "run_id": src.get("run_id", ""),
+        "step_index": src.get("step_index", 0),
+        "parent_span_id": src.get("parent_span_id", ""),
+        "agent_name": src.get("agent_name", ""),
+        "event_type": src.get("event_type", ""),
+        "level": src.get("level", "INFO"),
+        "message": src.get("message", ""),
+        "thought": src.get("thought"),
+        "tool_name": src.get("tool_name"),
+        "tool_input": src.get("tool_input"),
+        "tool_output": src.get("tool_output"),
+        "duration_ms": src.get("duration_ms"),
+        "token_usage": src.get("token_usage"),
+        "error_type": src.get("error_type"),
+        "error_message": src.get("error_message"),
+        "error_stack": src.get("error_stack"),
+        "llm_model": src.get("llm_model"),
+        "llm_provider": src.get("llm_provider"),
+        "service": src.get("service", ""),
+        "trace_id": src.get("trace_id", ""),
+        "index": hit.get("_index", ""),
+        "score": hit.get("_score") if hit.get("_score") is not None else 1.0,
+    }
+
+
+async def search_agent_events(
+    service: str | None = None,
+    session_id: str | None = None,
+    run_id: str | None = None,
+    agent_name: str | None = None,
+    event_type: str | None = None,
+    keyword: str | None = None,
+    level: str | None = None,
+    start_time_ms: int | None = None,
+    end_time_ms: int | None = None,
+    size: int = 50,
+    from_: int = 0,
+) -> dict:
+    es = await get_es()
+    if not es:
+        return {"total": 0, "hits": [], "error": "Elasticsearch not available"}
+
+    must_clauses = []
+    filter_clauses = []
+
+    if start_time_ms or end_time_ms:
+        range_query = {}
+        if start_time_ms:
+            range_query["gte"] = start_time_ms
+        if end_time_ms:
+            range_query["lte"] = end_time_ms
+        filter_clauses.append({"range": {"@timestamp": range_query}})
+
+    if service:
+        filter_clauses.append({"term": {"service.keyword": service}})
+    if session_id:
+        filter_clauses.append({"term": {"session_id.keyword": session_id}})
+    if run_id:
+        filter_clauses.append({"term": {"run_id.keyword": run_id}})
+    if agent_name:
+        filter_clauses.append({"term": {"agent_name.keyword": agent_name}})
+    if event_type:
+        filter_clauses.append({"term": {"event_type.keyword": event_type}})
+    if level:
+        filter_clauses.append({"term": {"level.keyword": level.upper()}})
+
+    if keyword:
+        must_clauses.append({
+            "query_string": {
+                "query": keyword,
+                "fields": [
+                    "message",
+                    "thought",
+                    "tool_name",
+                    "tool_output",
+                    "error_message",
+                    "llm_model",
+                    "llm_provider",
+                ],
+                "default_operator": "AND",
+            }
+        })
+
+    query = {
+        "bool": {
+            "must": must_clauses or [{"match_all": {}}],
+            "filter": filter_clauses,
+        }
+    }
+
+    try:
+        resp = await es.search(
+            index=_AGENT_EVENTS_INDEX_PATTERN,
+            query=query,
+            sort=[{"@timestamp": "desc"}],
+            from_=from_,
+            size=size,
+            track_total_hits=True,
+        )
+        hits = [_normalize_agent_event(h) for h in resp["hits"]["hits"]]
+        total_obj = resp["hits"].get("total", 0)
+        total = total_obj.get("value", 0) if isinstance(total_obj, dict) else int(total_obj)
+        return {"total": total, "hits": hits}
+    except Exception as e:
+        logger.error("Elasticsearch agent event search failed: %s", e)
+        return {"total": 0, "hits": [], "error": str(e)}
+
+
 # ── Aggregation helpers ────────────────────────────────────────────────────────
 
 async def get_trace_stats(
@@ -450,22 +569,23 @@ async def get_trace_stats(
 ) -> dict:
     """Get aggregated stats for traces."""
     es = await get_es()
+    default_stats = {
+        "total_traces": 0,
+        "total_spans": 0,
+        "error_count": 0,
+        "error_rate": 0,
+        "by_service": [],
+        "by_operation": [],
+        "p50_duration_ms": None,
+        "p95_duration_ms": None,
+        "p99_duration_ms": None,
+    }
     if not es:
-        return {
-            "total_traces": 0,
-            "total_spans": 0,
-            "error_count": 0,
-            "error_rate": 0,
-            "by_service": [],
-            "by_operation": [],
-            "p50_duration_ms": None,
-            "p95_duration_ms": None,
-            "p99_duration_ms": None,
-        }
+        return default_stats
 
     filter_clauses = []
     if service:
-        filter_clauses.append({"term": {_SERVICE_NAME: service}})
+        filter_clauses.append({"term": {_keyword_field(_SERVICE_NAME): service}})
     if start_time_ms or end_time_ms:
         range_query = {}
         if start_time_ms:
@@ -477,15 +597,14 @@ async def get_trace_stats(
     query = {"bool": {"filter": filter_clauses}} if filter_clauses else {"match_all": {}}
 
     aggs = {
-        "total_spans": {"value_count": {"field": _SPAN_ID}},
         "error_spans": {
             "filter": {"term": {"tag.status.code": 2}}
         },
         "by_service": {
-            "terms": {"field": f"{_PROCESS}.{_SERVICE_NAME}", "size": 20}
+            "terms": {"field": _keyword_field(_SERVICE_NAME), "size": 20}
         },
         "by_operation": {
-            "terms": {"field": _OPERATION_NAME, "size": 20}
+            "terms": {"field": _keyword_field(_OPERATION_NAME), "size": 20}
         },
         "p50_duration": {
             "percentiles": {"field": _DURATION_MS, "percents": [50, 95, 99]}
@@ -494,17 +613,18 @@ async def get_trace_stats(
 
     try:
         resp = await es.search(
-            index=_JAEGER_INDEX_PATTERN,
+            index=_TRACE_INDEX_PATTERN,
             query=query,
             aggs=aggs,
             size=0,
             ignore_unavailable=True,
+            track_total_hits=True,
         )
 
         aggs_result = resp.get("aggregations", {})
-        total_spans = (aggs_result.get("total_spans", {}) or {}).get("value", 0)
+        total_spans = (resp.get("hits", {}) or {}).get("total", {}).get("value", 0)
         error_spans = (aggs_result.get("error_spans", {}) or {}).get("doc_count", 0)
-        total_traces = (resp.get("hits", {}) or {}).get("total", {}).get("value", 0)
+        total_traces = total_spans
 
         by_service = [
             {"service": b["key"], "count": b["doc_count"]}
@@ -531,5 +651,21 @@ async def get_trace_stats(
         }
 
     except Exception as e:
-        logger.error("Elasticsearch stats aggregation failed: %s", e)
-        return {"error": str(e)}
+        logger.warning("Elasticsearch stats aggregation degraded, falling back to totals only: %s", e)
+        try:
+            resp = await es.search(
+                index=_TRACE_INDEX_PATTERN,
+                query=query,
+                size=0,
+                ignore_unavailable=True,
+                track_total_hits=True,
+            )
+            total_spans = (resp.get("hits", {}) or {}).get("total", {}).get("value", 0)
+            return {
+                **default_stats,
+                "total_traces": total_spans,
+                "total_spans": total_spans,
+            }
+        except Exception as fallback_error:
+            logger.error("Elasticsearch stats fallback failed: %s", fallback_error)
+            return {**default_stats, "error": str(fallback_error)}

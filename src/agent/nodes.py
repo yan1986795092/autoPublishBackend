@@ -739,6 +739,14 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
     if handler:
         try:
             t_input = {**task_input}
+            task_session_id = (
+                state.get("context", {}).get("session_id")
+                or state.get("context", {}).get("conversation_id")
+                or "default"
+            )
+            t_input["_task_id"] = task.get("id") or task_id or agent_type
+            t_input["_session_id"] = task_session_id
+            t_input["session_id"] = task_session_id
 
             # 上下文隔离：只传 public 内容
             dep_context = _build_dependency_context(task, state)
@@ -1106,7 +1114,7 @@ def _persist_results_sync(state: AgentGraphState, sections: list, full_text_part
             total_steps=len(state.get("task_queue", [])),
             completed_steps=len(state.get("completed_task_ids", [])),
             total_tokens=sum(s.get("tokens_used", 0) for s in state.get("task_results", {}).values()),
-            thinking_trace={"steps": state.get("thinking_steps", [])},
+            agent_events={"events": state.get("thinking_steps", [])},
         )
 
         # 子任务级持久化

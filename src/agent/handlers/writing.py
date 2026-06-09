@@ -112,6 +112,8 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             llm, lc_messages,
             tool_registry=task_input.get("_tool_registry"),
             agent_type="WritingAgent",
+            session_id=str(task_input.get("_session_id") or task_input.get("session_id") or "default"),
+            run_id=str(task_input.get("_task_id") or ""),
             stream=True,
             on_chunk=task_input.get("_on_llm_chunk"),
         )

@@ -9,12 +9,13 @@ import asyncio
 import json
 import time
 import uuid
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Optional
 
 import httpx
 import structlog
 
 from src.config import get_settings
+from src.logging_shared import AgentEvent, EventType, TokenUsage, get_agent_event_emitter
 
 logger = structlog.get_logger(__name__)
 
@@ -74,6 +75,66 @@ class LLMGateway:
             result.append({"role": role, "content": content})
         return result
 
+    @staticmethod
+    def _extract_event_context(messages: list[dict]) -> dict[str, Any]:
+        metadata = {}
+        for message in messages:
+            if isinstance(message, dict) and isinstance(message.get("metadata"), dict):
+                metadata = message["metadata"]
+                break
+
+        run_id = str(metadata.get("run_id") or metadata.get("task_id") or "")
+        session_id = str(metadata.get("session_id") or metadata.get("conversation_id") or "default")
+        agent_name = str(metadata.get("agent_name") or metadata.get("agent_type") or "llm_gateway")
+        parent_span_id = str(metadata.get("parent_span_id") or "")
+        step_index = metadata.get("step_index")
+
+        return {
+            "run_id": run_id,
+            "session_id": session_id,
+            "agent_name": agent_name,
+            "parent_span_id": parent_span_id,
+            "step_index": step_index if isinstance(step_index, int) else None,
+        }
+
+    async def _emit_gateway_event(
+        self,
+        *,
+        event_type: str,
+        level: str,
+        message: str,
+        messages: list[dict],
+        trace_id: str,
+        duration_ms: float | None = None,
+        token_usage: TokenUsage | None = None,
+        error_type: str | None = None,
+        error_message: str | None = None,
+        tool_output: str | None = None,
+    ) -> None:
+        context = self._extract_event_context(messages)
+        emitter = get_agent_event_emitter()
+        event = AgentEvent(
+            session_id=context["session_id"],
+            run_id=context["run_id"],
+            agent_name=context["agent_name"],
+            parent_span_id=context["parent_span_id"],
+            event_type=event_type,
+            level=level,
+            message=message,
+            duration_ms=duration_ms,
+            token_usage=token_usage,
+            error_type=error_type,
+            error_message=error_message,
+            llm_model=self.model or "auto",
+            llm_provider=self.provider,
+            tool_name="llm_gateway",
+            tool_output=tool_output,
+            trace_id=trace_id,
+        )
+        if context["step_index"] is not None:
+            event.step_index = context["step_index"]
+        await emitter.emit(event)
+
     async def generate(
         self,
         messages: list[dict],
@@ -107,6 +168,13 @@ class LLMGateway:
                 "stream": True,
                 "message_count": len(messages),
             },
+        )
+        await self._emit_gateway_event(
+            event_type=EventType.TOOL_CALL.value,
+            level="INFO",
+            message="LLM Gateway streaming request started",
+            messages=payload["messages"],
+            trace_id=trace_id,
         )
 
         try:
@@ -151,6 +219,15 @@ class LLMGateway:
                         "status_code": 200,
                     },
                 )
+                await self._emit_gateway_event(
+                    event_type=EventType.TOOL_RESULT.value,
+                    level="INFO",
+                    message="LLM Gateway streaming request completed",
+                    messages=payload["messages"],
+                    trace_id=trace_id,
+                    duration_ms=elapsed_ms,
+                    tool_output=full_content[:500],
+                )
 
         except httpx.HTTPStatusError as e:
             logger.error(
@@ -163,6 +240,15 @@ class LLMGateway:
                     "error_message": str(e),
                 },
             )
+            await self._emit_gateway_event(
+                event_type=EventType.ERROR.value,
+                level="ERROR",
+                message="LLM Gateway streaming request failed",
+                messages=payload["messages"],
+                trace_id=trace_id,
+                error_type="HTTPStatusError",
+                error_message=str(e),
+            )
             raise
         except Exception as e:
             logger.error(
@@ -174,6 +260,15 @@ class LLMGateway:
                     "error_type": type(e).__name__,
                     "error_message": str(e),
                 },
+            )
+            await self._emit_gateway_event(
+                event_type=EventType.ERROR.value,
+                level="ERROR",
+                message="LLM Gateway streaming request failed",
+                messages=payload["messages"],
+                trace_id=trace_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
             )
             raise
 
@@ -212,6 +307,13 @@ class LLMGateway:
                 "message_count": len(messages),
             },
         )
+        await self._emit_gateway_event(
+            event_type=EventType.TOOL_CALL.value,
+            level="INFO",
+            message="LLM Gateway request started",
+            messages=payload["messages"],
+            trace_id=trace_id,
+        )
 
         try:
             response = await client.post("/v1/chat/completions", json=payload)
@@ -240,6 +342,20 @@ class LLMGateway:
                     "status_code": 200,
                 },
             )
+            await self._emit_gateway_event(
+                event_type=EventType.TOOL_RESULT.value,
+                level="INFO",
+                message="LLM Gateway request completed",
+                messages=payload["messages"],
+                trace_id=trace_id,
+                duration_ms=elapsed_ms,
+                token_usage=TokenUsage(
+                    prompt_tokens=int(usage.get("prompt_tokens", 0) or 0),
+                    completion_tokens=int(usage.get("completion_tokens", 0) or 0),
+                    total_tokens=int(usage.get("total_tokens", 0) or 0),
+                ),
+                tool_output=content[:500],
+            )
 
             return content
 
@@ -254,6 +370,15 @@ class LLMGateway:
                     "error_message": str(e),
                 },
             )
+            await self._emit_gateway_event(
+                event_type=EventType.ERROR.value,
+                level="ERROR",
+                message="LLM Gateway request failed",
+                messages=payload["messages"],
+                trace_id=trace_id,
+                error_type="HTTPStatusError",
+                error_message=str(e),
+            )
             raise
         except Exception as e:
             logger.error(
@@ -265,5 +390,14 @@ class LLMGateway:
                     "error_type": type(e).__name__,
                     "error_message": str(e),
                 },
+            )
+            await self._emit_gateway_event(
+                event_type=EventType.ERROR.value,
+                level="ERROR",
+                message="LLM Gateway request failed",
+                messages=payload["messages"],
+                trace_id=trace_id,
+                error_type=type(e).__name__,
+                error_message=str(e),
             )
             raise

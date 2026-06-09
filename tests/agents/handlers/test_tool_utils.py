@@ -266,6 +266,31 @@ class TestCallLLM:
         assert mock_llm.ainvoke.call_count == 2
 
     @pytest.mark.asyncio
+    async def test_tool_roundtrip_propagates_session_and_run_id(self, mock_llm, registry):
+        first_response = AIMessage(
+            content="",
+            tool_calls=[{"name": "web_search", "args": {"query": "test"}, "id": "tc_1"}],
+        )
+        second_response = AIMessage(content="搜索完成")
+        mock_llm.ainvoke.side_effect = [first_response, second_response]
+
+        with patch("src.agent.handlers.tool_utils.execute_tool_calls", new_callable=AsyncMock) as mock_execute:
+            mock_execute.side_effect = lambda tool_calls, tool_registry, current_messages, **kwargs: current_messages + [ToolMessage(content="搜索结果: test", tool_call_id="tc_1")]
+            result = await call_llm(
+                mock_llm,
+                [HumanMessage(content="搜索一下")],
+                tool_registry=registry,
+                agent_type="WritingAgent",
+                session_id="session-xyz",
+                run_id="run-xyz",
+            )
+
+        assert result == "搜索完成"
+        mock_execute.assert_awaited_once()
+        assert mock_execute.await_args.kwargs["session_id"] == "session-xyz"
+        assert mock_execute.await_args.kwargs["run_id"] == "run-xyz"
+
+    @pytest.mark.asyncio
     async def test_tool_not_found_in_loop(self, mock_llm, registry):
         """工具不存在时应有错误提示"""
         first = AIMessage(

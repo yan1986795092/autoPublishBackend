@@ -5,7 +5,6 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
 import asyncio
-import os
 
 from src.core.exceptions import GenerateError
 from src.core.logging import setup_logging
@@ -15,9 +14,10 @@ from src.database import engine
 from src.models import Base
 from src.api import auth, contents, publish, platforms, templates, presets, ai_editor, personas
 from src.api.skills import router as skills_router
+from src.api.chat import router as chat_router
 from src.agent.api import router as agent_router
 from src.agent.workflow.worker import worker
-from src.observability import setup_observability, setup_local_dev
+from src.observability import setup_observability
 from src.observability import metrics as obs_metrics
 from src.observability.api import router as observability_router
 from src.observability.es_client import close_es
@@ -32,16 +32,14 @@ async def lifespan(app: FastAPI):
     settings = get_settings()
     # Unified logging configuration (reads settings.log_level, settings.log_json_format)
     setup_logging(settings)
-    use_local_dev = os.getenv("OTEL_EXPORTER_OTLP_ENDPOINT", "").strip() == ""
 
-    if use_local_dev:
-        tracer, meter = setup_local_dev(settings)
-    else:
-        tracer, meter = setup_observability(
-            service_name="autopublish-api",
-            service_version="2.0.0",
-            settings=settings,
-        )
+    # 统一 tracing 初始化：HTTP spans 由 LoggingMiddleware 直写 ES，
+    # OTel tracer 保留给 agent nodes 的 start_as_current_span() 调用
+    tracer, meter = setup_observability(
+        service_name="autopublish-api",
+        service_version="2.0.0",
+        settings=settings,
+    )
 
     obs_metrics.create_meters()
 
@@ -49,6 +47,20 @@ async def lifespan(app: FastAPI):
     try:
         from src.logging_shared.es_writer import start_writer as _start_es
         await _start_es()
+    except Exception:
+        pass
+
+    # 启动 Agent 事件 ES 写入器
+    try:
+        from src.logging_shared.agent_es_writer import start_writer as _start_agent_es
+        await _start_agent_es()
+    except Exception:
+        pass
+
+    # 启动 TracingMiddleware 的 span 直写 ES 写入器
+    try:
+        from src.logging_shared.middleware import start_span_writer as _start_span
+        await _start_span()
     except Exception:
         pass
 
@@ -66,6 +78,18 @@ async def lifespan(app: FastAPI):
     try:
         from src.logging_shared.es_writer import stop_writer as _stop_es
         await _stop_es()
+    except Exception:
+        pass
+
+    try:
+        from src.logging_shared.agent_es_writer import stop_writer as _stop_agent_es
+        await _stop_agent_es()
+    except Exception:
+        pass
+
+    try:
+        from src.logging_shared.middleware import stop_span_writer as _stop_span
+        await _stop_span()
     except Exception:
         pass
 
@@ -152,6 +176,7 @@ app.include_router(templates.router, prefix="/api/v1")
 app.include_router(ai_editor.router, prefix="/api/v1")
 app.include_router(personas.router, prefix="/api/v1")
 app.include_router(skills_router)
+app.include_router(chat_router)
 app.include_router(agent_router, prefix="/api/v1")
 app.include_router(observability_router)
 

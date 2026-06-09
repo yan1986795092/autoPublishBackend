@@ -58,7 +58,7 @@ class AgentResult:
     output: dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
     usage: UsageInfo = field(default_factory=UsageInfo)
-    thinking_trace: Optional[dict] = None
+    agent_events: Optional[dict] = None
     # 上下文隔离：public 字段向用户展示和传递给下游 Agent，
     # internal 字段仅在编排层使用，不会泄漏到下游
     public_output: dict[str, Any] = field(default_factory=dict)

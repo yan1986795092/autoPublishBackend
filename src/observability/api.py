@@ -23,6 +23,8 @@ from .es_client import (
     get_trace_spans,
     search_logs,
     get_trace_stats,
+    search_agent_events,
+    get_es,
 )
 
 router = APIRouter(prefix="/api/v1/observability", tags=["observability"])
@@ -75,6 +77,48 @@ class TraceDetailResponse(BaseModel):
     span_count: int
     error_count: int
     spans: list[SpanRow]
+
+
+class AgentEventRow(BaseModel):
+    timestamp: str
+    session_id: str = ""
+    run_id: str = ""
+    step_index: int = 0
+    parent_span_id: str = ""
+    agent_name: str = ""
+    event_type: str = ""
+    level: str = "INFO"
+    message: str = ""
+    thought: Optional[str] = None
+    tool_name: Optional[str] = None
+    tool_input: Optional[dict[str, Any]] = None
+    tool_output: Optional[str] = None
+    duration_ms: Optional[float] = None
+    token_usage: Optional[dict[str, Any]] = None
+    error_type: Optional[str] = None
+    error_message: Optional[str] = None
+    error_stack: Optional[str] = None
+    llm_model: Optional[str] = None
+    llm_provider: Optional[str] = None
+    service: str = ""
+    trace_id: str = ""
+    index: str = ""
+    score: float = 1.0
+
+
+class AgentEventSearchResponse(BaseModel):
+    total: int
+    page: int
+    page_size: int
+    events: list[AgentEventRow]
+
+
+class AgentEventDiagnosticsResponse(BaseModel):
+    total: int
+    latest_event: Optional[AgentEventRow] = None
+    services: list[dict[str, Any]]
+    agent_names: list[dict[str, Any]]
+    event_types: list[dict[str, Any]]
 
 
 # ── Time utilities ───────────────────────────────────────────────────────────────
@@ -254,6 +298,86 @@ async def get_stats_route(
         p50_duration_ms=stats.get("p50_duration_ms"),
         p95_duration_ms=stats.get("p95_duration_ms"),
         p99_duration_ms=stats.get("p99_duration_ms"),
+    )
+
+
+@router.get("/agent-events", response_model=AgentEventSearchResponse)
+async def get_agent_events(
+    service: str = Query("", description="Service name filter"),
+    session_id: str = Query("", description="Session ID filter"),
+    run_id: str = Query("", description="Run ID filter"),
+    agent_name: str = Query("", description="Agent name filter"),
+    event_type: str = Query("", description="Event type filter"),
+    keyword: str = Query("", description="Keyword search in message/tool/model/error fields"),
+    level: str = Query("", description="Log level: DEBUG, INFO, WARNING, ERROR"),
+    time: str = Query("1h", description="Time range: 1h, 24h, 7d, or ISO8601"),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=500),
+):
+    start_ms = _parse_time(time)
+    end_ms = int(datetime.now(tz=timezone.utc).timestamp() * 1000)
+    from_ = (page - 1) * page_size
+
+    result = await search_agent_events(
+        service=service or None,
+        session_id=session_id or None,
+        run_id=run_id or None,
+        agent_name=agent_name or None,
+        event_type=event_type or None,
+        keyword=keyword or None,
+        level=level or None,
+        start_time_ms=start_ms,
+        end_time_ms=end_ms,
+        size=page_size,
+        from_=from_,
+    )
+
+    if "error" in result:
+        raise HTTPException(status_code=503, detail=result["error"])
+
+    events = [AgentEventRow(**item) for item in result["hits"]]
+    return AgentEventSearchResponse(
+        total=result["total"],
+        page=page,
+        page_size=page_size,
+        events=events,
+    )
+
+
+@router.get("/agent-events/diagnostics", response_model=AgentEventDiagnosticsResponse)
+async def get_agent_events_diagnostics():
+    es = await get_es()
+    if not es:
+        raise HTTPException(status_code=503, detail="Elasticsearch not available")
+
+    try:
+        resp = await es.search(
+            index="agent-events-*",
+            query={"match_all": {}},
+            sort=[{"@timestamp": "desc"}],
+            size=1,
+            track_total_hits=True,
+            aggs={
+                "services": {"terms": {"field": "service.keyword", "size": 10}},
+                "agent_names": {"terms": {"field": "agent_name.keyword", "size": 10}},
+                "event_types": {"terms": {"field": "event_type.keyword", "size": 10}},
+            },
+            ignore_unavailable=True,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail=f"Diagnostics query failed: {exc}")
+
+    hits = (resp.get("hits", {}) or {}).get("hits", [])
+    latest_event = AgentEventRow(**hits[0]["_source"], index=hits[0].get("_index", ""), score=hits[0].get("_score") if hits[0].get("_score") is not None else 1.0) if hits else None
+    total = (resp.get("hits", {}) or {}).get("total", {}).get("value", 0)
+    aggs = resp.get("aggregations", {}) or {}
+
+    return AgentEventDiagnosticsResponse(
+        total=total,
+        latest_event=latest_event,
+        services=[{"key": b.get("key", ""), "count": b.get("doc_count", 0)} for b in (aggs.get("services", {}) or {}).get("buckets", [])],
+        agent_names=[{"key": b.get("key", ""), "count": b.get("doc_count", 0)} for b in (aggs.get("agent_names", {}) or {}).get("buckets", [])],
+        event_types=[{"key": b.get("key", ""), "count": b.get("doc_count", 0)} for b in (aggs.get("event_types", {}) or {}).get("buckets", [])],
     )
 
 
