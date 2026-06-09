@@ -61,7 +61,7 @@ class HITLManager:
         except asyncio.TimeoutError:
             gate.state = "timed_out"
             gate.result = gate.default_value
-            logger.warning("HITL: decision %s timed out", gate.gate_id)
+            logger.warning("HITL: 决策 %s 超时", gate.gate_id)
             return gate.default_value
         finally:
             self._gate_events.pop(gate.gate_id, None)
@@ -199,7 +199,7 @@ class HITLManager:
     ) -> bool:
         """人类提交决策结果"""
         if gate_id not in self._pending_gates:
-            logger.warning("HITL: unknown gate %s", gate_id)
+            logger.warning("HITL: 未知门 %s", gate_id)
             return False
 
         self._gate_results[gate_id] = result

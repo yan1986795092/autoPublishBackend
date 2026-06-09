@@ -63,7 +63,7 @@ async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                 "thinking_steps": [{"agent": "DiagramAgent", "action": "图表生成完成", "reasoning": f"生成{diagram_type}图：{topic}", "status": "done"}],
             }
         except Exception as e:
-            logger.warning("DiagramAgent LLM call failed, falling back to template: %s", e)
+            logger.warning("DiagramAgent LLM 调用失败，回退到模板: %s", e)
 
     code = f"mindmap\n  root(({topic}))\n    核心概念\n      定义\n    关键技术\n      技术A\n    应用场景"
     return {

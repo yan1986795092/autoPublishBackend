@@ -13,6 +13,11 @@ from langchain_openai import ChatOpenAI
 
 from .state import AgentGraphState
 from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, validate_plan_structure
+from .platform_registry import (
+    PLATFORMS,
+    detect_platform,
+    get_names_map,
+)
 from .handlers import HANDLER_MAP, handle_fallback
 
 from .cache import agent_cache
@@ -55,12 +60,7 @@ def _get_tracer() -> trace.Tracer:
 # ──────────────────────────────────────────────
 
 def _resolve_dep_id(dep: str | int, task_queue: list[dict]) -> str | None:
-    """将依赖引用统一解析为 task_id（支持数字索引和字符串 ID）
-
-    - 数字索引：取 task_queue[dep] 的 id 字段
-    - 字符串 ID：在 task_queue 中查找对应 id 的任务，返回其 id
-    - 找不到时返回 None（表示依赖引用无效，应视为未满足）
-    """
+    """将依赖引用统一解析为 task_id（支持数字索引和字符串 ID）"""
     if isinstance(dep, int):
         if 0 <= dep < len(task_queue):
             return task_queue[dep].get("id")
@@ -71,11 +71,12 @@ def _resolve_dep_id(dep: str | int, task_queue: list[dict]) -> str | None:
             return dep_str
     return None
 
+
 def _classify_complexity(user_request: str) -> str:
-    """对用户需求进行复杂度分类"""
+    """对用户需求进行复杂度分类（仅用于未检测到平台的请求）"""
     text = user_request.lower()
     complex_keywords = ["图表", "架构图", "流程图", "思维导图", "配图", "封面", "多平台", "报告", "行业分析", "视频", "脚本", "newsletter", "博客", "深度"]
-    medium_keywords = ["搜索", "热点", "热搜", "趋势", "优化", "seo", "小红书", "公众号", "知乎", "微博", "推广", "营销"]
+    medium_keywords = ["搜索", "热点", "热搜", "趋势", "优化", "seo", "推广", "营销"]
 
     complex_count = sum(1 for kw in complex_keywords if kw in text)
     medium_count = sum(1 for kw in medium_keywords if kw in text)
@@ -87,49 +88,34 @@ def _classify_complexity(user_request: str) -> str:
     return "simple"
 
 
-def _build_fallback_plan(user_request: str, complexity: str) -> dict:
-    """
-    Emergency fallback when LLM planning fails.
-    Produces the same task structure that _parse_plan returns.
-    IMPORTANT: dependencies are integer indices, NOT string UUIDs.
-    The graph's _resolve_dep_id handles the conversion.
+def _build_fallback_plan(user_request: str) -> dict:
+    """极简兜底：只用 WritingAgent + ReviewAgent，平台 content_type 由检测结果决定。
+
+    Pipeline 完全由 LLM 自主决定，这里只保证在 LLM 不可用时系统能跑起来。
     """
     goal = user_request[:200]
+    detected = detect_platform(user_request)
+    p = PLATFORMS.get(detected) if detected else None
+    content_type = p.content_type if p else "blog"
 
-    if complexity == "simple":
-        task0 = {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "high"}
-        task1 = {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [0], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "medium"}
-        return {
-            "goal": goal,
-            "reasoning": "Fallback (simple): direct write + review",
-            "tasks": [task0, task1],
-            "plan_method": "template",
-        }
-
-    elif complexity == "medium":
-        task0 = {"id": str(uuid.uuid4()), "agent_type": "WebSearch", "input": {"query": user_request, "count": 5}, "dependencies": [], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "high"}
-        task1 = {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [0], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "high"}
-        task2 = {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": [1], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "medium"}
-        task3 = {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [1, 2], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "medium"}
-        return {
-            "goal": goal,
-            "reasoning": "Fallback (medium): research + write + SEO + review",
-            "tasks": [task0, task1, task2, task3],
-            "plan_method": "template",
-        }
-
-    else:  # complex
-        task0 = {"id": str(uuid.uuid4()), "agent_type": "WebSearch", "input": {"query": user_request, "count": 8}, "dependencies": [], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "high"}
-        task1 = {"id": str(uuid.uuid4()), "agent_type": "WritingAgent", "input": {"topic": user_request, "content_type": "blog"}, "dependencies": [0], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "high"}
-        task2 = {"id": str(uuid.uuid4()), "agent_type": "DiagramAgent", "input": {"topic": user_request, "diagram_type": "auto"}, "dependencies": [1], "can_parallel_with": [1], "retry_on_low_quality": True, "priority": "medium"}
-        task3 = {"id": str(uuid.uuid4()), "agent_type": "SEOAgent", "input": {"topic": user_request}, "dependencies": [1], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "medium"}
-        task4 = {"id": str(uuid.uuid4()), "agent_type": "ReviewAgent", "input": {"topic": user_request}, "dependencies": [1, 2, 3], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "medium"}
-        return {
-            "goal": goal,
-            "reasoning": "Fallback (complex): research + write + diagram + SEO + review",
-            "tasks": [task0, task1, task2, task3, task4],
-            "plan_method": "template",
-        }
+    task0 = {
+        "id": str(uuid.uuid4()), "agent_type": "WritingAgent",
+        "input": {"topic": user_request, "content_type": content_type},
+        "dependencies": [], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "high",
+    }
+    task1 = {
+        "id": str(uuid.uuid4()), "agent_type": "ReviewAgent",
+        "input": {"topic": user_request, "content_type": content_type},
+        "dependencies": [0], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "medium",
+    }
+    platform_hint = f"（{p.name}）" if p else ""
+    return {
+        "goal": goal,
+        "tasks": [task0, task1],
+        "reasoning": f"兜底计划{platform_hint}：写作 + 审核",
+        "plan_method": "template",
+        "platform": detected,
+    }
 
 
 def _get_llm(state: AgentGraphState, agent_type: str) -> ChatOpenAI:
@@ -137,7 +123,7 @@ def _get_llm(state: AgentGraphState, agent_type: str) -> ChatOpenAI:
     models = state.get("_llm_models", {})
     llm = models.get(agent_type, models.get("default"))
     if llm is None:
-        logger.warning("No LLM configured, falling back to mock mode", agent_type=agent_type)
+        logger.warning("未配置 LLM，回退到模拟模式", agent_type=agent_type)
     return llm
 
 
@@ -162,7 +148,7 @@ async def _publish_streaming_event(state: AgentGraphState, event_type: str, data
             elif event_type == "reasoning":
                 await task_queue.publish_reasoning(task_id, data)
         except Exception as e:
-            logger.warning("Failed to publish streaming event", event_type=event_type, error=str(e))
+            logger.warning("发布流式事件失败", event_type=event_type, error=str(e))
 
 
 def _add_thinking_step(state: AgentGraphState, agent: str, action: str, reasoning: str = "",
@@ -190,11 +176,11 @@ def _post_process_context(
     state: AgentGraphState,
 ) -> None:
     """
-    Post-processing after handler execution:
-    1. Log creative decision (WritingAgent only)
-    2. Write output to context store via permission system
-    3. Extract and update creative anchors (WritingAgent only)
-    4. Check anchor drift (ReviewAgent only)
+    Handler 执行后的后处理：
+    1. 记录创意决策（仅 WritingAgent）
+    2. 通过权限系统将输出写入上下文存储
+    3. 提取并更新创意锚点（仅 WritingAgent）
+    4. 检查锚点偏移（仅 ReviewAgent）
     """
     try:
         if agent_type == "WritingAgent":
@@ -220,20 +206,20 @@ def _post_process_context(
                     store=store,
                 )
                 if write_result != WriteResult.ACCEPTED:
-                    logger.warning("WritingAgent content write was not accepted", write_result=write_result)
+                    logger.warning("WritingAgent 内容写入未被接受", write_result=write_result)
 
             # 3. Extract and update creative anchors
             updated = update_creative_anchors(result, store)
             if updated:
-                logger.info("WritingAgent updated creative anchors from output")
+                logger.info("WritingAgent 从输出中更新了创意锚点")
 
         elif agent_type == "ReviewAgent":
-            # Check anchor drift from review output
+            # 从审核输出中检查锚点偏移
             drifts = check_anchor_drift_from_review(result, store)
             if drifts > 0:
-                logger.info("ReviewAgent detected anchor drift signals", drift_count=drifts)
+                logger.info("ReviewAgent 检测到锚点偏移信号", drift_count=drifts)
 
-            # Write review feedback to store
+            # 将审核反馈写入存储
             output = result.get("output", {})
             if isinstance(output, dict):
                 feedback_text = output.get("content", "")
@@ -250,11 +236,11 @@ def _post_process_context(
                 )
 
     except Exception as e:
-        logger.warning("Post-processing context failed", agent_type=agent_type, error=str(e))
+        logger.warning("后处理上下文失败", agent_type=agent_type, error=str(e))
 
 
 def _serialize_context_for_prompt(ctx: dict, agent_type: str) -> str:
-    """Serialize a permission-scoped context view into a prompt string."""
+    """将权限作用域的上下文视图序列化为提示字符串。"""
     parts = ["[Context]"]
 
     system = ctx.get("system", {})
@@ -333,7 +319,7 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
         # 如果上游已经提供了计划（来自 SSE 端点），直接复用
         existing_plan = state.get("plan")
         if existing_plan and existing_plan.get("tasks"):
-            logger.info("Using pre-computed plan from SSE, skipping re-decomposition")
+            logger.info("使用 SSE 预计算的计划，跳过重新分解")
             return {
                 "trace_task_id": trace_id,
                 "start_time": time.time(),
@@ -341,7 +327,7 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
                     "step_number": 1,
                     "agent": "ManagerAgent",
                     "action": "任务拆解完成",
-                    "reasoning": "Using pre-computed plan from SSE endpoint",
+                    "reasoning": "使用 SSE 端点预计算的计划",
                     "input_summary": user_request[:200],
                     "output_summary": f"执行计划：{existing_plan.get('reasoning', '')[:80]}...",
                     "tokens_used": 0,
@@ -363,12 +349,21 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
         span.add_event("step_started", {"step": "complexity_classification"})
         updates.update(_add_thinking_step(
             state, "ManagerAgent", "decompose",
-            reasoning=f"Analyzing user request: {user_request[:100]}...",
+            reasoning=f"正在分析用户请求：{user_request[:100]}...",
             input_summary=user_request[:200],
         ))
 
-        logger.info("Classified request complexity", complexity=complexity, preview=user_request[:80])
+        logger.info("已分类请求复杂度", complexity=complexity, preview=user_request[:80])
         span.set_attribute("agent.complexity", complexity)
+
+        # ── 平台感知检测 ───────────────────────────────
+        detected = detect_platform(user_request)
+        names_map = get_names_map()
+        # Fallback for "default" (no platform detected) — use generic name
+        platform = detected if detected else "generic"
+        platform_name = names_map.get(platform, "通用内容")
+        span.set_attribute("agent.platform", platform)
+        logger.info("检测到平台：%s，请求：%s", platform_name, user_request[:60])
 
         # ══════════════════════════════════════════════
         # 主路径：始终尝试 LLM 分解（所有复杂度等级）
@@ -379,21 +374,17 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
                 context_str = json.dumps(state.get("context", {}), ensure_ascii=False, indent=2) if state.get("context") else "{}"
                 response = await llm.ainvoke([
                     SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-                    HumanMessage(content=f"User request: {user_request}\n\nComplexity: {complexity}\nContext: {context_str}\n\nBreak this down into sub-tasks."),
+                    HumanMessage(content=f"用户请求：{user_request}\n\n复杂度：{complexity}\n检测到的平台：{platform_name}\n上下文：{context_str}\n\n请将其分解为子任务，根据检测到的平台进行调整。"),
                 ])
-                plan = _parse_plan(response.content, user_request)
+                plan = _parse_plan(response.content, user_request, platform=detected)
 
-                # 如果 LLM 返回的任务数明显异常，回退到模板
-                if complexity == "medium" and len(plan.get("tasks", [])) > 8:
-                    logger.warning("LLM plan has too many tasks (%d) for medium complexity, using template", len(plan["tasks"]))
-                    plan = _build_fallback_plan(user_request, complexity)
-                elif complexity == "complex" and len(plan.get("tasks", [])) < 2:
-                    logger.warning("LLM plan has too few tasks (%d) for complex, using template", len(plan["tasks"]))
-                    plan = _build_fallback_plan(user_request, complexity)
+                # 任务数异常时用极简兜底（极少数情况）
+                if len(plan.get("tasks", [])) == 0:
+                    logger.warning("LLM 计划没有任务，使用兜底方案")
+                    plan = _build_fallback_plan(user_request)
                 else:
-                    # LLM 成功，添加 plan_method
                     plan["plan_method"] = "llm"
-                    logger.info("LLM plan generated: %d tasks", len(plan.get("tasks", [])))
+                    logger.info("LLM 计划已生成：%d 个任务", len(plan.get("tasks", [])))
 
                 updates["plan"] = plan
                 updates["plan_reasoning"] = plan.get("reasoning", "")
@@ -402,7 +393,7 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
                     "step_number": len(updates["thinking_steps"]) + 1,
                     "agent": "ManagerAgent",
                     "action": "任务拆解完成",
-                    "reasoning": f"{plan.get('plan_method', 'llm')} 规划完成，共 {len(plan.get('tasks', []))} 个任务",
+                    "reasoning": f"{plan.get('plan_method', 'llm')} 规划完成，共 {len(plan.get('tasks', []))} 个任务（平台={platform_name}）",
                     "input_summary": user_request[:200],
                     "output_summary": f"执行计划：{plan.get('reasoning', '')[:80]}...",
                     "tokens_used": 0,
@@ -416,48 +407,43 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
                 return updates
 
             except Exception as e:
-                logger.warning("LLM decompose failed, using template fallback", error=str(e))
+                logger.warning("LLM 分解失败，使用模板兜底", error=str(e))
                 span.record_exception(e)
-                # LLM 失败，进入模板兜底路径
 
         # ══════════════════════════════════════════════
-        # 兜底路径：模板（仅在 LLM 完全不可用/失败时使用）
+        # 兜底路径：平台感知模板（LLM 完全不可用/失败时）
         # ══════════════════════════════════════════════
-        if not llm:
-            logger.warning("No LLM available for planning, using template fallback")
-            span.add_event("llm_unavailable", {"complexity": complexity})
-        else:
-            span.add_event("llm_failed", {"error": str(e) if 'e' in dir() else "unknown"})
-
-        plan = _build_fallback_plan(user_request, complexity)
+        if detected:
+            plan = _build_fallback_plan(user_request)
         updates["plan"] = plan
         updates["plan_reasoning"] = plan["reasoning"]
         updates["task_queue"] = plan["tasks"]
         updates["thinking_steps"].append({
             "step_number": len(updates["thinking_steps"]) + 1,
             "agent": "ManagerAgent",
-            "action": "任务拆解完成（模板兜底）",
-            "reasoning": f"LLM 不可用/失败，使用模板兜底 ({complexity})，共 {len(plan['tasks'])} 个任务",
+            "action": "任务拆解完成（LLM兜底）",
+            "reasoning": f"平台={platform_name}，{len(plan['tasks'])} 个任务",
             "input_summary": user_request[:200],
             "output_summary": f"执行计划：{plan['reasoning'][:80]}...",
             "tokens_used": 0,
             "time_elapsed": 0,
             "status": "done",
         })
-        span.add_event("plan_built", {"task_count": len(plan["tasks"]), "method": "template"})
+        span.add_event("plan_built", {"task_count": len(plan["tasks"]), "method": "template", "platform": detected})
         span.set_attribute("plan.method", "template")
         span.set_attribute("agent.task_count", len(plan["tasks"]))
+        span.set_attribute("agent.platform", detected or "none")
         span.set_status(Status(StatusCode.OK))
         return updates
 
 
-def _parse_plan(response: str, goal: str) -> dict:
+def _parse_plan(response: str, goal: str, platform: str | None = None) -> dict:
     """解析 LLM 返回的计划 JSON"""
     try:
         plan_dict = extract_plan_from_llm_response(response)
         is_valid, error_msg = validate_plan_structure(plan_dict)
         if not is_valid:
-            raise ValueError(f"Invalid plan structure: {error_msg}")
+            raise ValueError(f"无效的计划结构：{error_msg}")
 
         tasks = []
         for i, t in enumerate(plan_dict.get("tasks", [])):
@@ -471,17 +457,18 @@ def _parse_plan(response: str, goal: str) -> dict:
                 "priority": t.get("priority", "medium"),
                 "config": {"reasoning": t.get("reasoning", ""), "priority": i},
             })
-        return {
+        result = {
             "goal": plan_dict.get("goal", goal),
             "tasks": tasks,
             "reasoning": plan_dict.get("reasoning", ""),
             "estimated_steps": len(tasks),
             "plan_method": "llm",
         }
+        if platform:
+            result["platform"] = platform
+        return result
     except Exception:
-        plan = _build_fallback_plan(goal, "simple")
-        plan["reasoning"] = f"Auto-generated fallback plan (parse error)"
-        return plan
+        return _build_fallback_plan(goal)
 
 # ──────────────────────────────────────────────
 # 2. schedule_and_execute 节点（合并原 find_ready_tasks + check_task_results）
@@ -534,9 +521,9 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
                 and _resolve_dep_id(d, task_queue) not in failed_ids
             )
             if deps_unmet == 0:
-                logger.warning("Deadlock detected", stuck_count=len(stuck))
+                logger.warning("检测到死锁", stuck_count=len(stuck))
                 span.add_event("deadlock_detected", {"stuck_count": len(stuck)})
-                span.set_status(Status(StatusCode.ERROR, "Deadlock detected"))
+                span.set_status(Status(StatusCode.ERROR, "检测到死锁"))
                 return {
                     "ready_tasks": [],
                     "failed_task_ids": list(state.get("failed_task_ids", [])) + [t["id"] for t in stuck],
@@ -618,7 +605,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
 
         for task_id, result in results_list:
             if isinstance(result, Exception):
-                logger.error("Agent task raised exception", task_id=task_id, exc_info=True)
+                logger.error("Agent 任务抛出异常", task_id=task_id, exc_info=True)
                 failed.append(task_id)
                 task_results[task_id] = {
                     "status": "failed", "error": str(result), "thinking_steps": [],
@@ -632,7 +619,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
             if result.get("thinking_steps"):
                 new_steps.extend(result["thinking_steps"])
 
-        # ── Peer feedback: notify other agents of results ─────────────────────
+        # ── 对等反馈：通知其他 Agent 结果 ─────────────────────
         message_bus = state.get("_message_bus")
         if message_bus and state.get("enable_peer_feedback", True):
             for task_id, result in results_list:
@@ -643,7 +630,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
                     continue
                 agent_type = task.get("agent_type", "UnknownAgent")
 
-                # ReviewAgent → WritingAgent: revision needed
+                # ReviewAgent → WritingAgent：需要修改
                 if result.get("status") in ("completed", "partial"):
                     review_data = result.get("output", {})
                     if agent_type == "ReviewAgent" and review_data.get("needs_revision"):
@@ -660,7 +647,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
                                     related_task_id=t.get("id"),
                                 )
 
-                # Task failed → dependent tasks: blocked
+                # 任务失败 → 依赖任务：被阻塞
                 if result.get("status") == "failed":
                     failed_agent = agent_type
                     for t in state.get("task_queue", []):
@@ -725,7 +712,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
     # Mock 模式：无 LLM 可用时使用 fallback（有明确的警告日志）
     if not llm:
         logger.warning(
-            "Agent has no LLM configured, returning mock result",
+            "Agent 未配置 LLM，返回模拟结果",
             agent_type=agent_type,
         )
         fallback_task = {
@@ -772,7 +759,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     context_str = _serialize_context_for_prompt(ctx, agent_type)
                     t_input["_extra_context"] = context_str
                 except Exception as e:
-                    logger.warning("Failed to build agent context", error=str(e))
+                    logger.warning("构建 agent 上下文失败", error=str(e))
 
             # 缓存检查：对非写作/分析类 Agent 启用缓存
             cacheable_types = {"SEOAgent", "ReviewAgent", "WebSearch", "HotTopicAgent", "PlatformAdapter"}
@@ -819,7 +806,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 max_tokens = getattr(llm, 'max_tokens', None) or 0
                 if max_tokens and max_tokens > budget:
                     logger.warning(
-                        "Token budget exceeded",
+                        "Token 预算超出限制",
                         agent_type=agent_type, max_tokens=max_tokens, budget=budget,
                     )
 
@@ -853,7 +840,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 if memory_context:
                     t_input["_memory_context"] = memory_context
             except Exception as e:
-                logger.warning("Memory context injection failed", error=str(e))
+                logger.warning("记忆上下文注入失败", error=str(e))
 
             # ── 消息总线注入（Phase 2 点对点通信）──
             if state.get("use_message_bus") and state.get("_message_bus"):
@@ -937,12 +924,12 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     _cache_input = {k: v for k, v in t_input.items() if not k.startswith('_')}
                     agent_cache.set(agent_type, _cache_input, result)
                 except Exception as e:
-                    logger.warning("Failed to cache result", agent_type=agent_type, error=str(e))
+                    logger.warning("缓存结果失败", agent_type=agent_type, error=str(e))
 
             return result
         except Exception as e:
             elapsed = round(time.time() - start_time, 2)
-            logger.error("Agent execution failed", agent_type=agent_type, error=str(e), exc_info=True)
+            logger.error("Agent 执行失败", agent_type=agent_type, error=str(e), exc_info=True)
             # ── 任务失败：发布 thinking_step (failed) ──
             await _publish_streaming_event(state, "thinking_step", {
                 "step_number": task_step_number,
@@ -1026,6 +1013,71 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         sections = []
         full_text_parts = []
 
+        # ── 智能合并：识别主内容 vs 辅助信息 ──────────────────────
+        # Agent 类型优先级（决定哪个输出作为最终正文）
+        _PRIMARY_AGENTS = {"WritingAgent", "SEOAgent"}
+        # 覆盖所有 10 个平台的内容类型
+        _CONTENT_TYPES = {
+            "text", "blog", "social_post",
+            # 社交媒体
+            "xhs_post", "wechat_article", "zhihu_article",
+            # 创意写作
+            "fiction", "storyboard", "script",
+            # 营销
+            "copywriting", "newsletter",
+            # 技术
+            "technical_doc", "tutorial",
+        }
+
+        primary_content = ""  # 最终正文（只用主内容）
+        meta_sections = {}    # 辅助信息（SEO 评分、关键词等）
+
+        for task in task_queue:
+            tid = task.get("id", "")
+            result = task_results.get(tid, {})
+            output = result.get("output", {})
+            agent_type = result.get("agent_type", task.get("agent_type", ""))
+
+            # 收集辅助信息（分析型 Agent 的 metadata）
+            if agent_type == "SEOAgent" and isinstance(output, dict):
+                metadata = output.get("metadata", {})
+                if metadata:
+                    meta_sections["seo"] = metadata
+
+            # 选择主内容：优先选 SEOAgent（改写后的），其次 WritingAgent
+            if agent_type in _PRIMARY_AGENTS and isinstance(output, dict):
+                content = output.get("content", "")
+                content_type = output.get("content_type", "")
+                if content and content_type in _CONTENT_TYPES:
+                    # SEOAgent rewrite 优先于 WritingAgent 原始内容
+                    if agent_type == "SEOAgent" or not primary_content:
+                        primary_content = content
+
+            # 也接受字符串类型的 output
+            elif agent_type in _PRIMARY_AGENTS and isinstance(output, str) and output:
+                if not primary_content:
+                    primary_content = output
+
+        # 如果没有任何主内容，退回到简单拼接
+        if not primary_content:
+            logger.warning("未找到主内容，退回到拼接方式")
+            for task in task_queue:
+                tid = task.get("id", "")
+                result = task_results.get(tid, {})
+                output = result.get("output", {})
+                if isinstance(output, dict):
+                    content = output.get("content", "")
+                else:
+                    content = str(output) if output else ""
+                if content:
+                    full_text_parts.append(
+                        f"\n\n--- {result.get('agent_type', task.get('agent_type', ''))} ---\n{content}"
+                    )
+            primary_content = "".join(full_text_parts)
+        else:
+            # 主内容已选好，full_text_parts 只保留主内容
+            full_text_parts = [primary_content]
+
         for task in task_queue:
             tid = task.get("id", "")
             result = task_results.get(tid, {})
@@ -1037,9 +1089,6 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                     "status": result.get("status", "unknown"),
                     "error": result.get("error"),
                 })
-                content = result.get("output", {}).get("content", "")
-                if content:
-                    full_text_parts.append(f"\n\n--- {result.get('agent_type', task.get('agent_type', ''))} ---\n{content}")
 
                 try:
                     await memory_manager.remember(
@@ -1049,7 +1098,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                         user_id=state.get("context", {}).get("user_id", ""),
                     )
                 except Exception as e:
-                    logger.warning("Memory remember failed",
+                    logger.warning("记忆记录失败",
                                    agent_type=result.get("agent_type", "unknown"), error=str(e))
 
         completed = len(completed_ids)
@@ -1071,7 +1120,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 consolidator = ConsolidatorNode()
                 result = consolidator.finalize(context_store)
                 logger.info(
-                    "ConsolidatorNode finalized: status=%s, drifts=%d, entities=%d",
+                    "ConsolidatorNode 已完成最终化：status=%s，偏移=%d，实体=%d",
                     result.status, len(result.anchor_drifts), len(result.new_memory_entries),
                 )
                 merge_span.add_event("consolidator_finalized", {
@@ -1079,7 +1128,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                     "memory_entries": len(result.new_memory_entries),
                 })
             except Exception as e:
-                logger.warning("ConsolidatorNode finalize failed", error=str(e))
+                logger.warning("ConsolidatorNode 最终化失败", error=str(e))
 
         merge_span.set_attribute("merge.status", status)
         merge_span.set_status(Status(StatusCode.OK))
@@ -1088,6 +1137,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             "final_output": {
                 "goal": plan.get("goal", ""),
                 "plan_reasoning": plan.get("reasoning", ""),
+                "platform": plan.get("platform", ""),
                 "sections": sections,
                 "full_text": "".join(full_text_parts),
             },
@@ -1133,7 +1183,7 @@ def _persist_results_sync(state: AgentGraphState, sections: list, full_text_part
                     error=result.get("error"),
                 )
     except Exception as e:
-        logger.warning("Persistence failed", error=str(e))
+        logger.warning("持久化失败", error=str(e))
 
 
 async def _persist_results_async(state: AgentGraphState, sections: list, full_text_parts: list, status: str) -> None:
@@ -1141,7 +1191,7 @@ async def _persist_results_async(state: AgentGraphState, sections: list, full_te
     try:
         await asyncio.to_thread(_persist_results_sync, state, sections, full_text_parts, status)
     except Exception as e:
-        logger.warning("Async persistence failed", error=str(e))
+        logger.warning("异步持久化失败", error=str(e))
 
 
 # ──────────────────────────────────────────────
@@ -1178,7 +1228,7 @@ def should_continue_or_finish(state: AgentGraphState) -> str:
     # 情况3：没有可执行的任务但还有未完成的任务（死锁）
     if total_done < total_tasks:
         logger.warning(
-            "No ready tasks, forcing exit",
+            "没有就绪任务，强制退出",
             total_tasks=total_tasks, total_done=total_done,
         )
         return "done"
@@ -1261,7 +1311,7 @@ async def reflect_on_task_batch(state: AgentGraphState) -> dict:
                             requeue_ids.add(task_id)
                             reflect_span.add_event("retry_queued", {"task_id": task_id, "score": ref_result.score})
                 except Exception as e:
-                    logger.warning("Reflection failed", agent_type=agent_type, error=str(e))
+                    logger.warning("自省失败", agent_type=agent_type, error=str(e))
                     single_span.record_exception(e)
                     single_span.set_status(Status(StatusCode.ERROR, str(e)))
 
@@ -1308,7 +1358,7 @@ async def check_hitl_gates(state: AgentGraphState) -> dict:
                     unresolved.append(gate)
         if unresolved:
             logger.info(
-                "HITL: %d pending gates (blocking handled at TaskQueue level)",
+                "HITL：%d 个待处理门（阻塞在 TaskQueue 层面处理）",
                 len(unresolved),
             )
             return {"pending_gates": unresolved}

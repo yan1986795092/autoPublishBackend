@@ -52,7 +52,7 @@ PLANNER_SYSTEM_PROMPT = """You are a content production manager. Your job is to 
 Available agents and their capabilities:
 - WebSearch: Searches the internet for up-to-date information on a topic
 - WritingAgent: Writes articles, copy, scripts in various styles and tones
-- SEOAgent: Optimizes content for search engines, researches keywords
+- SEOAgent: Optimizes and rewrites content for search engines/platforms; when rewrite=True, outputs the revised content directly
 - DiagramAgent: Creates knowledge architecture diagrams, flowcharts, mind maps
 - ReviewAgent: Reviews content for quality, banned words, factual accuracy
 - PlatformAdapter: Converts content format for specific platforms (WeChat, Xiaohongshu, Zhihu)
@@ -61,17 +61,32 @@ Available agents and their capabilities:
 - CodeAgent: Generates code examples, tutorials, and technical documentation
 - TranslationAgent: Translates content between languages
 
+Platform-specific guidance (use the content_type matching the platform code from DB):
+- Xiaohongshu (xiaohongshu): content_type="xhs_post", conversational tone, emojis, short paragraphs, authentic voice, CTA at end
+- WeChat (wechat): content_type="wechat_article", deeper analysis, warmer tone, structured with subheadings, CTA at end
+- Zhihu (zhihu): content_type="zhihu_article", data-driven, logical structure, expertise showcase
+- Fiction (fiction): content_type="fiction", narrative voice, vivid characters, engaging plot
+- Storyboard (storyboard): content_type="storyboard", cinematic shots, clear scene descriptions
+- Script (script): content_type="script", natural dialogue, stage directions
+- Copywriting (copywriting): content_type="copywriting", punchy headlines, clear value prop, strong CTA
+- Newsletter (newsletter): content_type="newsletter", friendly greeting, valuable insights, CTA
+- Technical Doc (technical_doc): content_type="technical_doc", clear structure, code examples, actionable
+- Tutorial (tutorial): content_type="tutorial", step-by-step, beginner-friendly, common pitfalls noted
+
+SEO mode by platform:
+- Xiaohongshu/copywriting/newsletter: set SEOAgent rewrite=True (rewrite content)
+- WeChat/Zhihu/technical_doc/tutorial: set SEOAgent rewrite=False (analyze only)
+- Fiction/storyboard/script: skip SEOAgent entirely
+
 Rules:
-1. ALWAYS analyze the actual user request — do NOT just apply templates. Think about what the user really needs.
-2. Simple requests (short, single topic): usually just WritingAgent + ReviewAgent is enough. Do NOT add unnecessary agents.
-3. Medium requests (blog posts, platform-specific content): include WebSearch for research, WritingAgent, and ReviewAgent. Add SEOAgent if search visibility matters.
-4. Complex requests (multi-part, architecture topics, long-form): WebSearch + WritingAgent + DiagramAgent + SEOAgent + ReviewAgent. Consider PlatformAdapter for multi-platform.
-5. Tasks that can run in parallel must have NO dependencies on each other. Put them in the same parallel group.
-6. Tasks that MUST wait for others must declare those dependencies explicitly.
-7. Always include ReviewAgent at the END as the final quality gate.
-8. ALWAYS include WritingAgent for any content creation request.
-9. Mark creative tasks (WritingAgent, DiagramAgent) as `retry_on_low_quality: true` so they can improve if quality is low.
-10. Response must be valid JSON — no markdown, no explanation, just the JSON object.
+1. Analyze the actual user request and decide which agents to use. There is no fixed template — the right plan depends entirely on what the user asked for.
+2. Use WebSearch ONLY if the topic requires current information, facts, data, or trending topics. Don't use it for purely creative requests (fiction, personal essays, etc.).
+3. Tasks that can run in parallel must have NO dependencies on each other. Put them in the same parallel group.
+4. Tasks that MUST wait for others must declare those dependencies explicitly.
+5. Always include ReviewAgent at the END as the final quality gate.
+6. ALWAYS include WritingAgent for any content creation request.
+7. Mark creative tasks (WritingAgent, SEOAgent with rewrite) as `retry_on_low_quality: true`.
+8. Response must be valid JSON — no markdown, no explanation, just the JSON object.
 
 Output format:
 ```json
@@ -81,7 +96,7 @@ Output format:
   "tasks": [
     {
       "agent_type": "WritingAgent",
-      "input": {"topic": "the topic from the user request"},
+      "input": {"topic": "the topic", "content_type": "xhs_post or relevant type"},
       "dependencies": [],
       "reasoning": "why this specific agent is needed for this request"
     }
@@ -92,7 +107,7 @@ Output format:
 Important: `dependencies` must be empty arrays `[]` for parallel tasks, or arrays of indices `[0, 1]` referring to tasks that must complete first. Output JSON only — no text before or after."""
 
 
-# ── Plan validation helpers ────────────────────────────────────────────────
+# ── 计划验证辅助函数 ────────────────────────────────────────────────
 
 
 _VALID_AGENT_TYPES = {
@@ -104,57 +119,57 @@ _VALID_AGENT_TYPES = {
 
 def validate_plan_structure(plan: dict) -> tuple[bool, str]:
     """
-    Validate that a plan dict has all required fields and correct structure.
-    Returns (is_valid, error_message).
+    验证计划字典是否包含所有必需字段且结构正确。
+    返回 (is_valid, error_message)。
     """
     required_keys = {"goal", "reasoning", "tasks"}
     missing = required_keys - set(plan.keys())
     if missing:
-        return False, f"Missing required keys: {missing}"
+        return False, f"缺少必需字段: {missing}"
 
     if not isinstance(plan["tasks"], list):
-        return False, "tasks must be a list"
+        return False, "tasks 必须是列表"
 
     if len(plan["tasks"]) == 0:
-        return False, "tasks cannot be empty"
+        return False, "tasks 不能为空"
 
     task_ids_seen = set()
     for i, task in enumerate(plan["tasks"]):
         if "agent_type" not in task:
-            return False, f"Task {i} missing agent_type"
+            return False, f"任务 {i} 缺少 agent_type"
         if task["agent_type"] not in _VALID_AGENT_TYPES:
-            return False, f"Unknown agent_type: {task['agent_type']}"
+            return False, f"未知的 agent_type: {task['agent_type']}"
         if "input" not in task:
-            return False, f"Task {i} missing input"
+            return False, f"任务 {i} 缺少 input"
 
         task_ids_seen.add(i)
         for dep in task.get("dependencies", []):
             if not isinstance(dep, int) or dep < 0 or dep >= len(plan["tasks"]):
-                return False, f"Task {i} has invalid dependency index: {dep}"
+                return False, f"任务 {i} 包含无效的依赖索引: {dep}"
 
     return True, ""
 
 
 def extract_plan_from_llm_response(response_content: str) -> dict:
     """
-    Extract JSON plan from LLM response. Handles markdown code blocks, plain JSON, etc.
+    从 LLM 响应中提取 JSON 计划。处理 markdown 代码块、纯 JSON 等。
     """
     import json as _json, re as _re
 
     content = response_content.strip()
 
-    # Try to extract from markdown code block
+    # 尝试从 markdown 代码块中提取
     code_block_match = _re.search(r"```(?:json)?\s*([\s\S]+?)```", content)
     if code_block_match:
         content = code_block_match.group(1)
 
-    # Try direct JSON parse
+    # 尝试直接解析 JSON
     try:
         return _json.loads(content)
     except _json.JSONDecodeError:
         pass
 
-    # Try to find JSON object anywhere in the string
+    # 尝试在字符串中查找 JSON 对象
     json_match = _re.search(r"\{[\s\S]*\}", content)
     if json_match:
         try:
@@ -162,4 +177,4 @@ def extract_plan_from_llm_response(response_content: str) -> dict:
         except _json.JSONDecodeError:
             pass
 
-    raise ValueError(f"Could not extract valid JSON plan from response: {response_content[:200]}")
+    raise ValueError(f"无法从响应中提取有效的 JSON 计划: {response_content[:200]}")

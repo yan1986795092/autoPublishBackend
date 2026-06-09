@@ -100,7 +100,7 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
             }],
         }
     except Exception as e:
-        logger.error("CodeAgent failed: %s", e, exc_info=True)
+        logger.error("CodeAgent 执行失败: %s", e, exc_info=True)
         raise HandlerError(str(e), handler="CodeAgent") from e
 
 

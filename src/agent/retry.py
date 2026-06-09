@@ -213,19 +213,19 @@ async def run_agent_with_retry(
                         "agent": agent_type,
                         "action": "retry_exhausted",
                         "reasoning": f"重试 {max_retries} 次均失败",
-                        "output_summary": f"Error: {last_error}",
+                        "output_summary": "执行异常，已跳过",
                         "tokens_used": 0,
                         "status": "failed",
                     }],
                 }
 
-    # 所有重试耗尽，返回降级结果
+    # 所有重试耗尽，返回降级结果（优雅降级，不暴露内部信息）
     logger.warning("重试耗尽，返回降级结果", agent_type=agent_type, max_retries=max_retries)
     return {
         "status": "partial",
         "agent_type": agent_type,
         "output": {
-            "content": f"（{agent_type} 经过 {max_retries} 次重试后仍未能达到质量要求）",
+            "content": "",  # 不输出无意义的降级信息，让 merge 阶段智能处理
             "fallback": True,
             "error": last_error,
         },
@@ -233,8 +233,8 @@ async def run_agent_with_retry(
         "thinking_steps": [{
             "agent": agent_type,
             "action": "quality_fallback",
-            "reasoning": f"质量评分不足，跳过该步骤",
-            "output_summary": f"Fallback after {max_retries} retries",
+            "reasoning": f"重试 {max_retries} 次均未达质量阈值，已跳过",
+            "output_summary": "质量未达标，依赖其他 agent 产出",
             "tokens_used": 0,
             "status": "failed",
         }],

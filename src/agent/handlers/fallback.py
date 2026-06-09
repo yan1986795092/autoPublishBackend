@@ -17,9 +17,9 @@ async def handle_fallback(task: dict, llm: ChatOpenAI, mcp_tools: list | None = 
     if not llm:
         return {
             "status": "partial", "agent_type": agent_type,
-            "output": {"content": f"[Mock] {agent_type} completed (no LLM available)", "type": "text"},
+            "output": {"content": f"[模拟] {agent_type} 已完成（无 LLM 可用）", "type": "text"},
             "tokens_used": 0, "thinking_steps": [],
-            "warning": f"No LLM configured for {agent_type}, returning mock result",
+            "warning": f"{agent_type} 未配置 LLM，返回模拟结果",
         }
 
     tool_registry = task.get("_tool_registry")

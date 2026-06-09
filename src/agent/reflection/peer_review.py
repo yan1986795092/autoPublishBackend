@@ -52,7 +52,7 @@ async def peer_review(
 
         return _parse_peer_review(reviewer_agent, raw)
     except Exception as e:
-        logger.warning("peer_review failed: %s", e)
+        logger.warning("同行评审失败: %s", e)
         return None
 
 
@@ -90,5 +90,5 @@ def _parse_peer_review(
             metadata={"target_agent": raw[:50]},
         )
     except (json.JSONDecodeError, ValueError):
-        logger.warning("parse_peer_review failed: JSON parse error")
+        logger.warning("解析同行评审失败: JSON 解析错误")
         return None

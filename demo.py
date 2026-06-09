@@ -8,7 +8,6 @@ def demo_imports():
         ("src.config", "get_settings"),
         ("src.database", "engine"),
         ("src.core.security", "hash_password"),
-        ("src.core.llm_gateway", "LLMGateway"),
         ("src.core.model_router", "ModelRouter"),
         ("src.agent.state", "AgentGraphState"),
         ("src.agent.schemas", "AgentTask"),

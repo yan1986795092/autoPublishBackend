@@ -62,7 +62,7 @@ def save_agent_task(
             db.commit()
         except Exception as e:
             db.rollback()
-            logger.error(f"Failed to save agent task: {e}")
+            logger.error(f"保存 Agent 任务失败: {e}")
 
 
 def save_agent_events(task_id: str, agent_events: dict) -> None:
@@ -75,7 +75,7 @@ def save_agent_events(task_id: str, agent_events: dict) -> None:
                 db.commit()
         except Exception as e:
             db.rollback()
-            logger.error(f"Failed to save agent events: {e}")
+            logger.error(f"保存 Agent 事件失败: {e}")
 
 
 def save_thinking_trace(task_id: str, trace: dict) -> None:
@@ -115,7 +115,7 @@ def save_thinking_trace(task_id: str, trace: dict) -> None:
             db.commit()
         except Exception as e:
             db.rollback()
-            logger.error(f"Failed to save thinking trace: {e}")
+            logger.error(f"保存思维轨迹失败: {e}")
 
 
 def save_subtask(
@@ -161,7 +161,7 @@ def save_subtask(
             db.commit()
         except Exception as e:
             db.rollback()
-            logger.error(f"Failed to save subtask: {e}")
+            logger.error(f"保存子任务失败: {e}")
 
 
 def get_subtask_history(task_id: str) -> list[dict]:
@@ -184,7 +184,7 @@ def get_subtask_history(task_id: str) -> list[dict]:
                 for r in records
             ]
         except Exception as e:
-            logger.error(f"Failed to get subtask history: {e}")
+            logger.error(f"获取子任务历史失败: {e}")
             return []
 
 
@@ -231,7 +231,7 @@ def save_tool_call(
             db.commit()
         except Exception as e:
             db.rollback()
-            logger.error(f"Failed to save tool call: {e}")
+            logger.error(f"保存工具调用失败: {e}")
 
 
 def cleanup_old_records(retention_days: Optional[dict] = None) -> dict[str, int]:
@@ -271,6 +271,6 @@ def cleanup_old_records(retention_days: Optional[dict] = None) -> dict[str, int]
             db.commit()
         except Exception as e:
             db.rollback()
-            logger.error(f"Failed to cleanup old records: {e}")
+            logger.error(f"清理旧记录失败: {e}")
 
     return counts

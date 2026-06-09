@@ -354,13 +354,16 @@ async def get_agent_events_diagnostics():
         resp = await es.search(
             index="agent-events-*",
             query={"match_all": {}},
-            sort=[{"@timestamp": "desc"}],
+            sort=[
+                {"@timestamp": {"order": "desc", "unmapped_type": "date", "missing": "_last"}},
+                {"timestamp": {"order": "desc", "unmapped_type": "date", "missing": "_last"}},
+            ],
             size=1,
             track_total_hits=True,
             aggs={
-                "services": {"terms": {"field": "service.keyword", "size": 10}},
-                "agent_names": {"terms": {"field": "agent_name.keyword", "size": 10}},
-                "event_types": {"terms": {"field": "event_type.keyword", "size": 10}},
+                "services": {"terms": {"field": "service", "size": 10}},
+                "agent_names": {"terms": {"field": "agent_name", "size": 10}},
+                "event_types": {"terms": {"field": "event_type", "size": 10}},
             },
             ignore_unavailable=True,
         )

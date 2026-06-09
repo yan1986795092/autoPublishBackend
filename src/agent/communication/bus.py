@@ -169,14 +169,14 @@ class MessageBus:
         self._reply_events.clear()
         self._replies.clear()
 
-    # ── Agent-initiated communication ──
+    # ── Agent 发起的通信 ──
 
     def agent_discovery_sync(self, requester: str, capability_needed: str) -> Optional[str]:
-        """Synchronous version of agent discovery."""
+        """Agent 发现同步版本。"""
         if self._registry:
             matches = self._registry.find_by_expertise(capability_needed)
             if matches:
-                logger.debug("Agent discovery: %s needs %s → %s", requester, capability_needed, matches[0].name)
+                logger.debug("Agent 发现: %s 需要 %s → %s", requester, capability_needed, matches[0].name)
                 return matches[0].name
         return None
 
@@ -185,7 +185,7 @@ class MessageBus:
         requester: str,
         capability_needed: str,
     ) -> Optional[str]:
-        """Ask the agent registry who can handle a capability. Returns agent_type or None."""
+        """查询 Agent 注册中心谁能处理某能力。返回 agent_type 或 None。"""
         return self.agent_discovery_sync(requester, capability_needed)
 
     async def peer_feedback(
@@ -195,9 +195,8 @@ class MessageBus:
         feedback_content: dict,
         related_task_id: Optional[str] = None,
     ) -> None:
-        """
-        Send direct feedback from one agent to another (e.g., ReviewAgent → WritingAgent).
-        Fire-and-forget: does NOT wait for a reply.
+        """从一个 Agent 向另一个发送直接反馈（如 ReviewAgent → WritingAgent）。
+        异步发送：不等待回复。
         """
         msg = Message(
             msg_id=str(uuid.uuid4()),
@@ -210,7 +209,7 @@ class MessageBus:
         )
         self._append_history(msg)
         self._ensure_outbox(to_agent).append(msg)
-        logger.debug("Peer feedback: %s → %s [%s]", from_agent, to_agent, feedback_content.get("type", "unknown"))
+        logger.debug("同行反馈: %s → %s [%s]", from_agent, to_agent, feedback_content.get("type", "未知"))
 
     def __repr__(self) -> str:
         total_msgs = sum(len(v) for v in self._history.values())

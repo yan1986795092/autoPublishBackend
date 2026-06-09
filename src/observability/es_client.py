@@ -65,6 +65,8 @@ _START_TIME = "startTime"
 _DURATION_MS = "durationMicros"   # microseconds in Jaeger ES schema
 _DURATION_MS_HR = "duration"      # milliseconds in OTel format
 _SERVICE_NAME = "process.serviceName"
+_SERVICE_NAME_ROOT = "serviceName"
+_SERVICE_NAME_DOTTED = "service.name"
 _PROCESS = "process"
 _TAGS = "tags"
 _LOGS = "logs"
@@ -78,6 +80,86 @@ _ERROR = "error"
 def _keyword_field(field: str) -> str:
     """Return the keyword subfield commonly used for exact-match aggregations."""
     return f"{field}.keyword"
+
+
+def _extract_tag_value(tag: dict) -> Any:
+    """Extract Jaeger/OTel tag values across possible serialized shapes."""
+    if not isinstance(tag, dict):
+        return None
+    for key in ("value", "vStr", "vInt64", "vInt", "vFloat64", "vFloat", "vBool", "vBinary"):
+        if key in tag and tag.get(key) is not None:
+            return tag.get(key)
+    return None
+
+
+def _normalize_tags(tags_list: Any) -> dict[str, Any]:
+    """Flatten Jaeger tag arrays into a simple key/value dict."""
+    if not isinstance(tags_list, list):
+        return {}
+    return {
+        str(tag.get("key", "")): _extract_tag_value(tag)
+        for tag in tags_list
+        if isinstance(tag, dict) and tag.get("key")
+    }
+
+
+def _extract_service_name(src: dict, tags: dict[str, Any]) -> str:
+    """Resolve service name across Jaeger and OTel span document layouts."""
+    process = src.get(_PROCESS, {})
+    if isinstance(process, dict):
+        service = (
+            process.get("serviceName")
+            or process.get(_SERVICE_NAME)
+            or process.get(_SERVICE_NAME_ROOT)
+            or process.get(_SERVICE_NAME_DOTTED)
+        )
+        if service:
+            return str(service)
+
+    for key in (_SERVICE_NAME, _SERVICE_NAME_ROOT, _SERVICE_NAME_DOTTED):
+        value = tags.get(key) or src.get(key)
+        if value:
+            return str(value)
+
+    return ""
+
+
+def _service_filter_clause(service: str) -> dict:
+    """Match service name across trace schemas used by Jaeger/OTel exports."""
+    return {
+        "bool": {
+            "should": [
+                {"term": {_keyword_field(_SERVICE_NAME): service}},
+                {"term": {_keyword_field(_SERVICE_NAME_ROOT): service}},
+                {"term": {_keyword_field(_SERVICE_NAME_DOTTED): service}},
+                {"term": {_SERVICE_NAME: service}},
+                {"term": {_SERVICE_NAME_ROOT: service}},
+                {"term": {_SERVICE_NAME_DOTTED: service}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
+
+
+def _safe_trace_sort(order: str) -> list[dict]:
+    """Sort traces without failing on mixed index mappings."""
+    return [
+        {
+            _START_TIME_MS: {
+                "order": order,
+                "unmapped_type": "long",
+                "missing": "_last" if order == "desc" else "_first",
+            }
+        },
+        {
+            _START_TIME: {
+                "order": order,
+                "unmapped_type": "long",
+                "missing": "_last" if order == "desc" else "_first",
+            }
+        },
+        {"@timestamp": {"order": order, "unmapped_type": "date"}},
+    ]
 
 _TAG_KEYS = [
     "agent.system", "agent.node", "agent.run.id", "agent.skill.name",
@@ -116,11 +198,11 @@ def _normalize_span(hit: dict) -> dict:
 
     # Tags → flat dict
     tags_list = src.get(_TAGS, [])
-    tags = {t.get("key", ""): t.get("value") for t in tags_list}
+    tags = _normalize_tags(tags_list)
 
     # Service name
     process = src.get(_PROCESS, {})
-    service = process.get(_SERVICE_NAME, "") or tags.get(_SERVICE_NAME, "")
+    service = _extract_service_name(src, tags)
 
     # Status
     status_obj = src.get("status", {})
@@ -236,7 +318,7 @@ async def search_spans(
         filter_clauses.append({"range": {_START_TIME_MS: range_query}})
 
     if service:
-        filter_clauses.append({"term": {_keyword_field(_SERVICE_NAME): service}})
+        filter_clauses.append(_service_filter_clause(service))
 
     if operation:
         filter_clauses.append({"wildcard": {_OPERATION_NAME: f"*{operation}*"}})
@@ -275,10 +357,11 @@ async def search_spans(
         resp = await es.search(
             index=_TRACE_INDEX_PATTERN,
             query=query,
-            sort=[{_START_TIME_MS: "desc"}],
+            sort=_safe_trace_sort("desc"),
             from_=from_,
             size=size,
             track_total_hits=True,
+            ignore_unavailable=True,
         )
 
         total = resp["hits"]["total"]["value"]
@@ -301,8 +384,9 @@ async def get_trace_spans(trace_id: str) -> list[dict]:
         resp = await es.search(
             index=_TRACE_INDEX_PATTERN,
             query={"term": {_TRACE_ID: trace_id}},
-            sort=[{_START_TIME_MS: "asc"}],
+            sort=_safe_trace_sort("asc"),
             size=1000,
+            ignore_unavailable=True,
         )
         return [_normalize_span(hit) for hit in resp["hits"]["hits"]]
 
@@ -477,6 +561,49 @@ def _normalize_agent_event(hit: dict) -> dict:
     }
 
 
+def _agent_event_term_clause(field: str, value: str) -> dict:
+    """Match agent-event exact fields with or without keyword subfields."""
+    return {
+        "bool": {
+            "should": [
+                {"term": {f"{field}.keyword": value}},
+                {"term": {field: value}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
+
+
+def _safe_agent_event_sort() -> list[dict]:
+    """Sort agent events across layouts that may use timestamp or @timestamp."""
+    return [
+        {"@timestamp": {"order": "desc", "unmapped_type": "date", "missing": "_last"}},
+        {"timestamp": {"order": "desc", "unmapped_type": "date", "missing": "_last"}},
+    ]
+
+
+def _agent_event_time_filter_clause(start_time_ms: int | None, end_time_ms: int | None) -> dict | None:
+    """Match agent event time range across possible timestamp fields."""
+    if not start_time_ms and not end_time_ms:
+        return None
+
+    range_query: dict[str, int] = {}
+    if start_time_ms:
+        range_query["gte"] = start_time_ms
+    if end_time_ms:
+        range_query["lte"] = end_time_ms
+
+    return {
+        "bool": {
+            "should": [
+                {"range": {"@timestamp": range_query}},
+                {"range": {"timestamp": range_query}},
+            ],
+            "minimum_should_match": 1,
+        }
+    }
+
+
 async def search_agent_events(
     service: str | None = None,
     session_id: str | None = None,
@@ -497,26 +624,22 @@ async def search_agent_events(
     must_clauses = []
     filter_clauses = []
 
-    if start_time_ms or end_time_ms:
-        range_query = {}
-        if start_time_ms:
-            range_query["gte"] = start_time_ms
-        if end_time_ms:
-            range_query["lte"] = end_time_ms
-        filter_clauses.append({"range": {"@timestamp": range_query}})
+    time_filter = _agent_event_time_filter_clause(start_time_ms, end_time_ms)
+    if time_filter:
+        filter_clauses.append(time_filter)
 
     if service:
-        filter_clauses.append({"term": {"service.keyword": service}})
+        filter_clauses.append(_agent_event_term_clause("service", service))
     if session_id:
-        filter_clauses.append({"term": {"session_id.keyword": session_id}})
+        filter_clauses.append(_agent_event_term_clause("session_id", session_id))
     if run_id:
-        filter_clauses.append({"term": {"run_id.keyword": run_id}})
+        filter_clauses.append(_agent_event_term_clause("run_id", run_id))
     if agent_name:
-        filter_clauses.append({"term": {"agent_name.keyword": agent_name}})
+        filter_clauses.append(_agent_event_term_clause("agent_name", agent_name))
     if event_type:
-        filter_clauses.append({"term": {"event_type.keyword": event_type}})
+        filter_clauses.append(_agent_event_term_clause("event_type", event_type))
     if level:
-        filter_clauses.append({"term": {"level.keyword": level.upper()}})
+        filter_clauses.append(_agent_event_term_clause("level", level.upper()))
 
     if keyword:
         must_clauses.append({
@@ -546,10 +669,11 @@ async def search_agent_events(
         resp = await es.search(
             index=_AGENT_EVENTS_INDEX_PATTERN,
             query=query,
-            sort=[{"@timestamp": "desc"}],
+            sort=_safe_agent_event_sort(),
             from_=from_,
             size=size,
             track_total_hits=True,
+            ignore_unavailable=True,
         )
         hits = [_normalize_agent_event(h) for h in resp["hits"]["hits"]]
         total_obj = resp["hits"].get("total", 0)
@@ -585,7 +709,7 @@ async def get_trace_stats(
 
     filter_clauses = []
     if service:
-        filter_clauses.append({"term": {_keyword_field(_SERVICE_NAME): service}})
+        filter_clauses.append(_service_filter_clause(service))
     if start_time_ms or end_time_ms:
         range_query = {}
         if start_time_ms:

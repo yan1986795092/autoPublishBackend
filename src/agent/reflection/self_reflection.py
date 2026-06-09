@@ -36,7 +36,7 @@ async def self_reflect(
             passed=True,
             issues=[],
             suggestions=[],
-            metadata={"reason": "skip: content too short"},
+            metadata={"reason": "跳过: 内容过短"},
         )
 
     # LLM 自省
@@ -65,7 +65,7 @@ async def self_reflect(
 
             return _parse_reflection(agent_type, task_input, raw)
         except Exception as e:
-            logger.warning("self_reflect LLM failed: %s", e)
+            logger.warning("self_reflect LLM 失败: %s", e)
 
     # 规则兜底
     return _rule_based_reflection(agent_type, task_input, content)
@@ -101,7 +101,7 @@ def _parse_reflection(
             passed=avg_score >= 0.7 and len(issues) == 0,
         )
     except (json.JSONDecodeError, ValueError, ZeroDivisionError) as e:
-        logger.warning("parse_reflection failed: %s", e)
+        logger.warning("解析反思失败: %s", e)
         return _rule_based_reflection(agent_type, task_input, raw)
 
 

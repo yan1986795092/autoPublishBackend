@@ -19,6 +19,17 @@ from src.agent.nodes import (
 def mock_llm():
     llm = AsyncMock()
     llm.model = "test-model"
+    llm.model_name = "test-model"
+    llm.ainvoke = AsyncMock(return_value=MagicMock(
+        content=json.dumps({
+            "goal": "test goal",
+            "reasoning": "because",
+            "tasks": [
+                {"agent_type": "WritingAgent", "input": {"topic": "test"}, "dependencies": []},
+                {"agent_type": "ReviewAgent", "input": {"topic": "test"}, "dependencies": [0]},
+            ],
+        })
+    ))
     llm.generate_sync = AsyncMock(return_value=json.dumps({
         "goal": "test goal",
         "reasoning": "because",
@@ -32,7 +43,7 @@ def mock_llm():
 
 @pytest.fixture
 def orchestrator(mock_llm):
-    return Orchestrator(llm_gateway=mock_llm)
+    return Orchestrator(chat_models={"ManagerAgent": mock_llm})
 
 
 # ─────────────────────────────
@@ -348,8 +359,7 @@ class TestOrchestratorFallback:
 
     @pytest.mark.asyncio
     async def test_fallback_llm_call_error(self, mock_llm, orchestrator):
-        mock_llm.generate_sync.side_effect = Exception("API error")
-        orchestrator.llm_gateway = mock_llm
+        mock_llm.ainvoke.side_effect = Exception("API error")
         task = AgentTask(id="1", agent_type="UnknownAgent", input={}, dependencies=[])
         result = await orchestrator._fallback_llm_call(task, {}, {})
         assert result.status == TaskStatus.FAILED

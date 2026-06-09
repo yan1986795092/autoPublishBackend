@@ -56,8 +56,7 @@ class AgentEventEmitter:
     ) -> dict[str, Any]:
         event_dict = self._prepare_event(event)
         self._emit_console(event_dict)
-        if self._env == "production":
-            (es_writer or self._es_writer)(event_dict)
+        (es_writer or self._es_writer)(event_dict)
         return event_dict
 
     def emit_sync(
@@ -67,8 +66,7 @@ class AgentEventEmitter:
     ) -> dict[str, Any]:
         event_dict = self._prepare_event(event)
         self._emit_console(event_dict)
-        if self._env == "production":
-            (es_writer or self._es_writer)(event_dict)
+        (es_writer or self._es_writer)(event_dict)
         return event_dict
 
     def _emit_console(self, event_dict: dict[str, Any]) -> None:
