@@ -684,6 +684,38 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
         }
 
 # ──────────────────────────────────────────────
+# SubAgent 辅助函数
+# ──────────────────────────────────────────────
+
+def _build_subagent_task_input(task: dict, state: AgentGraphState) -> str:
+    """为 SubAgent 构建任务描述字符串"""
+    task_input = task.get("input", {})
+    skill_system_prompt = state.get("skill_system_prompt", "")
+
+    parts = []
+    if skill_system_prompt:
+        parts.append(f"[系统指令]\n{skill_system_prompt}\n")
+
+    topic = task_input.get("topic", "")
+    if topic:
+        parts.append(f"[主题] {topic}")
+
+    content_type = task_input.get("content_type", "")
+    if content_type:
+        parts.append(f"[内容类型] {content_type}")
+
+    extra_context = task_input.get("_extra_context", "")
+    if extra_context:
+        parts.append(f"[上下文]\n{extra_context}")
+
+    for k, v in task_input.items():
+        if k not in ("topic", "content_type", "_extra_context", "_skill_system_prompt") and v:
+            parts.append(f"[{k}] {v}")
+
+    return "\n\n".join(parts) if parts else str(task_input)
+
+
+# ──────────────────────────────────────────────
 # 4. merge_and_finish 节点
 # ──────────────────────────────────────────────
 
@@ -721,6 +753,50 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             "_tool_registry": state.get("_tool_registry"),
         }
         return await handle_fallback(fallback_task, llm, None)
+
+    # ── SubAgent ReAct 路径（条件启用）──
+    subagent_factory = state.get("_subagent_factory")
+    if subagent_factory is not None:
+        sub_agent = subagent_factory.get(agent_type)
+        if sub_agent is not None:
+            logger.info(
+                "使用 SubAgent[%s] ReAct 循环",
+                agent_type,
+            )
+            task_desc = _build_subagent_task_input(task, state)
+            dep_context = _build_dependency_context(task, state)
+            try:
+                sub_result = await sub_agent.run_with_react(
+                    task=task_desc,
+                    context={
+                        "dependencies": dep_context,
+                        "session_id": (
+                            state.get("context", {}).get("session_id")
+                            or state.get("context", {}).get("conversation_id")
+                            or "default"
+                        ),
+                    },
+                )
+                elapsed = round(time.time() - start_time, 2)
+                return {
+                    "status": sub_result.get("status", "completed"),
+                    "output": sub_result.get("output", {}),
+                    "tokens_used": sub_result.get("total_steps", 0) * 100,
+                    "time_elapsed": elapsed,
+                    "thinking_steps": [
+                        {
+                            "agent": agent_type,
+                            "action": f"ReAct 步骤 {s['step_index']}",
+                            "reasoning": s.get("thought", ""),
+                            "output_summary": s.get("observation", "")[:200],
+                            "status": "done",
+                        }
+                        for s in sub_result.get("react_steps", [])
+                    ],
+                    "_subagent_result": sub_result,
+                }
+            except Exception as sub_e:
+                logger.warning("SubAgent[%s] ReAct 执行失败，回退到 handler", agent_type, exc_info=True)
 
     handler = HANDLER_MAP.get(agent_type)
     if handler:

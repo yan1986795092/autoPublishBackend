@@ -116,6 +116,13 @@ class Settings(BaseSettings):
     enable_tools: bool = True
     enable_agent_registry: bool = True
 
+    # ========== SubAgent ReAct (Multi-Agent Collaboration) ==========
+    enable_subagent_react: bool = False
+    subagent_max_react_steps: int = 8
+    subagent_max_peer_calls: int = 5
+    subagent_react_timeout: float = 60.0
+    subagent_peer_call_timeout: float = 30.0
+
     # ========== MCP (Model Context Protocol) ==========
     # MCP Server 总开关
     mcp_enabled: bool = True

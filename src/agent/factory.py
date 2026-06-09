@@ -86,6 +86,13 @@ def create_orchestrator(
             if agent and agent.profile.tools_enabled:
                 agent.bind_tools(tool_registry)
 
+    # ── SubAgent System: SubAgentFactory ──
+    subagent_factory = _build_subagent_factory(
+        agent_registry=agent_registry,
+        tool_registry=tool_registry,
+        message_bus=message_bus,
+    )
+
     orchestrator = Orchestrator(
         chat_models=chat_models,
         mcp_tools=mcp_tools,
@@ -94,6 +101,7 @@ def create_orchestrator(
         reflection_engine=reflection_engine,
         hitl_manager=hitl_manager,
         tool_registry=tool_registry,
+        subagent_factory=subagent_factory,
         **kwargs,
     )
     return orchestrator
@@ -121,6 +129,34 @@ def _build_hitl_manager(task_queue: Any) -> Any:
     """构建 HITLManager"""
     from .hitl import HITLManager
     return HITLManager(task_queue=task_queue)
+
+
+def _build_subagent_factory(
+    agent_registry: Any = None,
+    tool_registry: Any = None,
+    message_bus: Any = None,
+) -> Any:
+    """构建 SubAgentFactory（条件启用）"""
+    if agent_registry is None:
+        return None
+    from src.config import get_settings
+    settings = get_settings()
+    if not settings.enable_subagent_react:
+        return None
+    from .react.factory import SubAgentFactory
+    from .schemas import SubAgentConfig
+    return SubAgentFactory(
+        agent_registry=agent_registry,
+        tool_registry=tool_registry,
+        message_bus=message_bus,
+        config=SubAgentConfig(
+            max_react_steps=settings.subagent_max_react_steps,
+            max_peer_calls=settings.subagent_max_peer_calls,
+            react_timeout=settings.subagent_react_timeout,
+            enable_peer_collaboration=message_bus is not None,
+            peer_call_timeout=settings.subagent_peer_call_timeout,
+        ),
+    )
 
 
 def _build_tool_registry(
