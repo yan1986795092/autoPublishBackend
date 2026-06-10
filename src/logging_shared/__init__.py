@@ -18,9 +18,10 @@ from .fields import (
 )
 from .config import setup, get_logger
 from .middleware import LoggingMiddleware, start_span_writer, stop_span_writer
+from .unified_writer import UnifiedEsWriter
 
 __all__ = [
-    "setup", "get_logger", "LoggingMiddleware",
+    "setup", "get_logger", "LoggingMiddleware", "UnifiedEsWriter",
     "start_span_writer", "stop_span_writer",
     "AgentEvent", "EventType", "TokenUsage", "calculate_cost_usd",
     "AgentEventEmitter", "get_agent_event_emitter",
