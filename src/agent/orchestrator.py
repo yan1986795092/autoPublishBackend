@@ -2,6 +2,9 @@
 
 保持原有的 Orchestrator 类名和方法签名（run()），
 内部使用 LangGraph 代替原有的 DAG 调度器。
+
+Tracing: 使用轻量级 AgentTracer 写入 UnifiedEsWriter (traces-*),
+不再依赖 OTel SDK exporter 管线。
 """
 
 from __future__ import annotations
@@ -12,8 +15,6 @@ import uuid
 from typing import Any, Optional
 
 import structlog
-from opentelemetry import trace
-from opentelemetry.trace import SpanKind, Status, StatusCode
 
 from langchain_openai import ChatOpenAI
 
@@ -21,12 +22,12 @@ from .graph import build_agent_graph
 from .state import AgentGraphState
 from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
 from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, validate_plan_structure
-from src.observability import get_tracer
 from src.observability.metrics import record_agent_run
+from src.observability.agent_tracer import get_agent_tracer, AgentTracer
 
 logger = structlog.get_logger(__name__)
 
-_tracer = None
+_tracer: AgentTracer | None = None
 
 
 class _AsyncioTimeout:
@@ -50,10 +51,10 @@ class _AsyncioTimeout:
         return False
 
 
-def _get_tracer() -> trace.Tracer:
+def _get_tracer() -> AgentTracer:
     global _tracer
     if _tracer is None:
-        _tracer = get_tracer("agent.orchestrator")
+        _tracer = get_agent_tracer()
     return _tracer
 
 
@@ -95,12 +96,16 @@ class Orchestrator:
         task_id = str(uuid.uuid4())
         session_id = ((context or {}).get("session_id") or (context or {}).get("conversation_id") or "default")
 
+        # 从 context 获取 HTTP trace_id 做端到端关联
+        http_trace_id = (context or {}).get("trace_id", "")
+        trace_task_id = http_trace_id or task_id
+
         run_span_name = f"agent.run"
         skill_name = (context or {}).get("skill_name", "unknown")
 
         with tracer.start_as_current_span(
             run_span_name,
-            kind=SpanKind.INTERNAL,
+            kind="INTERNAL",
             attributes={
                 "agent.system": "langgraph",
                 "agent.version": "3.0.0",
@@ -112,6 +117,7 @@ class Orchestrator:
                 "agent.timeout_seconds": timeout,
                 "custom.run_id": task_id,
                 "custom.task_id": self.async_task_id or "",
+                "http.trace_id": http_trace_id or "(none)",
             },
         ) as root_span:
             try:
@@ -132,7 +138,7 @@ class Orchestrator:
                         "ready_tasks": [],
                         "concurrency_limit": self.max_concurrent,
                         "thinking_steps": [],
-                        "trace_task_id": task_id,
+                        "trace_task_id": trace_task_id,
                         "start_time": start_time,
                         "final_output": None,
                         "error": None,
@@ -163,7 +169,7 @@ class Orchestrator:
                         for r in final_state.get("task_results", {}).values()
                     )
 
-                    root_span.set_status(Status(StatusCode.OK))
+                    root_span.set_status("OK")
                     root_span.set_attribute("agent.status", status)
                     root_span.set_attribute("agent.completed_tasks", len(final_state.get("completed_task_ids", [])))
                     root_span.set_attribute("agent.failed_tasks", len(final_state.get("failed_task_ids", [])))
@@ -187,7 +193,7 @@ class Orchestrator:
 
             except asyncio.TimeoutError:
                 elapsed = round(time.time() - start_time, 2)
-                root_span.set_status(Status(StatusCode.ERROR, "图执行超时"))
+                root_span.set_status("ERROR")
                 root_span.record_exception(TimeoutError(f"图在 {timeout}s 后超时"))
                 root_span.set_attribute("agent.status", "timeout")
                 record_agent_run(status="timeout", skill_name=skill_name, duration_s=elapsed)
@@ -200,7 +206,7 @@ class Orchestrator:
                 )
             except Exception as e:
                 elapsed = round(time.time() - start_time, 2)
-                root_span.set_status(Status(StatusCode.ERROR, str(e)))
+                root_span.set_status("ERROR")
                 root_span.record_exception(e)
                 root_span.set_attribute("agent.status", "failed")
                 root_span.set_attribute("agent.error_type", type(e).__name__)

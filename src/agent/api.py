@@ -68,11 +68,14 @@ def _create_orchestrator(**kwargs) -> Orchestrator:
 @router.post("/agent/run", response_model=AgentRunResponse)
 async def run_agent(
     request: AgentRunRequest,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """运行 Agent 编排：输入需求，返回 Multi-Agent 协作结果"""
     try:
         context = request.context or {}
+        # 注入 HTTP trace_id 用于端到端关联
+        context["trace_id"] = http_request.headers.get("X-Trace-Id", "")
 
         # Skill 注入（与 /stream 端点保持一致）
         if request.skill_id:
@@ -462,6 +465,7 @@ class AgentStreamRequest(BaseModel):
 @router.post("/agent/stream")
 async def agent_stream(
     request: AgentStreamRequest,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
 ):
     """流式 Agent 执行 — 通过 EventBus 实时推送计划、思考步骤、进度和结果
@@ -469,6 +473,8 @@ async def agent_stream(
     核心改进：不再轮询 TaskQueue，改为订阅 EventBus，事件驱动的实时推送。
     支持事件类型：plan, task_created, thinking_step, llm_chunk, reasoning, progress, result, error, done
     """
+    # 提取 HTTP trace_id 用于端到端关联
+    http_trace_id = http_request.headers.get("X-Trace-Id", "")
     task_id_str = ""  # 实际 task_id 在入队后设置
 
     async def event_generator() -> AsyncGenerator[dict, None]:
@@ -562,6 +568,10 @@ async def agent_stream(
                     for t in plan.tasks
                 ],
             }
+            # 注入 HTTP trace_id 到 skill_context 用于端到端关联
+            if http_trace_id:
+                skill_context["trace_id"] = http_trace_id
+
             async_task = await task_queue.enqueue(
                 prompt=user_prompt,
                 user_id=current_user.id,

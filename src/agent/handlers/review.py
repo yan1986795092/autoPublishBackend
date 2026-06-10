@@ -9,7 +9,6 @@ from ..agent_utils import check_banned_words
 from .factcheck import factcheck_report
 from src.prompts import PromptBuilder
 from src.core.exceptions import HandlerError
-from src.utils.tokenizer import estimate_tokens
 from src.logging_shared.config import get_logger
 
 logger = get_logger("agent.review")
@@ -73,15 +72,16 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         # ── 工具感知的 LLM 调用 ──
         from .tool_utils import call_llm
 
-        quality = await call_llm(
+        llm_result = await call_llm(
             llm, lc_messages,
             agent_type="ReviewAgent",
             stream=True,
             on_chunk=task_input.get("_on_llm_chunk"),
         )
-        passed = len(banned_found) == 0 and "需要修改" not in quality
+        quality_text = llm_result.content
+        passed = len(banned_found) == 0 and "需要修改" not in quality_text
         suggestions = [
-            line.strip() for line in quality.split("\n")
+            line.strip() for line in quality_text.split("\n")
             if any(kw in line for kw in ["建议", "问题", "修改", "不足"])
         ]
 
@@ -92,9 +92,11 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                 "banned_words": banned_found,
                 "factcheck": fc_report,
                 "suggestions": suggestions[:5],
-                "content": quality,
+                "content": quality_text,
             },
-            "tokens_used": estimate_tokens(quality),
+            "tokens_used": llm_result.total_tokens,
+            "prompt_tokens": llm_result.prompt_tokens,
+            "completion_tokens": llm_result.completion_tokens,
             "prompt_versions": composed.used_templates,
             "thinking_steps": [{
                 "agent": "ReviewAgent", "action": "审核完成",

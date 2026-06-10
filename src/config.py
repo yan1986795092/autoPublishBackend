@@ -126,6 +126,9 @@ class Settings(BaseSettings):
     mcp_enable_pexels: bool = False
     mcp_enable_github: bool = False
 
+    # ========== LLM Gateway ==========
+    llm_gateway_url: str = "http://localhost:9010/v1"
+
     # ========== Agent token budgets ==========
     agent_token_budgets: dict = {
         "ManagerAgent": 4000,

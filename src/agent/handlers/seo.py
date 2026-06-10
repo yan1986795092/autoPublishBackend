@@ -23,7 +23,6 @@ from .tool_utils import call_llm
 from ..agent_utils import extract_output, seo_score, seo_suggestions
 from .keyword_tool import extract_keywords, suggest_related_keywords, keyword_density_analysis
 from src.core.exceptions import HandlerError
-from src.utils.tokenizer import estimate_tokens
 from src.prompts import PromptBuilder
 from src.logging_shared.config import get_logger
 
@@ -231,21 +230,20 @@ async def _handle_seo_rewrite(task_input: dict, llm: ChatOpenAI, mcp_tools: list
         # 流式回调
         on_chunk = task_input.get("_on_llm_chunk")
 
-        raw = await call_llm(
+        llm_result = await call_llm(
             llm, lc_messages,
             agent_type="SEOAgent",
             stream=True,
             on_chunk=on_chunk,
         )
 
-        content = extract_output(raw) or raw.strip()
+        content = extract_output(llm_result.content) or llm_result.content.strip()
 
         # 如果改写结果太短，说明 LLM 可能生成了空内容，用原始内容兜底
         if len(content) < 50:
             logger.warning("SEO 改写结果过短（%d 字符），使用原始内容", len(content))
             content = original_content
 
-        tokens = estimate_tokens(content)
         return {
             "status": "completed",
             "agent_type": "SEOAgent",
@@ -259,7 +257,9 @@ async def _handle_seo_rewrite(task_input: dict, llm: ChatOpenAI, mcp_tools: list
                     "platform": platform,
                 },
             },
-            "tokens_used": tokens,
+            "tokens_used": llm_result.total_tokens,
+            "prompt_tokens": llm_result.prompt_tokens,
+            "completion_tokens": llm_result.completion_tokens,
             "thinking_steps": [{
                 "agent": "SEOAgent",
                 "action": "SEO改写完成",

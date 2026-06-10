@@ -1,10 +1,11 @@
 """简化的工具感知 LLM 调用工具
 
-删除了 ToolRegistry 绑定逻辑，保留基础 LLM 调用 + 流式支持。
+保留基础 LLM 调用 + 流式支持。
+从 LLM 响应中提取实际 token 用量（不再用 estimate_tokens 估算）。
 """
 
 from __future__ import annotations
-import time as _time
+from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from langchain_core.messages import BaseMessage
@@ -15,6 +16,19 @@ from src.logging_shared.config import get_logger
 logger = get_logger("agent.tool_utils")
 
 
+@dataclass
+class LLMResult:
+    """LLM 调用结果，含实际 token 用量"""
+
+    content: str
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def total_tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
 async def call_llm(
     llm: ChatOpenAI,
     messages: list[BaseMessage],
@@ -22,8 +36,8 @@ async def call_llm(
     agent_type: str = "",
     stream: bool = False,
     on_chunk: Optional[Callable] = None,
-) -> str:
-    """调用 LLM，支持流式输出
+) -> LLMResult:
+    """调用 LLM，返回内容 + 实际 token 用量
 
     Args:
         llm: ChatOpenAI 实例
@@ -33,25 +47,46 @@ async def call_llm(
         on_chunk: 流式回调 async on_chunk(chunk: str) -> None
 
     Returns:
-        LLM 返回的文本内容
+        LLMResult: 包含 content / prompt_tokens / completion_tokens
     """
     if stream:
         return await _stream_only(llm, messages, on_chunk)
 
     result = await llm.ainvoke(messages)
-    return result.content or ""
+    content = result.content or ""
+
+    # 从 response_metadata 提取实际 token 用量
+    prompt_tokens = 0
+    completion_tokens = 0
+    try:
+        meta = result.response_metadata or {}
+        usage = meta.get("token_usage", {}) or meta
+        if isinstance(usage, dict):
+            prompt_tokens = int(usage.get("prompt_tokens", 0))
+            completion_tokens = int(usage.get("completion_tokens", 0))
+    except (ValueError, TypeError, AttributeError):
+        pass
+
+    if prompt_tokens == 0 and completion_tokens == 0:
+        logger.debug("未能从 LLM 响应中提取 token 用量", agent_type=agent_type)
+
+    return LLMResult(
+        content=content,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
 
 
 async def _stream_only(
     llm: ChatOpenAI,
     messages: list[BaseMessage],
     on_chunk: Optional[Callable],
-) -> str:
-    """纯流式调用"""
+) -> LLMResult:
+    """纯流式调用（流式模式下无法获取 token 用量，返回 0）"""
     chunks: list[str] = []
     async for chunk in llm.astream(messages):
         if chunk.content:
             chunks.append(chunk.content)
             if on_chunk:
                 await on_chunk(chunk.content)
-    return "".join(chunks)
+    return LLMResult(content="".join(chunks))
