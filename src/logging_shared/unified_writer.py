@@ -68,7 +68,9 @@ class UnifiedEsWriter:
         try:
             queue.put_nowait(dict(doc))
         except asyncio.QueueFull:
-            logger.warning("Queue %s is full, dropping document", index_type)
+            # 队列满时不丢弃，直接写 fallback 文件
+            logger.warning("Queue %s is full, writing to fallback file", index_type)
+            self._write_fallback(index_type, [dict(doc)])
 
     async def start(self) -> None:
         if self._worker_task is not None:

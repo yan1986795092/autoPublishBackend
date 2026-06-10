@@ -25,20 +25,19 @@ from .platform_registry import PLATFORMS, detect_platform, get_names_map
 from .handlers import HANDLER_MAP, handle_fallback
 from .cache import agent_cache
 
-from opentelemetry import trace
-from opentelemetry.trace import Status, StatusCode
-from src.observability import get_tracer
+from src.core.exceptions import HandlerError, ToolExecutionError
 from src.observability.metrics import record_agent_task, record_agent_run
+from src.observability.agent_tracer import get_agent_tracer, AgentTracer
 
 logger = structlog.get_logger(__name__)
 
-_tracer = None
+_tracer: AgentTracer | None = None
 
 
-def _get_tracer() -> trace.Tracer:
+def _get_tracer() -> AgentTracer:
     global _tracer
     if _tracer is None:
-        _tracer = get_tracer("agent.nodes")
+        _tracer = get_agent_tracer()
     return _tracer
 
 
@@ -344,7 +343,7 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
                 span.add_event("plan_built", {"task_count": len(plan.get("tasks", [])), "method": plan.get("plan_method", "llm")})
                 span.set_attribute("plan.method", plan.get("plan_method", "llm"))
                 span.set_attribute("agent.task_count", len(plan.get("tasks", [])))
-                span.set_status(Status(StatusCode.OK))
+                span.set_status("OK")
                 return updates
 
             except Exception as e:
@@ -371,7 +370,7 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
         span.set_attribute("plan.method", "template")
         span.set_attribute("agent.task_count", len(plan["tasks"]))
         span.set_attribute("agent.platform", detected or "none")
-        span.set_status(Status(StatusCode.OK))
+        span.set_status("OK")
         return updates
 
 
@@ -462,17 +461,17 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
             if deps_unmet == 0:
                 logger.warning("检测到死锁", stuck_count=len(stuck))
                 span.add_event("deadlock_detected", {"stuck_count": len(stuck)})
-                span.set_status(Status(StatusCode.ERROR, "检测到死锁"))
+                span.set_status("ERROR")
                 return {
                     "ready_tasks": [],
                     "failed_task_ids": list(state.get("failed_task_ids", [])) + [t["id"] for t in stuck],
                 }
             else:
                 span.add_event("waiting_for_dependencies", {"deps_unmet": deps_unmet})
-                span.set_status(Status(StatusCode.OK))
+                span.set_status("OK")
                 return {"ready_tasks": []}
 
-        span.set_status(Status(StatusCode.OK))
+        span.set_status("OK")
         return {"ready_tasks": ready}
 
 
@@ -519,11 +518,11 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
                 async with semaphore:
                     try:
                         result = await _run_single_agent_task(task, state, task_step_number=task_step_number)
-                        task_span.set_status(Status(StatusCode.OK))
+                        task_span.set_status("OK")
                         task_span.set_attribute("task.status", result.get("status", "unknown"))
                         return task_id, result
                     except Exception as e:
-                        task_span.set_status(Status(StatusCode.ERROR, str(e)))
+                        task_span.set_status("ERROR")
                         task_span.record_exception(e)
                         task_span.set_attribute("task.status", "failed")
                         raise
@@ -561,7 +560,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
         batch_span.add_event("batch_completed", {
             "completed": len(completed), "failed": len(failed),
         })
-        batch_span.set_status(Status(StatusCode.OK))
+        batch_span.set_status("OK")
 
         record_agent_task(
             agent_type="batch",
@@ -671,21 +670,21 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 "status": "running",
             })
 
-            # 流式 LLM 回调
+            # 流式 LLM 回调（安全版：catch 异常防止静默丢失）
             if streaming_mode and agent_type in {"WritingAgent", "SEOAgent", "ReviewAgent"}:
+                async def _safe_publish(event_type: str, data: dict) -> None:
+                    try:
+                        await _publish_streaming_event(state, event_type, data)
+                    except Exception as e:
+                        logger.warning("流式事件发布失败", event_type=event_type, error=str(e))
+
                 def _make_on_llm_chunk(agent: str):
                     async def _on_llm_chunk(chunk: str) -> None:
-                        asyncio.create_task(_publish_streaming_event(
-                            state, "llm_chunk",
-                            {"agent": agent, "content": chunk, "timestamp": time.time()}
-                        ))
+                        await _safe_publish("llm_chunk", {"agent": agent, "content": chunk, "timestamp": time.time()})
                     return _on_llm_chunk
                 def _make_on_reasoning(agent: str):
                     async def _on_reasoning(text: str) -> None:
-                        asyncio.create_task(_publish_streaming_event(
-                            state, "reasoning",
-                            {"agent": agent, "content": text, "timestamp": time.time()}
-                        ))
+                        await _safe_publish("reasoning", {"agent": agent, "content": text, "timestamp": time.time()})
                     return _on_reasoning
                 t_input["_on_llm_chunk"] = _make_on_llm_chunk(agent_type)
                 t_input["_on_reasoning"] = _make_on_reasoning(agent_type)
@@ -727,9 +726,56 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
 
             return result
 
+        except ToolExecutionError as e:
+            elapsed = round(time.time() - start_time, 2)
+            logger.error("Agent MCP 工具执行失败", agent_type=agent_type, tool=e.tool_name, error=str(e))
+            await _publish_streaming_event(state, "thinking_step", {
+                "step_number": task_step_number,
+                "agent": agent_type,
+                "action": "工具调用失败",
+                "reasoning": f"工具 {e.tool_name} 执行失败: {e.message}",
+                "input_summary": str(task_input)[:200],
+                "output_summary": str(e),
+                "tokens_used": 0,
+                "time_elapsed": elapsed,
+                "status": "failed",
+            })
+            return {
+                "status": "failed",
+                "agent_type": agent_type,
+                "failure_type": "mcp_tool",
+                "tool_name": e.tool_name,
+                "error": str(e),
+                "time_elapsed": elapsed,
+                "thinking_steps": [{"agent": agent_type, "action": "tool_error", "tool": e.tool_name, "reasoning": e.message, "status": "failed"}],
+            }
+
+        except HandlerError as e:
+            elapsed = round(time.time() - start_time, 2)
+            logger.error("Agent Handler 执行失败", agent_type=agent_type, handler=e.handler, error=str(e))
+            await _publish_streaming_event(state, "thinking_step", {
+                "step_number": task_step_number,
+                "agent": agent_type,
+                "action": "handler 失败",
+                "reasoning": str(e),
+                "input_summary": str(task_input)[:200],
+                "output_summary": str(e),
+                "tokens_used": 0,
+                "time_elapsed": elapsed,
+                "status": "failed",
+            })
+            return {
+                "status": "failed",
+                "agent_type": agent_type,
+                "failure_type": "handler",
+                "error": str(e),
+                "time_elapsed": elapsed,
+                "thinking_steps": [{"agent": agent_type, "action": "handler_error", "reasoning": str(e), "status": "failed"}],
+            }
+
         except Exception as e:
             elapsed = round(time.time() - start_time, 2)
-            logger.error("Agent 执行失败", agent_type=agent_type, error=str(e), exc_info=True)
+            logger.error("Agent 执行失败（未知异常）", agent_type=agent_type, error=str(e), exc_info=True)
             await _publish_streaming_event(state, "thinking_step", {
                 "step_number": task_step_number,
                 "agent": agent_type,
@@ -744,6 +790,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             return {
                 "status": "failed",
                 "agent_type": agent_type,
+                "failure_type": "unknown",
                 "error": str(e),
                 "time_elapsed": elapsed,
                 "thinking_steps": [{"agent": agent_type, "action": "error", "reasoning": str(e), "status": "failed"}],
@@ -752,11 +799,24 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
     return await handle_fallback({"agent_type": agent_type, "input": task_input}, llm, None)
 
 
+def _truncate_text(text: str, max_chars: int = 2000) -> str:
+    """截断文本到 max_chars 字符，防止 Context Bleeding"""
+    if len(text) <= max_chars:
+        return text
+    return text[:max_chars] + f"\n[...共{len(text)}字，已截断显示前{max_chars}字]"
+
+
 def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
-    """构建依赖上下文（只传递 content 字段，防止 Context Bleeding）"""
+    """构建依赖上下文（只传递 content 字段，防止 Context Bleeding）
+
+    每个依赖的内容截断到 2000 字符以内。
+    """
     task_queue = state.get("task_queue", [])
     task_results = state.get("task_results", {})
     context = {}
+    dep_count = len(task.get("dependencies", []))
+    # 每个依赖的预算 = min(2000, 6000 / dep_count)
+    budget_per_dep = max(1000, 6000 // max(dep_count, 1))
 
     for dep in task.get("dependencies", []):
         dep_id = _resolve_dep_id(dep, task_queue)
@@ -772,7 +832,7 @@ def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
             else:
                 content = str(output) if output else ""
             context[dep_id] = {
-                "content": content,
+                "content": _truncate_text(content, budget_per_dep),
                 "agent": prev.get("agent_type", ""),
             }
     return context if context else {}
@@ -805,7 +865,6 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         sections = []
         full_text_parts = []
 
-        _PRIMARY_AGENTS = {"WritingAgent", "SEOAgent"}
         _CONTENT_TYPES = {
             "text", "blog", "social_post",
             "xhs_post", "wechat_article", "zhihu_article",
@@ -817,6 +876,8 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         primary_content = ""
         meta_sections = {}
 
+        # 按优先级收集候选内容：SEO改写 > WritingAgent > 其他
+        content_candidates = []
         for task in task_queue:
             tid = task.get("id", "")
             result = task_results.get(tid, {})
@@ -827,16 +888,27 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 metadata = output.get("metadata", {})
                 if metadata:
                     meta_sections["seo"] = metadata
+                # SEO rewrite=True 模式的 output.content 应作为主内容
+                seo_content = output.get("content", "")
+                if seo_content and output.get("type") != "metadata":
+                    content_candidates.append(("seo_rewrite", seo_content))
 
-            if agent_type in _PRIMARY_AGENTS and isinstance(output, dict):
+            if agent_type == "WritingAgent" and isinstance(output, dict):
                 content = output.get("content", "")
                 content_type = output.get("content_type", "")
                 if content and content_type in _CONTENT_TYPES:
-                    if agent_type == "SEOAgent" or not primary_content:
-                        primary_content = content
-            elif agent_type in _PRIMARY_AGENTS and isinstance(output, str) and output:
-                if not primary_content:
-                    primary_content = output
+                    content_candidates.append(("writing", content))
+            elif agent_type == "WritingAgent" and isinstance(output, str) and output:
+                content_candidates.append(("writing", output))
+
+        # 按优先级选择主内容：seo_rewrite > writing
+        for priority in ("seo_rewrite", "writing"):
+            for ptype, content in content_candidates:
+                if ptype == priority:
+                    primary_content = content
+                    break
+            if primary_content:
+                break
 
         if not primary_content:
             logger.warning("未找到主内容，退回到拼接方式")
@@ -880,7 +952,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         asyncio.create_task(_persist_results_async(state, sections, full_text_parts, status))
 
         merge_span.set_attribute("merge.status", status)
-        merge_span.set_status(Status(StatusCode.OK))
+        merge_span.set_status("OK")
 
         return {
             "final_output": {
@@ -950,7 +1022,7 @@ def should_continue_or_finish(state: AgentGraphState) -> str:
 
     返回值：
     - "execute": 有可执行的任务，继续执行
-    - "done": 所有任务已完成
+    - "done": 所有任务已完成或死锁
     """
     task_queue = state.get("task_queue", [])
     completed = len(state.get("completed_task_ids", []))
@@ -963,8 +1035,7 @@ def should_continue_or_finish(state: AgentGraphState) -> str:
         return "execute"
     if total_done >= total_tasks:
         return "done"
-    if total_done < total_tasks:
-        logger.warning("没有就绪任务，强制退出", total_tasks=total_tasks, total_done=total_done)
-        return "done"
-
+    # 有未完成任务但没有就绪任务 → 死锁或依赖链断裂
+    logger.warning("没有就绪任务但未全部完成，强制退出防止死锁",
+                   total_tasks=total_tasks, total_done=total_done)
     return "done"

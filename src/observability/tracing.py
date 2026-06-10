@@ -1,13 +1,12 @@
-"""Observability: tracer/meter for in-process span context only.
+"""Observability: lightweight tracing setup (OTel-free).
 
-HTTP spans are handled by LoggingMiddleware which writes directly to
-ES traces-* via UnifiedEsWriter — no OTel exporter pipeline involved.
+Agent tracing is handled by `AgentTracer` (see agent_tracer.py) which writes
+directly to UnifiedEsWriter in Jaeger-compatible format — no OTel exporter needed.
 
-The OTel SDK is initialized here WITHOUT any exporter. It provides
-``start_as_current_span()`` for agent code to use as in-process span context.
-Without this initialization, ``opentelemetry.trace.get_tracer()`` still works
-but uses a global no-op tracer by default — which is fine for production.
-We keep the explicit init for clarity and to set service name metadata.
+HTTP tracing is handled by LoggingMiddleware → UnifiedEsWriter → ES.
+
+This module provides only `setup_observability()` for service initialization
+and `get_tracer()` for backward compatibility.
 """
 
 from __future__ import annotations
@@ -16,37 +15,23 @@ import logging
 import os
 from typing import Optional
 
-from opentelemetry import trace
-from opentelemetry.sdk.resources import (
-    Resource,
-    SERVICE_NAME,
-    SERVICE_VERSION,
-    DEPLOYMENT_ENVIRONMENT,
-)
-from opentelemetry.sdk.trace import TracerProvider
-from opentelemetry.trace import Tracer
+from src.logging_shared.unified_writer import UnifiedEsWriter
 
 logger = logging.getLogger(__name__)
-
-_tracer: Optional[Tracer] = None
-_initialized = False
 
 
 def setup_observability(
     service_name: str = "autopublish-api",
     service_version: str = "2.0.0",
     settings=None,
-) -> tuple[Optional[Tracer], None]:
-    """Initialize tracer provider (no exporter — in-process span context only).
+) -> tuple[None, None]:
+    """Initialize observability infrastructure.
 
-    HTTP tracing: LoggingMiddleware -> UnifiedEsWriter -> ES (not OTel).
-    Agent span context: ``get_tracer().start_as_current_span()`` for
-    in-process parent/child relationships (not exported anywhere).
+    - Ensures UnifiedEsWriter singleton is started (traces/events/logs → ES)
+    - Configures structlog (if settings provided)
+
+    Returns (None, None) — no OTel tracer; use AgentTracer for agent spans.
     """
-    global _tracer, _initialized
-    if _initialized:
-        return _tracer or trace.get_tracer(service_name), None
-
     if settings is not None:
         from src.core.logging import setup_logging
         setup_logging(settings)
@@ -55,29 +40,18 @@ def setup_observability(
         from src.core.logging import setup_logging
         setup_logging(Settings(log_level="DEBUG", log_json_format=False))
 
-    resource = Resource.create({
-        SERVICE_NAME: service_name,
-        SERVICE_VERSION: service_version,
-        DEPLOYMENT_ENVIRONMENT: os.getenv("DEPLOYMENT_ENVIRONMENT", "development"),
-    })
-
-    tracer_provider = TracerProvider(resource=resource)
-    trace.set_tracer_provider(tracer_provider)
-
-    _tracer = trace.get_tracer(service_name, service_version)
-    _initialized = True
+    # UnifiedEsWriter is started in main.py lifespan — just ensure it's initialized
+    UnifiedEsWriter.get_instance()
 
     logger.info(
-        "Tracer initialized (no exporter — in-process context only) service=%s",
+        "Observability initialized (trace writer: UnifiedEsWriter) service=%s",
         service_name,
     )
-    return _tracer, None
+    return None, None
 
 
-def setup_local_dev(settings=None) -> tuple[Optional[Tracer], None]:
-    """Local dev mode: tracer provider without exporter."""
-    global _tracer, _initialized
-
+def setup_local_dev(settings=None) -> tuple[None, None]:
+    """Local dev mode: same as setup_observability, no OTel."""
     if settings is not None:
         from src.core.logging import setup_logging
         setup_logging(settings)
@@ -86,23 +60,22 @@ def setup_local_dev(settings=None) -> tuple[Optional[Tracer], None]:
         from src.core.logging import setup_logging
         setup_logging(Settings(log_level="DEBUG", log_json_format=False))
 
-    resource = Resource.create({SERVICE_NAME: "autopublish-api-dev"})
-    tracer_provider = TracerProvider(resource=resource)
-    trace.set_tracer_provider(tracer_provider)
-
-    _tracer = trace.get_tracer("autopublish-api-dev")
-    _initialized = True
-    return _tracer, None
+    UnifiedEsWriter.get_instance()
+    logger.info("Local dev observability initialized")
+    return None, None
 
 
-def get_tracer(name: str = "autopublish") -> Tracer:
-    """Get a tracer instance. Uses OTel global if not explicitly initialized."""
-    global _tracer
-    if _tracer is not None:
-        return _tracer
-    return trace.get_tracer(name)
+def get_tracer(name: str = "autopublish"):
+    """Backward-compatible stub. Use AgentTracer for actual tracing.
+
+    Args:
+        name: Ignored (kept for API compatibility).
+    Returns: None (agent tracing uses AgentTracer directly).
+    """
+    from src.observability.agent_tracer import get_agent_tracer
+    return get_agent_tracer()
 
 
 def get_meter(name: str = "autopublish"):
-    """Stub: meters not configured (no exporter)."""
+    """Stub: meters not configured."""
     return None

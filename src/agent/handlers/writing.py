@@ -6,7 +6,6 @@
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import extract_output
-from src.utils.tokenizer import estimate_tokens
 from src.prompts import PromptBuilder, CONTENT_TYPE_PROMPTS, STYLE_GUIDES
 from src.core.exceptions import HandlerError
 from .tool_utils import call_llm
@@ -108,12 +107,13 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                 lc_messages.append(HumanMessage(content=m["content"]))
 
         # ── 工具感知的 LLM 调用 ──
-        raw = await call_llm(
+        llm_result = await call_llm(
             llm, lc_messages,
             agent_type="WritingAgent",
             stream=True,
             on_chunk=task_input.get("_on_llm_chunk"),
         )
+        raw = llm_result.content
 
         # 提取正文（extract_output 统一处理多种分隔符）
         content = extract_output(raw)
@@ -122,12 +122,12 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             if content:
                 logger.warning("extract_output 返回空，使用原始响应", agent="WritingAgent")
 
-        tokens = estimate_tokens(raw)
-
         return {
             "status": "completed", "agent_type": "WritingAgent",
             "output": {"content": content, "type": "text", "content_type": content_type},
-            "tokens_used": tokens,
+            "tokens_used": llm_result.total_tokens,
+            "prompt_tokens": llm_result.prompt_tokens,
+            "completion_tokens": llm_result.completion_tokens,
             "prompt_versions": composed.used_templates,
             "thinking_steps": [{
                 "agent": "WritingAgent", "action": "写作完成",
