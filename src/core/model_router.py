@@ -1,12 +1,17 @@
-"""ModelRouter — 按 Agent 角色创建 LangChain ChatOpenAI 实例
+"""ModelRouter — 统一 LLM 创建入口，统一指向 LLM Gateway
 
-所有请求统一走 LLM Gateway，
-Gateway 根据 model 名称路由到对应 provider。
+两种模式：
+  1. get_chat_model(agent_type)  — 自动路由模式
+     发送 model="auto" + X-Route-Hint，交给 Gateway 的 AutoRouter 按成本选 cheapest
+     适用于：WritingAgent, SEOAgent, ReviewAgent, DiagramAgent, WebSearch, AIEditorService
+
+  2. get_chat_model_for_model(model, agent_type) — 指定模型模式
+     发送具体模型名（如 "deepseek-chat"），Gateway 精确匹配到对应 adapter
+     适用于：ManagerAgent, CodeAgent（固定走 DeepSeek）
 
 重大改动(2026-06-10):
-  1. Gateway URL 改为从配置读取，支持环境变量 LLM_GATEWAY_URL
-  2. 发送 model="auto" + X-Role header，让 Gateway 的 AutoRouter 做智能路由
-  3. 新增 default_model 配置项，兜底用
+  1. 拆分为两种模式，支持策略化路由
+  2. 移除旧的 _ROLE_HINTS 系统
 """
 
 from __future__ import annotations
@@ -25,27 +30,16 @@ _DEFAULT_GATEWAY_URL = "http://localhost:9010/v1"
 
 
 class ModelRouter:
-    """按角色创建并缓存 ChatOpenAI 实例，统一指向 LLM Gateway。
+    """统一 LLM 创建入口，所有 ChatOpenAI 实例均指向 LLM Gateway。
 
-    路由逻辑：
-    - 由 Gateway 的 AutoRouter 自动选择最优 provider
-    - 每个 Agent 角色通过 default_headers 携带 task_type 提示
+    路由策略：
+    - 高推理 Agent（ManagerAgent、CodeAgent）→ 指定模型 → Gateway 精确匹配
+    - 低成本 Agent（其余所有）→ model="auto" + hint → Gateway AutoRouter 按成本选 cheapest
     """
-
-    # Agent 类型 → 路由提示（供 Gateway 的 AutoRouter 选择策略参考）
-    _ROLE_HINTS = {
-        "ManagerAgent": "planning",    # 需要强推理能力
-        "WritingAgent": "creative",    # 需要内容生成质量
-        "SEOAgent": "creative",
-        "ReviewAgent": "analysis",     # 需要准确性
-        "DiagramAgent": "creative",
-        "CodeAgent": "code",
-        "WebSearch": "simple",         # 搜索简单回答即可
-    }
 
     def __init__(self, gateway_url: str | None = None):
         self._settings = get_settings()
-        self._cache: dict[str, Any] = {}
+        self._cache: dict[str, ChatOpenAI] = {}
         self._gateway_url = (
             gateway_url
             or os.getenv("LLM_GATEWAY_URL")
@@ -53,30 +47,45 @@ class ModelRouter:
             or _DEFAULT_GATEWAY_URL
         )
 
-    def _get_route_hint(self, agent_type: str) -> str:
-        return self._ROLE_HINTS.get(agent_type, "balanced")
+    # ──────────────────────────────────────────
+    # 模式 1：自动路由（低成本 Agent）
+    # ──────────────────────────────────────────
+
+    @staticmethod
+    def _role_to_hint(agent_type: str) -> str:
+        """Agent 类型 → Gateway 路由提示（供 AutoRouter 选择策略参考）"""
+        mapping = {
+            "WritingAgent": "creative",
+            "SEOAgent": "creative",
+            "ReviewAgent": "analysis",
+            "DiagramAgent": "creative",
+            "WebSearch": "simple",
+            "AIEditorService": "simple",
+            "ContentService": "simple",
+        }
+        return mapping.get(agent_type, "balanced")
 
     def get_chat_model(self, agent_type: str) -> ChatOpenAI:
-        """返回 ChatOpenAI 实例，base_url 统一指向 LLM Gateway
+        """自动路由模式 — 发送 model='auto' + X-Route-Hint
 
-        每次请求都发 model="auto"，让 Gateway 的 AutoRouter
-        根据请求内容 + route_hint 动态选择最优 provider。
+        Gateway 的 AutoRouter 根据 hint + 消息内容分析，
+        按成本优化权重（w_cost=0.7）选 cheapest provider。
         """
         if agent_type in self._cache:
             return self._cache[agent_type]
 
-        route_hint = self._get_route_hint(agent_type)
+        hint = self._role_to_hint(agent_type)
 
         llm = ChatOpenAI(
-            model="auto",             # ← 关键变更：让 Gateway 做路由决策
-            api_key="gateway",        # Gateway 不校验 key，用自己配置的 provider key
+            model="auto",
+            api_key="gateway",       # Gateway 不校验 key，用自己配置的 provider key
             base_url=self._gateway_url,
             temperature=self._settings.default_temperature,
             max_tokens=self._settings.default_max_tokens,
             streaming=True,
             timeout=120.0,
             default_headers={
-                "X-Route-Hint": route_hint,
+                "X-Route-Hint": hint,
                 "X-Agent-Type": agent_type,
             },
         )
@@ -84,9 +93,48 @@ class ModelRouter:
         self._cache[agent_type] = llm
         logger.info("ModelRouter -> Gateway (auto-route)",
                     agent_type=agent_type,
-                    hint=route_hint,
+                    hint=hint,
                     gateway=self._gateway_url)
         return llm
+
+    # ──────────────────────────────────────────
+    # 模式 2：指定模型（高推理 Agent）
+    # ──────────────────────────────────────────
+
+    def get_chat_model_for_model(
+        self,
+        model: str,
+        agent_type: str = "unknown",
+    ) -> ChatOpenAI:
+        """指定模型模式 — 发送具体模型名，Gateway 精确匹配到对应 adapter
+
+        当前适用于 ManagerAgent / CodeAgent → 固定走 DeepSeek。
+        不传 X-Route-Hint，避免 Gateway 误入 AutoRouter 路径。
+
+        不缓存实例（因为每次可能用不同模型/参数）。
+        """
+        llm = ChatOpenAI(
+            model=model,
+            api_key="gateway",
+            base_url=self._gateway_url,
+            temperature=self._settings.default_temperature,
+            max_tokens=self._settings.default_max_tokens,
+            streaming=True,
+            timeout=120.0,
+            default_headers={
+                "X-Agent-Type": agent_type,
+            },
+        )
+
+        logger.info("ModelRouter -> Gateway (exact-model)",
+                    agent_type=agent_type,
+                    model=model,
+                    gateway=self._gateway_url)
+        return llm
+
+    # ──────────────────────────────────────────
+    # 兼容方法
+    # ──────────────────────────────────────────
 
     def get_gateway(self, agent_type: str) -> ChatOpenAI:
         return self.get_chat_model(agent_type)
