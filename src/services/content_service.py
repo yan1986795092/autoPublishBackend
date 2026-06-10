@@ -8,6 +8,7 @@ from src.models import Content, ContentVersion, User, ContentStatus, Persona
 from src.schemas.content import GenerateRequest
 from src.utils.tokenizer import estimate_tokens
 from src.logging_shared.config import get_logger
+from src.core.model_router import ModelRouter
 
 logger = get_logger("service.content")
 
@@ -561,8 +562,9 @@ BANNED_WORDS: dict[str, list[str]] = {
 class ContentService:
     """内容服务"""
 
-    def __init__(self, db: Session):
+    def __init__(self, db: Session, router: ModelRouter | None = None):
         self.db = db
+        self._router = router or ModelRouter()
 
     def _get_template(self, platform_code: str) -> tuple[dict, object | None]:
         """获取模板，优先使用 DB 中的 PromptTemplate，无则回退硬编码"""
@@ -621,17 +623,11 @@ class ContentService:
             parts.append(f"风格指南：{persona.style_notes}")
         return "\n".join(parts)
 
-    def _get_llm_for_request(self, provider: str, api_key: str, model: str) -> "ChatOpenAI":
+    def _get_llm_for_request(self, model: str) -> "ChatOpenAI":
         """经 ModelRouter 统一入口获取 LLM（流向 LLM Gateway）"""
-        from langchain_openai import ChatOpenAI
-        _GATEWAY_OPENAI_BASE_URL = "http://localhost:9010/v1"
-        return ChatOpenAI(
+        return self._router.get_chat_model_for_model(
             model=model,
-            api_key=api_key,
-            base_url=_GATEWAY_OPENAI_BASE_URL,
-            temperature=0.7,
-            streaming=True,
-            timeout=120.0,
+            agent_type="ContentService",
         )
 
     async def generate_content(self, user_id: str, request: GenerateRequest) -> dict:
@@ -716,7 +712,7 @@ class ContentService:
             model_name = "mock"
         else:
             # 真实 API 调用 — 经 ModelRouter 统一入口到 Gateway
-            llm = self._get_llm_for_request(provider, api_key, model_name)
+            llm = self._get_llm_for_request(model_name)
             temperature = variables["creativity"]
             llm_result = await llm.ainvoke(messages)
             full_content = llm_result.content
@@ -857,7 +853,7 @@ class ContentService:
                     yield f"data: {json.dumps({'type': 'token', 'content': chunk})}\n\n"
                     await asyncio.sleep(0.01)
             else:
-                llm = self._get_llm_for_request(provider, api_key, model_name)
+                llm = self._get_llm_for_request(model_name)
                 temperature = variables["creativity"]
 
                 async for event in llm.astream_events(messages, config={"temperature": temperature}):

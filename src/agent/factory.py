@@ -28,9 +28,21 @@ def create_orchestrator(
 
     # 按 Agent 类型获取 LLM
     chat_models = {}
+
+    # 高推理 Agent → 指定模型（DeepSeek → Gateway 精确匹配）
+    for agent_type in ["ManagerAgent", "CodeAgent"]:
+        try:
+            chat_models[agent_type] = router.get_chat_model_for_model(
+                model="deepseek-chat",
+                agent_type=agent_type,
+            )
+        except Exception:
+            logger.warning("Failed to create LLM for %s", agent_type)
+
+    # 低成本 Agent → 自动路由（model="auto" → Gateway AutoRouter 选 cheapest）
     for agent_type in [
-        "ManagerAgent", "WritingAgent", "SEOAgent", "ReviewAgent",
-        "DiagramAgent", "CodeAgent", "WebSearch",
+        "WritingAgent", "SEOAgent", "ReviewAgent",
+        "DiagramAgent", "WebSearch",
     ]:
         try:
             chat_models[agent_type] = router.get_chat_model(agent_type)
