@@ -5,7 +5,8 @@ from typing import Any, Callable
 
 from .agent_events import AgentEvent, TokenUsage, calculate_cost_usd
 from .config import get_logger
-from .agent_es_writer import emit as emit_to_agent_es
+from .agent_events import AgentEvent, TokenUsage, calculate_cost_usd
+from .config import get_logger
 
 
 class AgentEventEmitter:
@@ -13,7 +14,23 @@ class AgentEventEmitter:
         self._env = env
         self._logger = get_logger("agent.events")
         self._step_counters: dict[str, int] = {}
-        self._es_writer = es_writer or emit_to_agent_es
+        self._es_writer = es_writer or self._default_es_writer
+
+    def _default_es_writer(self, event_dict: dict[str, Any]) -> None:
+        """默认 ES 写入器：使用 UnifiedEsWriter。"""
+        try:
+            from .unified_writer import UnifiedEsWriter
+            import asyncio
+            try:
+                loop = asyncio.get_running_loop()
+                if loop.is_running():
+                    UnifiedEsWriter.get_instance().write("events", event_dict)
+                else:
+                    pass  # No running loop, skip
+            except RuntimeError:
+                pass
+        except Exception:
+            pass
 
     def reset_counter(self, run_id: str) -> None:
         self._step_counters[run_id] = 0
@@ -56,13 +73,7 @@ class AgentEventEmitter:
     ) -> dict[str, Any]:
         event_dict = self._prepare_event(event)
         self._emit_console(event_dict)
-        # 写 ES（旧 writer 和新 UnifiedEsWriter 双写，过渡期后删除旧 writer）
         (es_writer or self._es_writer)(event_dict)
-        try:
-            from .unified_writer import UnifiedEsWriter
-            UnifiedEsWriter.get_instance().write("events", event_dict)
-        except Exception:
-            pass
         return event_dict
 
     def emit_sync(
@@ -73,11 +84,6 @@ class AgentEventEmitter:
         event_dict = self._prepare_event(event)
         self._emit_console(event_dict)
         (es_writer or self._es_writer)(event_dict)
-        try:
-            from .unified_writer import UnifiedEsWriter
-            UnifiedEsWriter.get_instance().write("events", event_dict)
-        except Exception:
-            pass
         return event_dict
 
     def _emit_console(self, event_dict: dict[str, Any]) -> None:
