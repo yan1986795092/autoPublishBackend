@@ -18,9 +18,9 @@ from src.api.chat import router as chat_router
 from src.agent.api import router as agent_router
 from src.agent.workflow.worker import worker
 from src.observability import setup_observability
-from src.observability import metrics as obs_metrics
 from src.observability.api import router as observability_router
 from src.observability.es_client import close_es
+from src.logging_shared.unified_writer import UnifiedEsWriter
 import src.migrations  # noqa: F401 — register migrations
 
 import structlog
@@ -33,36 +33,19 @@ async def lifespan(app: FastAPI):
     # Unified logging configuration (reads settings.log_level, settings.log_json_format)
     setup_logging(settings)
 
-    # 统一 tracing 初始化：HTTP spans 由 LoggingMiddleware 直写 ES，
-    # OTel tracer 保留给 agent nodes 的 start_as_current_span() 调用
+    # 统一 tracing 初始化（structlog only，OTel SDK 已移除）
     tracer, meter = setup_observability(
         service_name="autopublish-api",
         service_version="2.0.0",
         settings=settings,
     )
 
-    obs_metrics.create_meters()
-
-    # 启动 ES 异步日志写入器
+    # 启动 UnifiedEsWriter（管理 traces/events/logs 三个索引）
     try:
-        from src.logging_shared.es_writer import start_writer as _start_es
-        await _start_es()
-    except Exception:
-        pass
-
-    # 启动 Agent 事件 ES 写入器
-    try:
-        from src.logging_shared.agent_es_writer import start_writer as _start_agent_es
-        await _start_agent_es()
-    except Exception:
-        pass
-
-    # 启动 TracingMiddleware 的 span 直写 ES 写入器
-    try:
-        from src.logging_shared.middleware import start_span_writer as _start_span
-        await _start_span()
-    except Exception:
-        pass
+        writer = UnifiedEsWriter.get_instance()
+        await writer.start()
+    except Exception as exc:
+        logger.warning("UnifiedEsWriter start failed (non-fatal): %s", exc)
 
     # Start DB + migrations + worker
     loop = asyncio.get_running_loop()
@@ -74,24 +57,12 @@ async def lifespan(app: FastAPI):
     logger.info("Agent Worker started")
     yield
 
-    # 关闭 ES 写入器
+    # 关闭 UnifiedEsWriter
     try:
-        from src.logging_shared.es_writer import stop_writer as _stop_es
-        await _stop_es()
-    except Exception:
-        pass
-
-    try:
-        from src.logging_shared.agent_es_writer import stop_writer as _stop_agent_es
-        await _stop_agent_es()
-    except Exception:
-        pass
-
-    try:
-        from src.logging_shared.middleware import stop_span_writer as _stop_span
-        await _stop_span()
-    except Exception:
-        pass
+        writer = UnifiedEsWriter.get_instance()
+        await writer.stop()
+    except Exception as exc:
+        logger.warning("UnifiedEsWriter stop error: %s", exc)
 
     await close_es()
     await worker.stop()
