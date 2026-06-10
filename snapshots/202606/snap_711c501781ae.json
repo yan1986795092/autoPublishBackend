@@ -1,0 +1,49 @@
+{
+  "snapshot_id": "snap_711c501781ae",
+  "agent_name": "NonExistentHandler",
+  "timestamp": "2026-06-09T09:09:03.044718",
+  "duration_ms": 0,
+  "task_id": null,
+  "parent_snapshot_id": null,
+  "prompt_messages": [],
+  "context": {
+    "profile_snapshot": {
+      "name": "NonExistentHandler",
+      "role": "测试",
+      "description": "",
+      "persona": "",
+      "expertise": [],
+      "communication_style": "",
+      "token_budget": 2000,
+      "memory_namespace": "general",
+      "tools_enabled": false,
+      "available_tools": [],
+      "cacheable": false,
+      "memory_enabled": false,
+      "remember_enabled": false,
+      "handler_key": ""
+    },
+    "memory_ids": [],
+    "memory_text_preview": "",
+    "search_results_hash": null,
+    "search_query": null,
+    "tool_calls": [],
+    "extra_context_keys": []
+  },
+  "llm_request": null,
+  "llm_response": null,
+  "result_summary": "partial",
+  "result": {
+    "status": "partial",
+    "agent_type": "NonExistentHandler",
+    "output": {
+      "content": "[模拟] NonExistentHandler 已完成（无 LLM 可用）",
+      "type": "text"
+    },
+    "tokens_used": 0,
+    "thinking_steps": [],
+    "warning": "NonExistentHandler 未配置 LLM，返回模拟结果"
+  },
+  "tags": [],
+  "captured_hash": "b24070360551"
+}
