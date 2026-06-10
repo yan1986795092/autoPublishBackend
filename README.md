@@ -1,6 +1,6 @@
 # AutoPublish Backend
 
-AI 内容生产与发布工具后端 API 服务，基于 FastAPI + LangGraph 多 Agent 编排引擎。所有 LLM 调用统一经过 LLM Gateway 服务。
+AI 内容生产与发布工具后端 API 服务，基于 FastAPI + LangGraph 多 Agent 编排引擎。所有 LLM 调用统一经过 LLM Gateway 服务（端口 9010）。
 
 ## 技术栈
 
@@ -8,12 +8,12 @@ AI 内容生产与发布工具后端 API 服务，基于 FastAPI + LangGraph 多
 |------|------|------|
 | **Web 框架** | FastAPI | 异步 API + 自动文档 |
 | **Agent 编排** | LangGraph | StateGraph DAG 调度 |
-| **LLM 调用** | LangChain + LLM Gateway | httpx → Gateway → 多供应商 |
+| **LLM 调用** | LangChain + LLM Gateway | ChatOpenAI → Gateway → 多供应商 |
 | **多供应商** | OpenAI / 智谱 / 通义千问 | Gateway 统一封装 |
 | **数据库** | SQLAlchemy + SQLite | 内容、用户、模板存储 |
 | **认证** | Python-JOSE + Passlib | JWT Token |
 | **外部工具** | MCP (Model Context Protocol) | 搜索、爬虫等工具标准化 |
-| **可观测性** | OpenTelemetry + Prometheus + Elasticsearch | 全链路追踪 + 指标采集 + 结构化日志 |
+| **可观测性** | OpenTelemetry + OTel Collector + Prometheus + Elasticsearch | 全链路追踪 + 指标采集 + 结构化日志 |
 | **异步队列** | asyncio.Queue | 内存任务队列 |
 | **实时推送** | SSE + WebSocket | 任务进度实时推送 |
 | **日志** | structlog (统一配置) | 中文结构化日志，Console + ES |
@@ -46,20 +46,21 @@ LLM Gateway：http://localhost:9010/docs
                              │ HTTP REST / SSE
                              ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│                    API 层 (FastAPI)                                    │
-│  /api/v1/auth/*  /api/v1/contents/*  /api/v1/skills/*              │
-│  /api/v1/publish/*  /api/v1/ai-editor/*                             │
-│  /api/v1/agent/*  /agent/stream  /agent/ws/{id}                      │
+│                    API 层 (FastAPI, :9000)                           │
+│  /api/v1/auth/*  /api/v1/contents/*  /api/v1/skills/*            │
+│  /api/v1/publish/*  /api/v1/ai-editor/*                            │
+│  /api/v1/agent/*  /agent/stream  /agent/ws/{id}                    │
 │                                                                      │
-│  LoggingMiddleware ──► 统一结构化日志 + trace_id                       │
+│  OTelMiddleware ──► 统一结构化日志 + trace_id + OTel Span           │
 └────────────────────────────┬─────────────────────────────────────────┘
                              │
-┌────────────────────────────▼─────────────────────────────────────────┐
+┌────────────────────────────▼──────────────────────────────────────┐
 │                  Agent 编排层 (LangGraph)                               │
 │                                                                      │
 │  ┌──────────────────────────────────────────────────────────────┐  │
 │  │                    Orchestrator                               │  │
-│  │  任务拆解 + 调度中枢 + 结果合并                               │  │
+│  │  任务拆解 + 调度中枢 + 结果合并                           │  │
+│  │  (已移除 llm_gateway 参数，所有 LLM 经 chat_models)        │  │
 │  └────────────────────────────┬─────────────────────────────────┘  │
 │                               │                                       │
 │  ┌────────────────────────────▼─────────────────────────────────┐  │
@@ -70,33 +71,33 @@ LLM Gateway：http://localhost:9010/docs
 │  ┌────────────────────────────▼─────────────────────────────────┐  │
 │  │                    核心 Agent 团队                             │  │
 │  │  Manager │ Writing │ SEO │ Review │ Diagram │ WebSearch │ ...│  │
-│  │  (全部通过 ToolRegistry 绑定 LLM，所有 LLM 调用经由 Gateway)   │  │
+│  │  全部通过 ModelRouter 绑定 LLM，指向 LLM Gateway            │  │
 │  └────────────────────────────┬─────────────────────────────────┘  │
 │                               │                                       │
 │  ┌────────────────────────────▼─────────────────────────────────┐  │
 │  │                    支撑系统 (可选)                              │  │
-│  │  MessageBus │ ReflectionEngine │ ToolRegistry │ HITLManager   │  │
+│  │  MessageBus │ ReflectionEngine │ ToolRegistry │ HITLManager    │  │
+│  │  SubAgent (ReAct) │ SubAgentFactory                       │  │
 │  └───────────────────────────────────────────────────────────────┘  │
 └────────────────────────────┬─────────────────────────────────────────┘
                              │
-                             │  LangChain ChatOpenAI (base_url=localhost:9010)
-                             │  httpx (LLMGateway / generate_sync)
+                             │  LangChain ChatOpenAI (base_url=:9010)
+                             │  ModelRouter.get_chat_model(agent_type)
                              ▼
 ┌──────────────────────────────────────────────────────────────────────┐
-│              LLM Gateway (9010) — 统一 LLM 出口                        │
+│              LLM Gateway (:9010) — 统一 LLM 出口                     │
 │                                                                      │
 │  ┌──────────────────────────────────────────────────────────────┐   │
-│  │  Plugin Chain: RateLimiter → Cache → CircuitBreaker          │   │
-│  │               → Observability                                 │   │
+│  │  Plugin Chain: RateLimiter → Cache → CircuitBreaker        │   │
+│  │               → Observability (日志 + token 计量)            │   │
 │  └────────────────────────────┬─────────────────────────────────┘   │
 │                               │                                       │
 │  ┌────────────────────────────▼─────────────────────────────────┐   │
-│  │  Auto Router (三维加权打分：成本 / 延迟 / 质量)              │   │
-│  │  或直接指定模型                                               │   │
+│  │  按 model 名路由到对应 Adapter                               │   │
 │  └────────────────────────────┬─────────────────────────────────┘   │
 │                               │                                       │
 │  ┌────────────────────────────▼─────────────────────────────────┐   │
-│  │  Provider Adapters (httpx 异步)                               │   │
+│  │  Provider Adapters (httpx 异步)                             │   │
 │  │  ┌──────────┐  ┌──────────┐  ┌──────────────────────┐       │   │
 │  │  │ OpenAI   │  │  智谱    │  │   通义千问            │       │   │
 │  │  │ gpt-4o   │  │ glm-4    │  │   qwen-plus          │       │   │
@@ -114,19 +115,21 @@ LLM Gateway：http://localhost:9010/docs
 用户请求 → Orchestrator.run()
               │
               ▼
-    classify_and_decompose ────► 任务复杂度分类 + LLM 动态拆解
-              │                    (simple / medium / complex)
-              │                    或模板兜底
+    classify_and_decompose ────► LLM 动态拆解（优先）
+              │                    复杂度分类 (simple/medium/complex)
+              │                    模板兜底（LLM 不可用时）
               ▼
     schedule_and_execute ────► DAG 依赖分析 + 并行批次调度
               │
               ▼
     execute_task_batch ────► asyncio.gather 并行执行
               │
+              ├─ [可选] SubAgent.run_with_react() ───► ReAct 循环
+              │                                        (enable_subagent_react)
               ├─ [可选] reflect_on_task_batch ───► 三层反思 (Self/Peer/Meta)
-              │                                        │
-              ▼                                        ▼
-         merge_and_finish ◄────────────────────────────┘
+              │                                        (enable_reflection)
+              ▼
+         merge_and_finish ◄────────────────────────────
               │
               ▼
          返回结果
@@ -140,17 +143,18 @@ LLM Gateway：http://localhost:9010/docs
 | **Phase 2** | Message Bus | `enable_message_bus` | Agent 间 P2P 通信 |
 | **Phase 3** | Reflection | `enable_reflection` | 自省/同行评审/元认知 |
 | **Phase 4** | HITL | `enable_hitl` | 人工介入决策门控 |
+| **ReAct** | SubAgent 循环 | `enable_subagent_react` | 子 Agent 独立 ReAct 循环 |
 
 ## 异步工作流与 SSE
 
 ```
 Client → POST /agent/stream
            │
-           ├─ ① 生成执行计划 (预计算)
+           ├─ ① 生成执行计划 (LLM 分解优先，模板兜底)
            ├─ ② enqueue → TaskQueue
            ├─ ③ AgentWorker 出队执行
            │     ├─ orchestrator.run() (LangGraph)
-           │     ├─ LLM 调用经由 Gateway
+           │     ├─ ModelRouter.get_chat_model() → ChatOpenAI → Gateway
            │     ├─ EventBus 推送进度
            │     └─ 结果 → complete_task
            └─ ④ SSE 实时推送事件
@@ -195,61 +199,85 @@ Client → POST /agent/stream
 ```
 backend/
 ├── src/
-│   ├── main.py                 # FastAPI 入口 + lifespan（接入 LoggingMiddleware + ES writer）
+│   ├── main.py                 # FastAPI 入口 + lifespan（OTelMiddleware + ES writer）
 │   ├── config.py               # Pydantic Settings 配置管理
 │   ├── database.py             # SQLAlchemy 引擎 + SessionLocal
 │   ├── models.py               # ORM 模型
-│   ├── logging_shared/         # 统一日志基础设施（两服务共用）
-│   │   ├── fields.py           # 日志字段常量
-│   │   ├── config.py           # structlog 统一配置
-│   │   ├── middleware.py       # LoggingMiddleware（HTTP 请求日志 + trace_id）
-│   │   └── es_writer.py        # ES 异步批量写入器
-│   ├── api/                    # API 路由层
-│   │   ├── auth.py             # JWT 认证
-│   │   ├── contents.py         # 内容 CRUD + 日历
-│   │   ├── publish.py          # 发布管理
+│   ├── logging_shared/        # 统一日志基础设施（两服务共用）
+│   │   ├── __init__.py       # 统一导出
+│   │   ├── fields.py          # 日志字段常量
+│   │   ├── config.py          # structlog 统一配置
+│   │   └── es_writer.py      # ES 异步批量写入器
+│   ├── api/                   # API 路由层
+│   │   ├── auth.py            # JWT 认证
+│   │   ├── contents.py        # 内容 CRUD + 日历
+│   │   ├── publish.py         # 发布管理
 │   │   ├── platforms.py        # 平台管理
-│   │   ├── templates.py         # Prompt 模板
-│   │   ├── presets.py           # 用户预设
-│   │   ├── personas.py          # 人设管理
-│   │   ├── ai_editor.py         # AI 编辑助手
-│   │   └── skills.py            # Skill CRUD + 导入
-│   ├── agent/                  # Agent 系统
+│   │   ├── templates.py       # Prompt 模板
+│   │   ├── presets.py          # 用户预设
+│   │   ├── personas.py         # 人设管理
+│   │   ├── ai_editor.py        # AI 编辑助手
+│   │   └── skills.py           # Skill CRUD + 导入
+│   ├── agent/                 # Agent 系统
 │   │   ├── orchestrator.py     # 编排器 (LangGraph 包装)
-│   │   ├── graph.py             # LangGraph StateGraph
-│   │   ├── nodes.py             # 图节点函数
-│   │   ├── edges.py             # 条件边路由
-│   │   ├── state.py             # AgentGraphState
-│   │   ├── factory.py           # 工厂函数（创建 Orchestrator）
-│   │   ├── api.py               # Agent REST/SSE/WS 端点
-│   │   ├── schemas.py           # AgentTask / AgentResult
-│   │   ├── thinking_trace.py    # 思考链路
-│   │   ├── persistence.py       # 持久化
-│   │   ├── cache.py             # 结果缓存
-│   │   ├── retry.py             # 重试策略
-│   │   ├── agents/              # Agent 基类与注册表
-│   │   ├── handlers/            # Agent 处理函数
+│   │   ├── graph.py            # LangGraph StateGraph
+│   │   ├── nodes.py            # 图节点函数
+│   │   ├── edges.py            # 条件边路由
+│   │   ├── state.py            # AgentGraphState
+│   │   ├── factory.py          # 工厂函数（创建 Orchestrator）
+│   │   ├── api.py              # Agent REST/SSE/WS 端点
+│   │   ├── schemas.py          # AgentTask / AgentResult / ExecutionPlan
+│   │   ├── agent_utils.py      # PLANNER_SYSTEM_PROMPT + 工具函数
+│   │   ├── thinking_trace.py   # 思考链路
+│   │   ├── persistence.py      # 持久化
+│   │   ├── cache.py            # 结果缓存
+│   │   ├── retry.py            # 重试策略
+│   │   ├── agents/             # Agent 基类与注册表
+│   │   │   ├── base_agent.py   # BaseAgent 基类
+│   │   │   ├── registry.py      # AgentRegistry
+│   │   │   └── profile.py       # AgentProfile
+│   │   ├── handlers/           # Agent 处理函数
+│   │   │   ├── writing.py
+│   │   │   ├── seo.py
+│   │   │   ├── review.py
+│   │   │   └── ...
 │   │   ├── reflection/          # 三层反思引擎
-│   │   ├── communication/        # Agent 间通信
-│   │   ├── hitl/                # Human-in-the-Loop
-│   │   ├── tools/               # Agent 工具系统
+│   │   │   ├── engine.py
+│   │   │   └── types.py
+│   │   ├── communication/       # Agent 间通信
+│   │   │   ├── bus.py           # MessageBus (P2P 通信)
+│   │   │   └── models.py
+│   │   ├── hitl/               # Human-in-the-Loop
+│   │   │   └── manager.py
+│   │   ├── react/               # SubAgent ReAct 循环
+│   │   │   ├── sub_agent.py     # SubAgent (带 ReAct 循环)
+│   │   │   └── factory.py       # SubAgentFactory
+│   │   ├── tools/              # Agent 工具系统
+│   │   │   ├── registry.py
+│   │   │   └── builtins/
+│   │   │       └── communication_tools.py
 │   │   └── workflow/            # 异步任务队列 + Worker
-│   ├── mcp/                     # MCP (Model Context Protocol)
-│   ├── memory/                  # 记忆系统
-│   ├── skills/                  # Skill 内置注册表
-│   ├── core/                    # 核心模块
-│   │   ├── llm_gateway.py      # LLM Gateway 客户端（httpx 调用 Gateway）
-│   │   ├── model_router.py      # 按角色创建 ChatOpenAI（指向 Gateway）
-│   │   ├── prompt_engine.py     # Prompt 引擎
-│   │   ├── content_service.py   # 内容生成服务
-│   │   └── security.py          # 安全认证
-│   ├── adapters/                # 平台适配器
+│   │       ├── worker.py
+│   │       └── task_queue.py
+│   ├── mcp/                   # MCP (Model Context Protocol)
+│   ├── memory/                # 记忆系统
+│   │   ├── context_store.py    # SharedContextStore
+│   │   ├── context_manager.py   # ContextManager (多轮对话路由)
+│   │   └── agent_scoped_view.py # 权限分片视图
+│   ├── skills/               # Skill 内置注册表
+│   ├── core/                 # 核心模块
+│   │   ├── model_router.py     # ModelRouter (per-role 路由 → Gateway)
+│   │   ├── prompt_engine.py    # Prompt 引擎
+│   │   ├── content_service.py  # 内容生成服务
+│   │   └── security.py         # 安全认证
+│   ├── adapters/              # 平台适配器
 │   ├── utils/
-│   ├── prompts/                 # Prompt 模板
-│   └── observability/            # 可观测性
-│       ├── tracing.py
-│       ├── metrics.py
-│       └── es_client.py
+│   ├── prompts/               # Prompt 模板
+│   └── observability_v2/       # 统一可观测性 (OTel + ES)
+│       ├── setup.py            # OTel + structlog 统一初始化
+│       ├── otel_middleware.py  # OTel FastAPI Middleware
+│       ├── es_exporter.py       # OTel SpanExporter → ES
+│       └── metrics.py           # 指标定义
 ├── tests/
 ├── scripts/
 ├── docs/
@@ -257,61 +285,41 @@ backend/
 └── requirements.txt
 ```
 
-## LLM 调用
+## LLM 调用（统一路径）
 
 ### 架构说明
 
-所有 LLM 调用统一经过 LLM Gateway（9010），不再直连 LLM 提供商：
+所有 LLM 调用统一经过 LLM Gateway（9010），不再存在两条并行路径：
 
 ```
-Backend                    LLM Gateway (9010)            LLM 提供商
-  │                              │                           │
-  │  ModelRouter                 │                           │
+Backend                      LLM Gateway (9010)            LLM 提供商
+  │                                │                           │
+  │  ModelRouter                  │                           │
+  │  get_chat_model(agent_type)   │                           │
   │  ChatOpenAI(                 │                           │
-  │    base_url=9010)            │                           │
-  │  ─────────────────────────► │  RateLimiter               │
-  │                              │  Cache                     │
-  │                              │  CircuitBreaker            │
-  │                              │  Observability             │
-  │                              │  ─────────────────────────►│
-  │                              │  ◄─────────────────────────│
-  │                              │                           │
+  │    base_url=:9010)           │                           │
+  │  ─────────────────────────►  │  RateLimiter               │
+  │                             │  Cache                     │
+  │                             │  CircuitBreaker            │
+  │                             │  Observability             │
+  │                             │  ────────────────────────► │
+  │                             │  ◄─────────────────────── │
   │  ◄───────────────────────── │                           │
-  │                              │                           │
+  │                             │                           │
 ```
 
-### 两种调用方式
+### ModelRouter Per-Role 路由
 
-**1. Agent 工具调用（LangChain）：** ModelRouter 返回 ChatOpenAI 实例，base_url 指向 Gateway，LangChain 自动处理流式响应和工具调用。
+ModelRouter 通过 `Settings.get_role_config()` 实现按 Agent 类型差异化路由：
 
 ```python
 from src.core.model_router import ModelRouter
 
 router = ModelRouter()
-llm = router.get_chat_model("WritingAgent")
-response = await llm.ainvoke(messages)  # 经由 Gateway
+llm = router.get_chat_model("WritingAgent")     # WritingAgent 用自己的配置
+llm = router.get_chat_model("DiagramAgent")   # DiagramAgent 可能用通义千问
+response = await llm.ainvoke(messages)        # 经由 Gateway
 ```
-
-**2. 简单 LLM 调用（httpx）：** `LLMGateway.generate_sync()` 用于 Orchestrator 的计划拆解等简单调用。
-
-```python
-from src.core.llm_gateway import LLMGateway
-
-gateway = LLMGateway(api_key="...")
-content = await gateway.generate_sync(messages)  # 经由 Gateway
-```
-
-### 多供应商支持
-
-LLM Gateway 自动按优先级选择可用的供应商：
-
-| 变量 | 说明 | 默认值 |
-|------|------|--------|
-| `ZHIPU_API_KEY` | 智谱 GLM | `glm-4-flash` |
-| `QWEN_API_KEY` | 通义千问 | `qwen-plus` |
-| `OPENAI_API_KEY` | OpenAI | `gpt-4o-mini` |
-
-默认优先级：`ZHIPU_API_KEY` → `QWEN_API_KEY` → `OPENAI_API_KEY`
 
 ### 按角色差异化配置
 
@@ -326,30 +334,35 @@ LLM Gateway 自动按优先级选择可用的供应商：
 | `DiagramAgent` | 图表生成 | 通义 qwen-plus |
 | `WebSearch` | 搜索分析 | 智谱 glm-4-flash |
 
-## 统一日志
+## 统一日志与可观测性
 
-后端和 LLM Gateway 共用 `src/logging_shared/` 中的统一配置：
+### 三层可观测性架构
 
-- **格式：** 中文结构化 JSON（生产）或彩色 Console（开发）
-- **trace_id：** HTTP header `X-Trace-Id` 跨服务透传，串联所有日志
-- **ES 写入：** 异步批量写入 `logs-YYYY.MM.DD` 索引，不阻塞请求
-- **事件类型：** `http_request_start/end` | `llm_request_start/end/error`
+| 层级 | 数据 | 索引 | 用途 |
+|------|------|------|------|
+| **HTTP 链路追踪** | OTel Span | `traces-*` | Jaeger UI / Grafana 链路图 |
+| **Agent 业务事件** | AgentEvent | `agent-events-*` | 推理过程、工具调用、成本计量 |
+| **应用日志** | structlog JSON | `logs-*` | 问题排查、审计 |
+
+### 数据流
 
 ```
-# 示例：llm_request_end 日志字段
-{
-  "trace_id": "a1b2c3d4e5f60718",
-  "event": "llm_request_end",
-  "service": "llm-gateway",
-  "llm_model": "glm-4-flash",
-  "llm_provider": "zhipu",
-  "llm_latency_ms": 1234.5,
-  "llm_prompt_tokens": 256,
-  "llm_completion_tokens": 128,
-  "llm_total_tokens": 384,
-  "status_code": 200
-}
+请求 → OTelMiddleware
+          ├─ span.start() ──► OTel BatchSpanProcessor
+          │                       ├─ OTLP gRPC Exporter ──► OTel Collector ──► ES (traces-*)
+          │                       └─ Console (dev)
+          │
+          └─ structlog ──► Console + ES 异步写入 (logs-*)
+
+Agent 执行 → AgentEventEmitter ──► structlog ──► Console + ES (agent-events-*)
 ```
+
+### 关键设计
+
+- **trace_id 跨服务透传**：HTTP header `X-Trace-Id`，从请求进入贯穿到 Gateway LLM 调用
+- **OTelMiddleware 替代 LoggingMiddleware**：HTTP 请求不再直写 ES span，改为通过 OTel SDK → Collector → ES
+- **ES 异步批量写入**：日志写入不阻塞请求链路，队列满时优雅丢弃
+- **生产环境截断**：thought 2000 字符，tool_output 500 字符，开发环境完整输出
 
 ## API 概览
 
@@ -438,6 +451,7 @@ LLM Gateway 自动按优先级选择可用的供应商：
 | `ENABLE_REFLECTION` | 启用反思引擎 | `false` |
 | `ENABLE_MESSAGE_BUS` | 启用 Agent 通信 | `false` |
 | `ENABLE_HITL` | 启用人工介入 | `false` |
+| `ENABLE_SUBAGENT_REACT` | 启用 SubAgent ReAct 循环 | `false` |
 | **日志配置** | | |
 | `LOG_LEVEL` | 日志级别 | `INFO` |
 | `LOG_JSON_FORMAT` | JSON 格式输出 | `false` |
@@ -470,15 +484,19 @@ curl http://localhost:9010/health
 | 决策 | 方案 | 权衡 |
 |------|------|------|
 | **LLM 调用** | 统一经过 LLM Gateway | 集中治理（日志/限流/熔断/缓存），后端更轻量 |
+| **LLM 调用路径** | 删除 LLMGateway httpx 客户端，全走 ChatOpenAI → Gateway | 统一 LangChain 路径，token 计数/缓存一致 |
+| **Per-Role 路由** | ModelRouter + get_role_config() | 支持差异化模型配置，无需改代码 |
 | **编排引擎** | LangGraph StateGraph | 结构化 DAG，可预测性强 |
+| **SubAgent ReAct** | 可选 Phase，基于 BaseAgent 叠加 run_with_react() | 不改变现有 Agent，渐进式升级 |
 | **任务队列** | asyncio.Queue (内存) | 零依赖，单进程零开销 |
 | **工具集成** | MCP (Model Context Protocol) | 标准化热插拔协议 |
-| **模型路由** | ModelRouter 按角色创建 | 支持差异化配置和缓存 |
-| **日志架构** | shared-logging 统一配置 + ES 异步写入 | trace_id 跨服务串联，日志不阻塞请求 |
+| **可观测性** | OTelMiddleware → OTel Collector → ES | 统一追踪，Jaeger UI 可视化 |
+| **日志架构** | shared-logging 统一配置 + ES 异步批量写入 | trace_id 跨服务串联，日志不阻塞请求 |
 | **可选 Phase** | 特性开关 (enable_*) | 按需启用，避免复杂度 |
 
 ## 版本历史
 
 | 版本 | 日期 | 变更 |
 |------|------|------|
+| v2.2.0 | 2026-06 | SubAgent ReAct 循环；per-role ModelRouter；统一可观测性 v2 (OTelMiddleware) |
 | v2.1.0 | 2026-06 | LLM 调用统一经过 LLM Gateway；shared-logging 统一日志；ES 异步批量写入 |

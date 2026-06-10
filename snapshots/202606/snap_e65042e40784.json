@@ -1,0 +1,44 @@
+{
+  "snapshot_id": "snap_e65042e40784",
+  "agent_name": "NonExistentHandler",
+  "timestamp": "2026-06-09T09:09:03.053260",
+  "duration_ms": 0,
+  "task_id": null,
+  "parent_snapshot_id": null,
+  "prompt_messages": [],
+  "context": {
+    "profile_snapshot": {
+      "name": "NonExistentHandler",
+      "role": "测试员",
+      "description": "",
+      "persona": "",
+      "expertise": [],
+      "communication_style": "",
+      "token_budget": 2000,
+      "memory_namespace": "general",
+      "tools_enabled": false,
+      "available_tools": [],
+      "cacheable": false,
+      "memory_enabled": false,
+      "remember_enabled": false,
+      "handler_key": ""
+    },
+    "memory_ids": [],
+    "memory_text_preview": "",
+    "search_results_hash": null,
+    "search_query": null,
+    "tool_calls": [],
+    "extra_context_keys": []
+  },
+  "llm_request": null,
+  "llm_response": null,
+  "result_summary": "completed",
+  "result": {
+    "status": "completed",
+    "output": {
+      "content": "ok"
+    }
+  },
+  "tags": [],
+  "captured_hash": "2cd5d65480d0"
+}
