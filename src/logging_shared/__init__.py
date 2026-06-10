@@ -17,12 +17,11 @@ from .fields import (
     HTTP_REQUEST_ERROR,
 )
 from .config import setup, get_logger
-from .middleware import LoggingMiddleware, start_span_writer, stop_span_writer
+from .middleware import LoggingMiddleware
 from .unified_writer import UnifiedEsWriter
 
 __all__ = [
     "setup", "get_logger", "LoggingMiddleware", "UnifiedEsWriter",
-    "start_span_writer", "stop_span_writer",
     "AgentEvent", "EventType", "TokenUsage", "calculate_cost_usd",
     "AgentEventEmitter", "get_agent_event_emitter",
     "TRACE_ID", "SPAN_ID", "SERVICE_NAME", "LOG_TIME", "LEVEL", "EVENT",
