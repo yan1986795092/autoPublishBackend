@@ -7,10 +7,8 @@ import json
 from src.database import get_db
 from src.models import Content, ContentVersion, ContentStatus, PublishRecord
 from src.schemas.content import (
-    GenerateRequest, GenerateResponse, GenerateMetadata,
-    ContentListItem, ContentListResponse, PaginationInfo,
-    ContentDetailResponse, ContentVersionItem,
-    UpdateContentRequest, UpdateContentResponse,
+    GenerateRequest,
+    UpdateContentRequest,
     BatchGenerateRequest,
 )
 from src.api.auth import get_current_user
