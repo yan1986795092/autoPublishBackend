@@ -1,7 +1,7 @@
 """Observability: lightweight tracing setup (OTel-free).
 
 Agent tracing is handled by `AgentTracer` (see agent_tracer.py) which writes
-directly to UnifiedEsWriter in Jaeger-compatible format — no OTel exporter needed.
+directly to UnifiedEsWriter in Jaeger-compatible trace format — no Jaeger server needed.
 
 HTTP tracing is handled by LoggingMiddleware → UnifiedEsWriter → ES.
 

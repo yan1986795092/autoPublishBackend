@@ -849,6 +849,7 @@ async def invalidate_cache(
 async def agent_metrics():
     """Agent 系统监控指标"""
     settings = get_settings()
+    from src.observability.metrics import stats_collector
 
     active_tasks = sum(
         1 for t in task_queue._tasks.values()
@@ -876,6 +877,10 @@ async def agent_metrics():
                 "worker_max_retries": settings.worker_max_retries,
                 "mcp_enabled": settings.mcp_enabled,
             },
+            # ── Prometheus-backed runtime stats ──
+            "agent_runs": stats_collector.get_stats()["agent_runs"],
+            "llm_calls": stats_collector.get_stats()["llm_calls"],
+            "tool_calls": stats_collector.get_stats()["tool_calls"],
         },
     }
 

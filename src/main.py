@@ -17,11 +17,13 @@ from src.config import get_settings
 from src.database import engine, setup_db_logging
 from src.models import Base
 from src.api import auth, contents, publish, platforms, presets, ai_editor, personas
+from src.api.admin import router as admin_router
 from src.api.skills import router as skills_router
 from src.api.chat import router as chat_router
 from src.agent.api import router as agent_router
 from src.agent.workflow.worker import worker
 from src.observability import setup_observability
+from src.observability.metrics import up_gauge, info_gauge
 from src.logging_shared.unified_writer import UnifiedEsWriter
 import src.migrations  # noqa: F401 — register migrations
 
@@ -41,6 +43,10 @@ async def lifespan(app: FastAPI):
         service_version="2.0.0",
         settings=settings,
     )
+
+    # Set Prometheus lifecycle gauges
+    up_gauge.set(1)
+    info_gauge.labels(version="2.0.0").set(1)
 
     # 开发环境启用 DB 查询日志（默认关，可通过 ENABLE_DB_LOG=true 开启）
     setup_db_logging(enabled=bool(getattr(settings, "log_level", "INFO") == "DEBUG"))
@@ -254,6 +260,7 @@ app.include_router(platforms.router, prefix="/api/v1")
 app.include_router(presets.router, prefix="/api/v1")
 app.include_router(ai_editor.router, prefix="/api/v1")
 app.include_router(personas.router, prefix="/api/v1")
+app.include_router(admin_router)
 app.include_router(skills_router)
 app.include_router(chat_router)
 app.include_router(agent_router, prefix="/api/v1")
@@ -300,19 +307,14 @@ async def health_check():
 
 @app.get("/metrics")
 async def prometheus_metrics():
-    """Prometheus metrics endpoint - returns basic metrics in Prometheus text format."""
+    """Prometheus metrics endpoint — real prometheus_client metrics."""
     from fastapi.responses import Response
+    from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 
-    # Basic metrics in Prometheus text format
-    metrics_text = """# HELP autopublish_up Whether the service is up (1) or down (0)
-# TYPE autopublish_up gauge
-autopublish_up 1
-
-# HELP autopublish_info Service info
-# TYPE autopublish_info gauge
-autopublish_info{version="2.0.0"} 1
-"""
-    return Response(content=metrics_text, media_type="text/plain; charset=utf-8")
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 if __name__ == "__main__":
