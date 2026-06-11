@@ -1,6 +1,7 @@
 """WritingAgent — 多风格内容写作
 
 使用 PromptEngine 构建 prompt，支持记忆上下文注入和工具调用（memory_search 等）。
+支持平台深度写作引擎：根据 platform 加载对应写作 DNA。
 """
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -10,6 +11,7 @@ from src.prompts import PromptBuilder, CONTENT_TYPE_PROMPTS, STYLE_GUIDES
 from src.core.exceptions import HandlerError
 from .tool_utils import call_llm
 from src.logging_shared.config import get_logger
+from ..platform_profile import get_profile, format_writing_rules, get_names_map
 
 logger = get_logger("agent.writing")
 
@@ -20,6 +22,15 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         content_type = task_input.get("content_type", "blog")
         style = task_input.get("style", "")
         platform = task_input.get("platform", "")
+        platform_name = ""
+
+        # ── 平台深度配置加载 ──
+        profile = get_profile(platform) if platform else None
+        if profile:
+            platform_name = profile.get("name", platform)
+            # 如果 task_input 没有显式 content_type，从 profile 映射
+            # 使用 platform code 作为 content_type（兼容现有 CONTENT_TYPE_PROMPTS）
+            content_type = platform
 
         # ── 构建上下文 ──
         dep_context = task_input.get("_context", {})
@@ -55,18 +66,29 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         # ── 用 PromptBuilder 构建 ──
         builder = PromptBuilder()
 
-        # system prompt
-        builder.system("system.base")
+        # system prompt: 优先使用平台定制的 system_prompt
+        platform_system_prompt = task_input.get("_platform_system_prompt", "")
+        if platform_system_prompt and profile:
+            # 使用平台角色定位
+            builder.system_text(f"你是一个内容创作助手。\n\n{platform_system_prompt}")
+        else:
+            builder.system("system.base")
 
         # ── Skill system prompt injection ──
         skill_system_prompt = task_input.get("_skill_system_prompt", "")
         if skill_system_prompt:
             builder.context(f"\n\n=== 创作指导 (Skill: {task_input.get('_skill_name', 'Custom')}) ===\n{skill_system_prompt}\n===")
 
-        # 任务指令
-        type_guide = CONTENT_TYPE_PROMPTS.get(content_type, CONTENT_TYPE_PROMPTS["blog"])
+        # ── 任务指令 ──
+        # 优先使用平台的结构化写作规则
+        platform_rules = task_input.get("_platform_writing_rules", {})
+        if platform_rules:
+            type_guide = format_writing_rules(platform_rules)
+        else:
+            type_guide = CONTENT_TYPE_PROMPTS.get(content_type, CONTENT_TYPE_PROMPTS["blog"])
+
         style_guide = STYLE_GUIDES.get(style, "自然流畅，有自己的观点和态度")
-        platform_line = f"**目标平台：** {platform}" if platform else ""
+        platform_line = f"**目标平台：** {platform_name}" if platform_name else ""
 
         builder.instructions("writing.task", {
             "topic": topic,
@@ -122,16 +144,17 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             if content:
                 logger.warning("extract_output 返回空，使用原始响应", agent="WritingAgent")
 
+        platform_display = f"（{platform_name}）" if platform_name else ""
         return {
             "status": "completed", "agent_type": "WritingAgent",
-            "output": {"content": content, "type": "text", "content_type": content_type},
+            "output": {"content": content, "type": "text", "content_type": content_type, "platform": platform},
             "tokens_used": llm_result.total_tokens,
             "prompt_tokens": llm_result.prompt_tokens,
             "completion_tokens": llm_result.completion_tokens,
             "prompt_versions": composed.used_templates,
             "thinking_steps": [{
                 "agent": "WritingAgent", "action": "写作完成",
-                "reasoning": f"撰写{content_type}文章：{topic[:30]}...",
+                "reasoning": f"撰写{content_type}内容{platform_display}：{topic[:30]}...",
                 "output_summary": f"生成了约 {len(content)} 字内容",
                 "tokens_used": llm_result.total_tokens, "status": "done",
             }],
