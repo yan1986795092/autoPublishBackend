@@ -1,0 +1,18 @@
+groups:
+  - name: autopublish_alerts
+    interval: 30s
+    rules:
+      - alert: HighErrorRate
+        expr: (sum(rate(agent_run_total{status="failed"}[5m])) / sum(rate(agent_run_total[5m]))) > 0.05
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Agent error rate > 5% for 5 minutes"
+      - alert: ServiceDown
+        expr: absent(up{job="autopublish-api"}) == 1
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "AutoPublish API is down"
