@@ -18,10 +18,11 @@ Usage:
 
 from __future__ import annotations
 
-import logging
 from typing import Callable
 
-logger = logging.getLogger(__name__)
+import structlog
+
+logger = structlog.get_logger(__name__)
 
 
 class Migration:
@@ -69,18 +70,22 @@ class MigrationManager:
         for m in self._migrations:
             if m.name in applied:
                 continue
-            logger.info("Running migration: %s — %s", m.name, m.description)
+            logger.info("Running migration: %s — %s", m.name, m.description,
+                        _type="system", event_name="migration_run", message=f"Running migration: {m.name}", status="running")
             try:
                 m.fn(engine)
                 self._mark_applied(engine, m.name)
                 count += 1
-                logger.info("Migration %s applied successfully", m.name)
+                logger.info("Migration %s applied successfully", m.name,
+                            _type="system", event_name="migration_done", message=f"Migration {m.name} applied", status="ok")
             except Exception as e:
-                logger.error("Migration %s failed: %s", m.name, e)
+                logger.error("Migration %s failed: %s", m.name, e,
+                             _type="system", event_name="migration_error", message=f"Migration {m.name} failed: {e}", status="error")
                 raise
 
         if count == 0:
-            logger.info("No pending migrations")
+            logger.info("No pending migrations",
+                        _type="system", event_name="migration_skip", message="No pending migrations", status="ok")
 
         return count
 

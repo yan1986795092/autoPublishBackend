@@ -357,8 +357,13 @@ def get_content_calendar(
                             "platform_code": r.platform_code,
                             "status": r.status.value,
                         })
-            except (json.JSONDecodeError, AttributeError):
-                pass
+            except Exception as e:
+                logger.warning(
+                    "日历排期数据解析失败",
+                    error=str(e),
+                    _type="api",
+                    event_name="calendar_parse_error",
+                )
 
     return {"success": True, "data": {"calendar": calendar, "year": year, "month": month}}
 

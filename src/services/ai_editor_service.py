@@ -188,8 +188,13 @@ class AIEditorService:
             if json_match:
                 import json
                 return json.loads(json_match.group())
-        except (Exception):
-            pass
+        except Exception as e:
+            logger.warning(
+                "LLM 响应 JSON 解析失败，返回默认评分",
+                error=str(e),
+                _type="service",
+                event_name="json_parse_error",
+            )
 
         return {
             "overall": 60, "title_score": 50, "keyword_score": 50,
@@ -258,8 +263,13 @@ class AIEditorService:
             if json_match:
                 import json
                 return json.loads(json_match.group())
-        except (Exception):
-            pass
+        except Exception as e:
+            logger.warning(
+                "LLM 响应 JSON 解析失败，返回默认分析结果",
+                error=str(e),
+                _type="service",
+                event_name="json_parse_error",
+            )
 
         return {
             "overall": 65, "topic_heat": 60, "headline_appeal": 60,

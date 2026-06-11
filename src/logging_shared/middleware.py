@@ -20,7 +20,6 @@ from starlette.types import ASGIApp
 
 from .fields import TRACE_ID
 from .config import get_logger
-from .console import log_http_line
 from .unified_writer import UnifiedEsWriter
 
 TRACE_ID_HEADER = "X-Trace-Id"
@@ -75,7 +74,23 @@ class LoggingMiddleware(BaseHTTPMiddleware):
     def __init__(self, app: ASGIApp, service_name: str):
         super().__init__(app)
         self.service_name = service_name
-        self.logger = get_logger("http")
+        self._http_logger = None
+
+    @property
+    def logger(self):
+        if self._http_logger is None:
+            self._http_logger = get_logger("http")
+        return self._http_logger
+
+    @staticmethod
+    def _fmt_ms(ms: float) -> str:
+        if ms >= 1000:
+            return f"{ms / 1000:.1f}s"
+        if ms >= 1:
+            return f"{ms:.0f}ms"
+        if ms > 0:
+            return f"{ms:.0f}µs"
+        return "0ms"
 
     async def dispatch(self, request: Request, call_next: Callable) -> Response:
         trace_id = _get_or_create_trace_id(request)
@@ -89,6 +104,8 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             **{TRACE_ID: trace_id, "service": self.service_name}
         )
 
+        request.state.trace_id = trace_id
+
         try:
             response = await call_next(request)
             elapsed_ms = round((time.perf_counter_ns() - start_ns) / 1_000_000, 2)
@@ -96,8 +113,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             status_code = response.status_code
 
             # Single access-log line (replaces http_request_start + http_request_end)
-            log_http_line(
-                level="ERROR" if status_code >= 400 else "INFO",
+            self.logger.info(
+                f"{method} {path} {status_code} {self._fmt_ms(elapsed_ms)}",
+                _type="http",
                 method=method,
                 path=path,
                 status=status_code,
@@ -112,7 +130,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 status_code=status_code, elapsed_us=elapsed_us,
                 service_name=self.service_name,
             )
-            UnifiedEsWriter.get_instance().write("traces", span)
+            await UnifiedEsWriter.get_instance().write("traces", span)
 
             response.headers[TRACE_ID_HEADER] = trace_id
             return response
@@ -122,8 +140,9 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             elapsed_us = int((time.perf_counter_ns() - start_ns) / 1000)
             error_info = f"{type(exc).__name__}: {exc}"
 
-            log_http_line(
-                level="ERROR",
+            self.logger.error(
+                f"{method} {path} 500 {self._fmt_ms(elapsed_ms)}",
+                _type="http",
                 method=method,
                 path=path,
                 status=500,
@@ -138,6 +157,6 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 status_code=500, elapsed_us=elapsed_us,
                 service_name=self.service_name, error_info=error_info,
             )
-            UnifiedEsWriter.get_instance().write("traces", span)
+            await UnifiedEsWriter.get_instance().write("traces", span)
 
             raise

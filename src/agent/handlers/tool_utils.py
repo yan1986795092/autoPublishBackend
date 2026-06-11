@@ -5,6 +5,7 @@
 """
 
 from __future__ import annotations
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -50,9 +51,22 @@ async def call_llm(
         LLMResult: 包含 content / prompt_tokens / completion_tokens
     """
     if stream:
-        return await _stream_only(llm, messages, on_chunk)
+        start = time.perf_counter()
+        result = await _stream_only(llm, messages, on_chunk)
+        duration_ms = (time.perf_counter() - start) * 1000
+        model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
+        logger.info(
+            f"LLM {model_name}",
+            _type="llm",
+            model=model_name,
+            duration_ms=round(duration_ms, 2),
+            agent_type=agent_type,
+        )
+        return result
 
+    start = time.perf_counter()
     result = await llm.ainvoke(messages)
+    duration_ms = (time.perf_counter() - start) * 1000
     content = result.content or ""
 
     # 从 response_metadata 提取实际 token 用量
@@ -69,6 +83,18 @@ async def call_llm(
 
     if prompt_tokens == 0 and completion_tokens == 0:
         logger.debug("未能从 LLM 响应中提取 token 用量", agent_type=agent_type)
+
+    model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
+    logger.info(
+        f"LLM {model_name}",
+        _type="llm",
+        model=model_name,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        duration_ms=round(duration_ms, 2),
+        agent_type=agent_type,
+    )
 
     return LLMResult(
         content=content,

@@ -13,6 +13,14 @@ STATUS_CODE = "status_code"
 ERROR_TYPE = "error_type"
 ERROR_MESSAGE = "error_message"
 
+# 渲染类型（RichConsoleRenderer 分派依据）
+TYPE = "_type"
+TYPE_HTTP = "http"
+TYPE_AGENT = "agent"
+TYPE_LLM = "llm"
+TYPE_DB = "db"
+TYPE_SYSTEM = "system"
+
 # LLM 请求专用字段
 LLM_MODEL = "llm_model"
 LLM_PROVIDER = "llm_provider"

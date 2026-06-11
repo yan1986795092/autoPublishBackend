@@ -251,7 +251,7 @@ async def classify_and_decompose(state: AgentGraphState) -> dict:
 
     with tracer.start_as_current_span(
         "agent.classify",
-        kind=trace.SpanKind.INTERNAL,
+        kind="INTERNAL",
         attributes={
             "agent.node": "classify_and_decompose",
             "agent.complexity": complexity,
@@ -440,7 +440,7 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
 
     with tracer.start_as_current_span(
         "agent.schedule",
-        kind=trace.SpanKind.INTERNAL,
+        kind="INTERNAL",
         attributes={
             "agent.node": "schedule_and_execute",
             "schedule.total_tasks": total_tasks,
@@ -490,7 +490,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
 
     with tracer.start_as_current_span(
         "agent.batch_execute",
-        kind=trace.SpanKind.INTERNAL,
+        kind="INTERNAL",
         attributes={
             "agent.node": "execute_task_batch",
             "batch.size": len(ready_tasks),
@@ -506,7 +506,7 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
 
             with tracer.start_as_current_span(
                 "agent.task_run",
-                kind=trace.SpanKind.INTERNAL,
+                kind="INTERNAL",
                 attributes={
                     "agent.node": "agent_task_run",
                     "task.id": task_id,
@@ -540,14 +540,17 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
         failed = list(state.get("failed_task_ids", []))
         new_steps = []
 
-        for task_id, result in results_list:
-            if isinstance(result, Exception):
-                logger.error("Agent 任务抛出异常", task_id=task_id, exc_info=True)
+        for i, entry in enumerate(results_list):
+            if isinstance(entry, BaseException):
+                task = tasks_with_steps[i][0] if i < len(tasks_with_steps) else {"id": f"unknown_{i}"}
+                task_id = task.get("id", f"unknown_{i}")
+                logger.error("Agent 任务抛出异常", task_id=task_id, exc_info=True, error=str(entry))
                 failed.append(task_id)
                 task_results[task_id] = {
-                    "status": "failed", "error": str(result), "thinking_steps": [],
+                    "status": "failed", "error": str(entry), "thinking_steps": [],
                 }
                 continue
+            task_id, result = entry
             task_results[task_id] = result
             if result.get("status") in ("completed", "partial"):
                 completed.append(task_id)
@@ -728,7 +731,16 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
 
         except ToolExecutionError as e:
             elapsed = round(time.time() - start_time, 2)
-            logger.error("Agent MCP 工具执行失败", agent_type=agent_type, tool=e.tool_name, error=str(e))
+            logger.error(
+                "MCP 工具执行失败",
+                agent_type=agent_type,
+                tool_name=e.tool_name,
+                error=str(e),
+                _type="agent",
+                event_name="tool_execution_error",
+                failure_type="mcp_tool",
+                error_code=e.error_code,
+            )
             await _publish_streaming_event(state, "thinking_step", {
                 "step_number": task_step_number,
                 "agent": agent_type,
@@ -744,15 +756,26 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 "status": "failed",
                 "agent_type": agent_type,
                 "failure_type": "mcp_tool",
+                "error_code": e.error_code,
                 "tool_name": e.tool_name,
                 "error": str(e),
+                "error_details": e.details,
                 "time_elapsed": elapsed,
                 "thinking_steps": [{"agent": agent_type, "action": "tool_error", "tool": e.tool_name, "reasoning": e.message, "status": "failed"}],
             }
 
         except HandlerError as e:
             elapsed = round(time.time() - start_time, 2)
-            logger.error("Agent Handler 执行失败", agent_type=agent_type, handler=e.handler, error=str(e))
+            logger.error(
+                "Handler 执行失败",
+                agent_type=agent_type,
+                handler=e.handler,
+                error=str(e),
+                _type="agent",
+                event_name="handler_error",
+                failure_type="handler",
+                error_code=e.error_code,
+            )
             await _publish_streaming_event(state, "thinking_step", {
                 "step_number": task_step_number,
                 "agent": agent_type,
@@ -768,14 +791,27 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 "status": "failed",
                 "agent_type": agent_type,
                 "failure_type": "handler",
+                "error_code": e.error_code,
+                "handler": e.handler,
                 "error": str(e),
+                "error_details": e.details,
                 "time_elapsed": elapsed,
                 "thinking_steps": [{"agent": agent_type, "action": "handler_error", "reasoning": str(e), "status": "failed"}],
             }
 
         except Exception as e:
             elapsed = round(time.time() - start_time, 2)
-            logger.error("Agent 执行失败（未知异常）", agent_type=agent_type, error=str(e), exc_info=True)
+            exc_type = type(e).__name__
+            logger.error(
+                "Agent 执行失败（未知异常）",
+                agent_type=agent_type,
+                error=str(e),
+                exc_info=True,
+                _type="agent",
+                event_name="agent_error",
+                failure_type="unknown",
+                error_type=exc_type,
+            )
             await _publish_streaming_event(state, "thinking_step", {
                 "step_number": task_step_number,
                 "agent": agent_type,
@@ -791,6 +827,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 "status": "failed",
                 "agent_type": agent_type,
                 "failure_type": "unknown",
+                "error_type": exc_type,
                 "error": str(e),
                 "time_elapsed": elapsed,
                 "thinking_steps": [{"agent": agent_type, "action": "error", "reasoning": str(e), "status": "failed"}],
@@ -853,7 +890,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
 
     with tracer.start_as_current_span(
         "agent.merge",
-        kind=trace.SpanKind.INTERNAL,
+        kind="INTERNAL",
         attributes={
             "agent.node": "merge_and_finish",
             "merge.total_tasks": len(task_queue),

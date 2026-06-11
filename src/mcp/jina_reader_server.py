@@ -19,6 +19,10 @@ Jina Reader 特点：
 # The MCP SDK's `issubclass(param.annotation, Context)` inspection requires
 # eagerly-evaluated type annotations, not strings.
 import logging
+
+# 抑制 MCP SDK 内部 INFO 日志
+logging.getLogger("mcp").setLevel(logging.WARNING)
+
 from mcp.server.fastmcp import FastMCP
 
 logger = logging.getLogger(__name__)

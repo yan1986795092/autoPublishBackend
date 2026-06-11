@@ -9,15 +9,15 @@
   3. Bing Web Search — 需 BING_API_KEY
   4. SerpAPI — 需 SERPAPI_API_KEY
 """
-
-# Note: DO NOT use `from __future__ import annotations` here.
-# The MCP SDK's `issubclass(param.annotation, Context)` inspection requires
-# eagerly-evaluated type annotations, not strings.
 import asyncio
 import logging
 import os
 import re
 from typing import Any
+
+# 抑制 MCP SDK 内部 INFO 日志（如 "Processing request of type ListToolsRequest"），
+# 这些消息来自 mcp.server 子进程的 rich 日志输出，会混入主进程的终端。
+logging.getLogger("mcp").setLevel(logging.WARNING)
 
 from mcp.server.fastmcp import FastMCP
 

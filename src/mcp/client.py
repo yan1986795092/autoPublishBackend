@@ -16,16 +16,16 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 import os
 import sys
 import time
 from pathlib import Path
 from typing import Any, Optional
 
+import structlog
 from langchain_core.tools import BaseTool
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 _langchain_mcp_adapters_available = True
 try:
@@ -107,7 +107,8 @@ class MCPClient:
 
         enabled_configs = [c for c in self._configs if c.enabled]
         if not enabled_configs:
-            logger.info("No MCP servers configured, skipping start")
+            logger.info("No MCP servers configured, skipping start",
+                        _type="system", event_name="mcp_skip", message="No MCP servers configured", status="ok")
             return True
 
         try:
@@ -146,6 +147,10 @@ class MCPClient:
             logger.info(
                 "Starting MCP servers: %s",
                 ", ".join(f"{c.name}({c.category})" for c in enabled_configs),
+                _type="system",
+                event_name="mcp_starting",
+                message=f"Starting MCP servers: {', '.join(c.name for c in enabled_configs)}",
+                status="started",
             )
 
             self._client = MultiServerMCPClient(server_configs)
@@ -161,11 +166,16 @@ class MCPClient:
                 "MCP started: %d tools total — %s",
                 len(self._tools),
                 ", ".join(f"{t.name}" for t in self._agent_tools),
+                _type="system",
+                event_name="mcp_started",
+                message=f"MCP started: {len(self._tools)} tools",
+                status="ok",
             )
             return True
 
         except Exception as e:
-            logger.error("Failed to start MCP: %s", e, exc_info=True)
+            logger.error("Failed to start MCP: %s", e, exc_info=True,
+                         _type="system", event_name="mcp_error", message=f"MCP start failed: {e}", status="error")
             await self._cleanup()
             return False
 

@@ -6,6 +6,26 @@ from typing import Literal
 
 import structlog
 
+from .rich_console import RichConsoleRenderer
+
+
+class _DefaultColorFormatter(logging.Formatter):
+    """为纯文本日志添加 ANSI 白色前景，避免终端默认色（可能偏红）。
+
+    structlog 渲染的日志已自带 ANSI 颜色（以 ``\\033[`` 开头），
+    这类消息原样通行。纯文本消息（如 uvicorn 日志）用 ANSI 白色 ``\\033[37m`` 包裹。
+    在每条日志末尾输出 ``\\033[0m`` 重置，但立即追加 ``\\033[37m`` 预备下一行。
+    """
+
+    ANSI_WHITE = "\033[37m"
+    ANSI_RESET = "\033[0m"
+
+    def format(self, record: logging.LogRecord) -> str:
+        msg = super().format(record)
+        if msg.startswith("\033["):
+            return msg  # structlog 渲染，已有颜色
+        return f"{self.ANSI_WHITE}{msg}{self.ANSI_RESET}{self.ANSI_WHITE}"
+
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR"]
 
 _configured = False
@@ -29,9 +49,10 @@ def setup(
     for h in logging.getLogger().handlers[:]:
         logging.getLogger().removeHandler(h)
 
-    # 配置 root logger handler — 将所有 plain logging 输出格式化为与 structlog 一致
+    # 配置 root logger handler — 只输出 message，structlog 事件已自带格式化。
+    # 使用 DefaultColorFormatter 让未着色的纯文本日志（如 uvicorn）也显示为白色。
     _root_handler = logging.StreamHandler(sys.stderr)
-    _root_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+    _root_handler.setFormatter(_DefaultColorFormatter("%(message)s"))
     logging.getLogger().addHandler(_root_handler)
 
     processors = [
@@ -51,10 +72,7 @@ def setup(
         processors.append(structlog.processors.JSONRenderer())
     else:
         processors.append(
-            structlog.dev.ConsoleRenderer(
-                colors=True,
-                exception_formatter=structlog.dev.plain_traceback,
-            )
+            RichConsoleRenderer(colors=True)
         )
 
     structlog.configure(
@@ -86,7 +104,8 @@ def _add_service_context(logger, method_name, event_dict):
 
 
 def get_logger(name: str | None = None):
-    """获取 logger 实例。"""
+    """获取 logger 实例（延迟绑定，确保 setup() 之后才创建 BoundLogger）。"""
     if name:
-        return structlog.get_logger().bind(logger_name=name)
+        # 使用 initial_values 而不是 .bind()，避免在 setup() 前创建 BoundLogger
+        return structlog.get_logger(logger_name=name)
     return structlog.get_logger()

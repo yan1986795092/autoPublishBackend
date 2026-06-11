@@ -39,13 +39,16 @@ def create_orchestrator(
         except Exception:
             logger.warning("Failed to create LLM for %s", agent_type)
 
-    # 低成本 Agent → 自动路由（model="auto" → Gateway AutoRouter 选 cheapest）
+    # 低成本 Agent → 指定智谱模型（绕过 AutoRouter，Gateway 精确匹配到智谱 adapter）
     for agent_type in [
         "WritingAgent", "SEOAgent", "ReviewAgent",
         "DiagramAgent", "WebSearch",
     ]:
         try:
-            chat_models[agent_type] = router.get_chat_model(agent_type)
+            chat_models[agent_type] = router.get_chat_model_for_model(
+                model="glm-4-flash",
+                agent_type=agent_type,
+            )
         except Exception:
             pass
 

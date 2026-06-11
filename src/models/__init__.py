@@ -238,6 +238,7 @@ class AgentTask(Base):
     result_json = Column(Text)
     error_message = Column(Text)
     thinking_trace_json = Column(Text)
+    agent_events_json = Column(Text)
     created_at = Column(DateTime, default=func.now())
     completed_at = Column(DateTime)
 

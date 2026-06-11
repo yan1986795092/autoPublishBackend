@@ -4,10 +4,10 @@ from pydantic import BaseModel, ValidationError
 from typing import Optional, AsyncGenerator
 import asyncio
 import json
-import logging
+import structlog
 import uuid
 
-logger = logging.getLogger(__name__)
+logger = structlog.get_logger(__name__)
 
 # ===================== SSE 流式接口 =====================
 
@@ -49,12 +49,6 @@ class AgentAsyncSubmitRequest(BaseModel):
 class AgentAsyncStatusResponse(BaseModel):
     success: bool
     data: Optional[dict] = None
-
-
-class DecisionSubmitRequest(BaseModel):
-    decision_id: str
-    choice: str
-    text: Optional[str] = None
 
 
 def _create_orchestrator(**kwargs) -> Orchestrator:
@@ -301,7 +295,8 @@ async def repurpose_content(
                         )
                         platform_outputs[platform_code] = platform_task.output.get("content", output_content)
                     except Exception as e:
-                        logger.warning(f"平台适配失败 {platform_code}: {e}")
+                        logger.warning("平台适配失败", _type="system", event_name="platform_adapt_fail",
+                                      message=f"平台适配失败 {platform_code}: {e}", status="error")
                         platform_outputs[platform_code] = output_content
 
             sections.append({
@@ -419,40 +414,6 @@ async def cancel_agent_task(
     }
 
 
-# ===================== 用户决策接口 =====================
-
-
-@router.post("/agent/decision/{task_id}")
-async def submit_decision(
-    task_id: str,
-    request: DecisionSubmitRequest,
-    current_user: User = Depends(get_current_user),
-):
-    """提交用户决策，让等待中的 Agent 任务继续执行"""
-    task = task_queue.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="未找到任务")
-    if task.state.value != "awaiting_input":
-        raise HTTPException(status_code=400, detail="任务不在等待输入状态")
-
-    success = task_queue.submit_decision(
-        task_id=task_id,
-        decision_id=request.decision_id,
-        choice=request.choice,
-    )
-    if not success:
-        raise HTTPException(status_code=400, detail="决策被拒绝")
-
-    return {
-        "success": True,
-        "data": {
-            "task_id": task_id,
-            "state": "running",
-            "message": "决策已接受，任务已恢复",
-        },
-    }
-
-
 # ===================== SSE 流式接口 =====================
 
 
@@ -498,7 +459,8 @@ async def agent_stream(
                             "skill_user_template": skill_data.get("user_prompt_template", ""),
                         }
                     else:
-                        logger.warning(f"未找到 Skill: {request.skill_id}")
+                        logger.warning("未找到 Skill", _type="system", event_name="skill_not_found",
+                                      message=f"Skill not found: {request.skill_id}", status="error")
                 finally:
                     db.close()
 
@@ -674,21 +636,6 @@ async def agent_stream(
                             "event": "reasoning",
                             "data": json.dumps(event.data, ensure_ascii=False),
                         }
-                    elif et == "decision_required":
-                        task = task_queue.get_task(task_id_str)
-                        if task and task.pending_decision:
-                            pd = task.pending_decision
-                            yield {
-                                "event": "decision_required",
-                                "data": json.dumps({
-                                    "task_id": task_id_str,
-                                    "decision_id": pd.get("decision_id"),
-                                    "question": pd.get("question", ""),
-                                    "options": pd.get("options", []),
-                                    "context": pd.get("context", {}),
-                                }, ensure_ascii=False),
-                            }
-                        break
                     elif et == "result":
                         yield {
                             "event": "result",
@@ -716,6 +663,8 @@ async def agent_stream(
                     event_bus.unsubscribe(task_id_str, on_event)
 
         except Exception as e:
+            logger.exception("SSE stream error", _type="system", event_name="sse_error",
+                             message=f"SSE error: {e}", status="error")
             yield {
                 "event": "error",
                 "data": json.dumps({"message": str(e)}, ensure_ascii=False),
@@ -768,7 +717,8 @@ async def crawl_url(
             data={"crawl": crawl_result, "analysis": result.to_dict()},
         )
     except Exception as e:
-        logger.error(f"crawl_url 失败: {e}", exc_info=True)
+        logger.error("crawl_url 失败", exc_info=True,
+                     _type="system", event_name="crawl_error", message=f"crawl_url failed: {e}", status="error")
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -864,7 +814,7 @@ async def agent_metrics():
 
     active_tasks = sum(
         1 for t in task_queue._tasks.values()
-        if t.state.value in ("pending", "running", "awaiting_input")
+        if t.state.value in ("pending", "running")
     )
 
     return {
@@ -914,20 +864,6 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
                 "data": task_dict,
             })
 
-            # 如果需要用户决策，发送 decision_required 消息
-            if task.state.value == "awaiting_input" and task.pending_decision:
-                pd = task.pending_decision
-                await websocket.send_json({
-                    "type": "decision_required",
-                    "data": {
-                        "task_id": task_id,
-                        "decision_id": pd.get("decision_id"),
-                        "question": pd.get("question", "需要你的决定"),
-                        "options": pd.get("options", []),
-                        "context": pd.get("context", {}),
-                    },
-                })
-
             if task.state.value in ("completed", "failed", "cancelled"):
                 if task.state.value == "completed" and task.result:
                     await websocket.send_json({
@@ -940,14 +876,21 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
             await asyncio.sleep(1.0)
 
     except WebSocketDisconnect:
-        pass
+        pass  # 正常断开，无需处理
     except Exception as e:
+        logger.error(
+            "WebSocket 处理器异常",
+            exc_info=True,
+            task_id=task_id,
+            _type="websocket",
+            event_name="websocket_error",
+        )
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
-            pass
+            logger.warning("清理时发送 WebSocket 错误消息失败", exc_info=True)
     finally:
         try:
             await websocket.close()
         except Exception:
-            pass
+            logger.warning("清理时关闭 WebSocket 失败", exc_info=True)
