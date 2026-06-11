@@ -16,14 +16,12 @@ from src.core.migrations import migration_manager
 from src.config import get_settings
 from src.database import engine, setup_db_logging
 from src.models import Base
-from src.api import auth, contents, publish, platforms, templates, presets, ai_editor, personas
+from src.api import auth, contents, publish, platforms, presets, ai_editor, personas
 from src.api.skills import router as skills_router
 from src.api.chat import router as chat_router
 from src.agent.api import router as agent_router
 from src.agent.workflow.worker import worker
 from src.observability import setup_observability
-from src.observability.api import router as observability_router
-from src.observability.es_client import close_es
 from src.logging_shared.unified_writer import UnifiedEsWriter
 import src.migrations  # noqa: F401 — register migrations
 
@@ -73,9 +71,7 @@ async def lifespan(app: FastAPI):
         logger.warning("UnifiedEsWriter stop error: %s", exc,
                        _type="system", event_name="es_writer_stop", message=f"ES Writer stop error: {exc}", status="error")
 
-    await close_es()
     await worker.stop()
-    logger.info("Agent Worker stopped", _type="system", event_name="worker_stop", message="Agent Worker stopped", status="stopped")
 
 
 app = FastAPI(
@@ -256,13 +252,11 @@ app.include_router(contents.router, prefix="/api/v1")
 app.include_router(publish.router, prefix="/api/v1")
 app.include_router(platforms.router, prefix="/api/v1")
 app.include_router(presets.router, prefix="/api/v1")
-app.include_router(templates.router, prefix="/api/v1")
 app.include_router(ai_editor.router, prefix="/api/v1")
 app.include_router(personas.router, prefix="/api/v1")
 app.include_router(skills_router)
 app.include_router(chat_router)
 app.include_router(agent_router, prefix="/api/v1")
-app.include_router(observability_router)
 
 
 @app.get("/")
