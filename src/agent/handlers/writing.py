@@ -133,7 +133,7 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                 "agent": "WritingAgent", "action": "写作完成",
                 "reasoning": f"撰写{content_type}文章：{topic[:30]}...",
                 "output_summary": f"生成了约 {len(content)} 字内容",
-                "tokens_used": tokens, "status": "done",
+                "tokens_used": llm_result.total_tokens, "status": "done",
             }],
         }
     except Exception as e:

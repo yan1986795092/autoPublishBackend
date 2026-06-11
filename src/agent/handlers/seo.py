@@ -265,7 +265,7 @@ async def _handle_seo_rewrite(task_input: dict, llm: ChatOpenAI, mcp_tools: list
                 "action": "SEO改写完成",
                 "reasoning": f"平台={platform}，关键词：{', '.join(related[:3])}",
                 "output_summary": f"改写为 SEO 友好版本，约 {len(content)} 字",
-                "tokens_used": tokens,
+                "tokens_used": llm_result.total_tokens,
                 "status": "done",
             }],
         }
