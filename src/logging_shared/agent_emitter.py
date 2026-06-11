@@ -87,12 +87,12 @@ class AgentEventEmitter:
         return event_dict
 
     def _emit_console(self, event_dict: dict[str, Any]) -> None:
-        """输出到控制台 — 降噪版
+        """输出到控制台 — 降噪版 (Rich 结构化日志)
 
         规则:
-        - thought / tool_input / tool_output 永不打印
+        - thought / tool_input / tool_output 永不打印到控制台
         - 生产环境 (env=production): 只打印 WARNING/ERROR
-        - 开发环境: 紧凑单行摘要
+        - 开发环境: 通过 _type="agent" 路由到 RichConsoleRenderer 渲染
         """
         level = str(event_dict.get("level", "INFO")).upper()
         event_type = event_dict.get("event_type", "")
@@ -107,26 +107,21 @@ class AgentEventEmitter:
             self._logger.warning("agent %s: %s", event_type, msg)
             return
 
-        # 开发：紧凑摘要（不含 thought/tool 内容）
-        agent = event_dict.get("agent_name", "")
-        run_id = event_dict.get("run_id", "")
-        dur = event_dict.get("duration_ms")
-        tu = event_dict.get("token_usage")
-
-        parts = [event_type]
-        if agent:
-            parts.append(agent)
-        if run_id:
-            parts.append(f"run={run_id[:8]}")
-        if dur is not None:
-            parts.append(f"{dur:.0f}ms" if dur >= 1 else f"{dur*1000:.0f}µs")
-        if tu:
-            parts.append(f"tokens={tu.get('total_tokens', 0)}")
-            cost = tu.get("cost_usd", 0)
-            if cost:
-                parts.append(f"cost=${float(cost):.6f}")
-
-        self._logger.info("  ".join(parts))
+        # 开发：通过 structlog + _type="agent" 路由到 RichConsoleRenderer
+        self._logger.info(
+            event_type,
+            _type="agent",
+            event_type=event_type,
+            agent_name=event_dict.get("agent_name", ""),
+            run_id=event_dict.get("run_id", ""),
+            duration_ms=event_dict.get("duration_ms"),
+            token_usage=event_dict.get("token_usage"),
+            tool_name=event_dict.get("tool_name", ""),
+            llm_model=event_dict.get("llm_model", ""),
+            error_type=event_dict.get("error_type", ""),
+            error_message=event_dict.get("error_message", ""),
+            level=level,
+        )
 
 
 _emitter_singleton: AgentEventEmitter | None = None

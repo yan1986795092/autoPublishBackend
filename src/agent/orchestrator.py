@@ -232,7 +232,7 @@ class Orchestrator:
         from .platform_registry import detect_platform
         return detect_platform(user_request)
 
-    def _build_fallback_plan(self, user_request: str) -> "ExecutionPlan":
+    def _build_fallback_plan(self, user_request: str, *args, **kwargs) -> "ExecutionPlan":
         from .nodes import _build_fallback_plan as _bfp
         plan_dict = _bfp(user_request)
         tasks = []
@@ -256,6 +256,7 @@ class Orchestrator:
 
     _build_default_plan = _build_fallback_plan
     _build_platform_plan = _build_fallback_plan
+    _build_template_plan = _build_fallback_plan
 
     async def _decompose(self, user_request: str, context: dict) -> ExecutionPlan:
         from .nodes import _classify_complexity, _build_fallback_plan

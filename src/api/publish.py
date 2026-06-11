@@ -62,8 +62,14 @@ def publish_content(
                         "scheduled_at": request.schedule_time,
                     }
                 }
-        except ValueError:
-            logger.warning(f"Invalid schedule_time format: {request.schedule_time}, falling through to immediate publish")
+        except ValueError as e:
+            logger.warning(
+                "排程时间格式无效，降级为立即发布",
+                schedule_time=request.schedule_time,
+                error=str(e),
+                _type="api",
+                event_name="schedule_parse_error",
+            )
 
     # Mock 模式：模拟发布结果（90% 成功率）
     success = random.random() > 0.1
@@ -244,8 +250,14 @@ def batch_publish(
                     })
                 db.commit()
                 return {"success": True, "data": {"results": results}}
-        except ValueError:
-            pass
+        except ValueError as e:
+            logger.warning(
+                "批量发布中排程时间格式无效，降级为立即发布",
+                schedule_time=request.schedule_time,
+                error=str(e),
+                _type="api",
+                event_name="schedule_parse_error",
+            )
 
     for platform_code in request.platforms:
         record = PublishRecord(

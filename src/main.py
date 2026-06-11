@@ -1,16 +1,20 @@
-import logging
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, WebSocketDisconnect, HTTPException
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
 import asyncio
 
-from src.core.exceptions import GenerateError
+from src.core.exceptions import (
+    GenerateError, ServiceError, AgentError, HandlerError, ToolExecutionError,
+    ConfigurationError, ValidationError, AuthenticationError, AuthorizationError,
+    NotFoundError, ConflictError, RateLimitError, build_error_response,
+)
 from src.core.logging import setup_logging
 from src.core.migrations import migration_manager
 from src.config import get_settings
-from src.database import engine
+from src.database import engine, setup_db_logging
 from src.models import Base
 from src.api import auth, contents, publish, platforms, templates, presets, ai_editor, personas
 from src.api.skills import router as skills_router
@@ -40,12 +44,16 @@ async def lifespan(app: FastAPI):
         settings=settings,
     )
 
+    # 开发环境启用 DB 查询日志（默认关，可通过 ENABLE_DB_LOG=true 开启）
+    setup_db_logging(enabled=bool(getattr(settings, "log_level", "INFO") == "DEBUG"))
+
     # 启动 UnifiedEsWriter（管理 traces/events/logs 三个索引）
     try:
         writer = UnifiedEsWriter.get_instance()
         await writer.start()
     except Exception as exc:
-        logger.warning("UnifiedEsWriter start failed (non-fatal): %s", exc)
+        logger.warning("UnifiedEsWriter start failed (non-fatal): %s", exc,
+                       _type="system", event_name="es_writer_start", message=f"ES Writer start failed: {exc}", status="error")
 
     # Start DB + migrations + worker
     loop = asyncio.get_running_loop()
@@ -54,7 +62,7 @@ async def lifespan(app: FastAPI):
 
     # Worker handles lifecycle internally
     await worker.start()
-    logger.info("Agent Worker started")
+    logger.info("Agent Worker started", _type="system", event_name="worker_start", message="Agent Worker started", status="started")
     yield
 
     # 关闭 UnifiedEsWriter
@@ -62,11 +70,12 @@ async def lifespan(app: FastAPI):
         writer = UnifiedEsWriter.get_instance()
         await writer.stop()
     except Exception as exc:
-        logger.warning("UnifiedEsWriter stop error: %s", exc)
+        logger.warning("UnifiedEsWriter stop error: %s", exc,
+                       _type="system", event_name="es_writer_stop", message=f"ES Writer stop error: {exc}", status="error")
 
     await close_es()
     await worker.stop()
-    logger.info("Agent Worker stopped")
+    logger.info("Agent Worker stopped", _type="system", event_name="worker_stop", message="Agent Worker stopped", status="stopped")
 
 
 app = FastAPI(
@@ -89,38 +98,142 @@ ALLOWED_ORIGINS = [
 ]
 
 
-def _get_cors_origin(request: Request) -> str:
-    origin = request.headers.get("origin", "")
-    return origin if origin in ALLOWED_ORIGINS else ALLOWED_ORIGINS[0]
+# ─────────────────────────────────────────────────────────────────────────────
+# Exception handlers — registered in priority order (FastAPI matches first
+# registered, then more specific subclasses). Handlers must be registered
+# BEFORE middleware and routers so the decorators take effect correctly.
+# ─────────────────────────────────────────────────────────────────────────────
 
 
-@app.exception_handler(GenerateError)
-async def generate_error_handler(request: Request, exc: GenerateError) -> JSONResponse:
-    logger.error("GenerateError: %s", exc.message)
-    return JSONResponse(
-        status_code=exc.status_code,
-        content={"success": False, "error": {"message": exc.message, "type": "GenerateError"}},
-        headers={
-            "Access-Control-Allow-Origin": _get_cors_origin(request),
-            "Access-Control-Allow-Credentials": "true",
-        },
+# 1.  ValidationError — 422
+@app.exception_handler(ValidationError)
+async def validation_error_handler(request: Request, exc: ValidationError) -> JSONResponse:
+    logger.warning("参数校验失败", message=exc.message,
+                   _type="http", event_name="validation_error",
+                   path=request.url.path, details=exc.details, status=422)
+    resp = build_error_response(exc, request, 422, exc.error_code)
+    return JSONResponse(**resp)
+
+
+# 2.  RequestValidationError — 422 (FastAPI built-in, Pydantic)
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = exc.errors()
+    field_errors = {}
+    for err in errors:
+        loc = ".".join(str(l) for l in err["loc"])
+        field_errors[loc] = err["msg"]
+
+    details = {"fields": field_errors}
+    logger.warning("参数校验失败", field_errors=field_errors,
+                   _type="http", event_name="request_validation_error",
+                   path=request.url.path, status=422)
+    resp = build_error_response(exc, request, 422, "VALIDATION_ERROR", details)
+    return JSONResponse(**resp)
+
+
+# 3.  AuthenticationError — 401
+@app.exception_handler(AuthenticationError)
+async def authentication_error_handler(request: Request, exc: AuthenticationError) -> JSONResponse:
+    logger.warning("认证失败", message=exc.message,
+                   _type="http", event_name="authentication_error",
+                   path=request.url.path, status=401)
+    resp = build_error_response(exc, request, 401, exc.error_code)
+    resp["headers"]["WWW-Authenticate"] = "Bearer"
+    return JSONResponse(**resp)
+
+
+# 4.  AuthorizationError — 403
+@app.exception_handler(AuthorizationError)
+async def authorization_error_handler(request: Request, exc: AuthorizationError) -> JSONResponse:
+    logger.warning("权限不足", message=exc.message,
+                   _type="http", event_name="authorization_error",
+                   path=request.url.path, details=exc.details, status=403)
+    details = dict(exc.details)
+    if "required_permission" not in details:
+        details["required_permission"] = None
+    resp = build_error_response(exc, request, 403, exc.error_code, details)
+    return JSONResponse(**resp)
+
+
+# 5.  NotFoundError — 404
+@app.exception_handler(NotFoundError)
+async def not_found_error_handler(request: Request, exc: NotFoundError) -> JSONResponse:
+    logger.warning("资源不存在", message=exc.message,
+                   _type="http", event_name="not_found_error",
+                   path=request.url.path, status=404)
+    resp = build_error_response(exc, request, 404, exc.error_code)
+    return JSONResponse(**resp)
+
+
+# 6.  ConflictError — 409
+@app.exception_handler(ConflictError)
+async def conflict_error_handler(request: Request, exc: ConflictError) -> JSONResponse:
+    logger.warning("资源冲突", message=exc.message,
+                   _type="http", event_name="conflict_error",
+                   path=request.url.path, details=exc.details, status=409)
+    resp = build_error_response(exc, request, 409, exc.error_code)
+    return JSONResponse(**resp)
+
+
+# 7.  RateLimitError — 429
+@app.exception_handler(RateLimitError)
+async def rate_limit_error_handler(request: Request, exc: RateLimitError) -> JSONResponse:
+    logger.warning("请求过于频繁", message=exc.message,
+                   _type="http", event_name="rate_limit_error",
+                   path=request.url.path, status=429)
+    resp = build_error_response(exc, request, 429, exc.error_code)
+    return JSONResponse(**resp)
+
+
+# 8.  HTTPException — FastAPI native (any status code)
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
+    logger.warning("HTTP 异常", status_code=exc.status_code, detail=exc.detail,
+                   _type="http", event_name="http_exception",
+                   path=request.url.path, status=exc.status_code)
+    resp = build_error_response(
+        exc, request, exc.status_code, f"HTTP_{exc.status_code}",
+        details={"detail": exc.detail}
     )
+    return JSONResponse(**resp)
 
 
+# 9.  ServiceError — 5xx service-layer errors (GenerateError, AgentError, etc.)
+@app.exception_handler(ServiceError)
+async def service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
+    logger.error("服务层异常", message=exc.message, exc_type=type(exc).__name__,
+                 _type="service", event_name="service_error",
+                 path=request.url.path, status=exc.status_code,
+                 error_type=type(exc).__name__, exc_info=True)
+    resp = build_error_response(exc, request, exc.status_code, exc.error_code)
+    return JSONResponse(**resp)
+
+
+# 10.  WebSocketDisconnect — pass through silently (not an error)
+@app.exception_handler(WebSocketDisconnect)
+async def websocket_disconnect_handler(request: Request, exc: WebSocketDisconnect) -> JSONResponse:
+    pass  # FastAPI handles this by closing the WebSocket connection
+
+
+# 11.  Exception — final catch-all (500)
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
-    logger.error("Unhandled exception: %s", exc, exc_info=True)
-    return JSONResponse(
-        status_code=500,
-        content={
-            "success": False,
-            "error": {"message": str(exc), "type": type(exc).__name__}
-        },
-        headers={
-            "Access-Control-Allow-Origin": _get_cors_origin(request),
-            "Access-Control-Allow-Credentials": "true",
-        },
+    exc_type = type(exc).__name__
+    logger.error("未处理异常", exc=exc, exc_type=exc_type,
+                 _type="system", event_name="unhandled_error",
+                 path=request.url.path, status=500,
+                 error_type=exc_type, exc_info=True)
+
+    # Build response with sanitised message (do not leak internal details)
+    sanitised = exc.__class__.__name__
+    resp = build_error_response(
+        exc, request, 500, "INTERNAL_ERROR",
+        details={"type": sanitised}
     )
+    # Override message to hide internal stack traces
+    resp["content"]["error"]["message"] = "An internal error occurred. Please try again later."
+    return JSONResponse(**resp)
 
 
 # CORS 中间件（开发模式允许所有来源）
