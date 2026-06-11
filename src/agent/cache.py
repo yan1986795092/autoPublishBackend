@@ -8,6 +8,8 @@ import threading
 from collections import OrderedDict
 from typing import Optional
 
+from src.observability.metrics import cache_hits_total, cache_misses_total
+
 
 class LLMCache:
     """简单的 TTL 内存缓存，用于 LLM 响应去重
@@ -39,9 +41,11 @@ class LLMCache:
                 if time.time() < expires_at:
                     self._cache.move_to_end(key)
                     self._hits += 1
+                    cache_hits_total.labels(cache_name="llm_cache").inc()
                     return value
                 del self._cache[key]
             self._misses += 1
+            cache_misses_total.labels(cache_name="llm_cache").inc()
             return None
 
     def set(self, model: str, messages: list[dict], temperature: float, response: str) -> None:
@@ -125,9 +129,11 @@ class AgentCache:
                 if time.time() < expires_at:
                     self._cache.move_to_end(key)
                     self._hits += 1
+                    cache_hits_total.labels(cache_name="agent_cache").inc()
                     return result
                 del self._cache[key]
             self._misses += 1
+            cache_misses_total.labels(cache_name="agent_cache").inc()
             return None
 
     def set(self, agent_type: str, task_input: dict, result: dict, ttl: Optional[int] = None) -> None:

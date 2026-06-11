@@ -32,7 +32,7 @@ def _get_or_create_trace_id(request: Request) -> str:
     return uuid.uuid4().hex[:16]
 
 
-def _build_jaeger_span(
+def _build_trace_span(
     method: str,
     path: str,
     url: str,
@@ -43,7 +43,7 @@ def _build_jaeger_span(
     service_name: str,
     error_info: str = "",
 ) -> dict:
-    """Construct a Jaeger-format span dict."""
+    """Construct a trace span dict (Jaeger-compatible format) for UnifiedEsWriter."""
     span: dict = {
         "traceID": trace_id,
         "spanID": span_id,
@@ -69,7 +69,7 @@ def _build_jaeger_span(
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    """FastAPI 中间件: 单行 access-log + Jaeger span 写入 UnifiedEsWriter."""
+    """FastAPI 中间件: 单行 access-log + trace span 写入 UnifiedEsWriter."""
 
     def __init__(self, app: ASGIApp, service_name: str):
         super().__init__(app)
@@ -124,7 +124,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             )
 
             # Write Jaeger span via UnifiedEsWriter
-            span = _build_jaeger_span(
+            span = _build_trace_span(
                 method=method, path=path, url=str(request.url),
                 trace_id=trace_id, span_id=span_id,
                 status_code=status_code, elapsed_us=elapsed_us,
@@ -151,7 +151,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 error=error_info[:200],
             )
 
-            span = _build_jaeger_span(
+            span = _build_trace_span(
                 method=method, path=path, url=str(request.url),
                 trace_id=trace_id, span_id=span_id,
                 status_code=500, elapsed_us=elapsed_us,

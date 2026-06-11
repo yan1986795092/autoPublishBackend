@@ -340,7 +340,7 @@ response = await llm.ainvoke(messages)        # 经由 Gateway
 
 | 层级 | 数据 | 索引 | 用途 |
 |------|------|------|------|
-| **HTTP 链路追踪** | OTel Span | `traces-*` | Jaeger UI / Grafana 链路图 |
+| **HTTP 链路追踪** | Trace Span (Jaeger 兼容) | `traces-*` | ES / Grafana 链路图 |
 | **Agent 业务事件** | AgentEvent | `agent-events-*` | 推理过程、工具调用、成本计量 |
 | **应用日志** | structlog JSON | `logs-*` | 问题排查、审计 |
 
@@ -490,7 +490,7 @@ curl http://localhost:9010/health
 | **SubAgent ReAct** | 可选 Phase，基于 BaseAgent 叠加 run_with_react() | 不改变现有 Agent，渐进式升级 |
 | **任务队列** | asyncio.Queue (内存) | 零依赖，单进程零开销 |
 | **工具集成** | MCP (Model Context Protocol) | 标准化热插拔协议 |
-| **可观测性** | OTelMiddleware → OTel Collector → ES | 统一追踪，Jaeger UI 可视化 |
+| **可观测性** | AgentTracer → UnifiedEsWriter → ES + Prometheus → Grafana | 全链路追踪 + 指标监控 |
 | **日志架构** | shared-logging 统一配置 + ES 异步批量写入 | trace_id 跨服务串联，日志不阻塞请求 |
 | **可选 Phase** | 特性开关 (enable_*) | 按需启用，避免复杂度 |
 

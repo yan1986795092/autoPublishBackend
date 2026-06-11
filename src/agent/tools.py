@@ -5,10 +5,13 @@ MCP Client 通过 AgentTool.from_langchain() 将 LangChain BaseTool 适配为内
 """
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar
 
 from langchain_core.tools import BaseTool
+
+from src.observability.metrics import stats_collector
 
 
 @dataclass
@@ -56,10 +59,26 @@ class AgentTool:
         return self._tool.args_schema
 
     def invoke(self, input: Any, **kwargs) -> Any:
-        return self._tool.invoke(input, **kwargs)
+        """Invoke tool synchronously with metrics."""
+        start = time.perf_counter()
+        try:
+            result = self._tool.invoke(input, **kwargs)
+            stats_collector.record_tool_call(tool_name=self.name, status="success", duration_s=time.perf_counter() - start)
+            return result
+        except Exception:
+            stats_collector.record_tool_call(tool_name=self.name, status="error", duration_s=time.perf_counter() - start)
+            raise
 
     async def ainvoke(self, input: Any, **kwargs) -> Any:
-        return await self._tool.ainvoke(input, **kwargs)
+        """Invoke tool asynchronously with metrics."""
+        start = time.perf_counter()
+        try:
+            result = await self._tool.ainvoke(input, **kwargs)
+            stats_collector.record_tool_call(tool_name=self.name, status="success", duration_s=time.perf_counter() - start)
+            return result
+        except Exception:
+            stats_collector.record_tool_call(tool_name=self.name, status="error", duration_s=time.perf_counter() - start)
+            raise
 
     def run(self, *args, **kwargs) -> Any:
         return self._tool.run(*args, **kwargs)

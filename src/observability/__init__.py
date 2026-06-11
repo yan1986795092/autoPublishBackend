@@ -1,6 +1,6 @@
 """Observability module: lightweight setup.
 
-HTTP spans are written by LoggingMiddleware directly to ES traces-*
+HTTP trace spans are written by LoggingMiddleware directly to ES traces-*
 via UnifiedEsWriter. No OTel SDK is used.
 """
 

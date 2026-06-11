@@ -48,7 +48,7 @@ async def close_es() -> None:
 
 # ── Index patterns ────────────────────────────────────────────────────────────
 _TRACE_INDEX = "traces-{date}"
-_TRACE_INDEX_PATTERN = "traces-*,jaeger-*"
+_TRACE_INDEX_PATTERN = "traces-*"
 _AGENT_EVENTS_INDEX_PATTERN = "agent-events-*"
 
 # Trace field mappings from Jaeger ES schema
@@ -491,9 +491,9 @@ async def search_logs(
     }
 
     try:
-        # Search in both jaeger spans (which have log events) and a logs index
+        # Search in traces (which have log events) and a logs index
         resp = await es.search(
-            index="logs-*,jaeger-*",
+            index="logs-*,traces-*",
             query=query,
             sort=[{"@timestamp": "desc"}, {"startTimeMillis": "desc"}],
             from_=from_,

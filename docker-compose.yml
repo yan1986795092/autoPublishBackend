@@ -13,10 +13,9 @@ services:
       - SECRET_KEY=${SECRET_KEY:-your-super-secret-key-change-in-production}
       - DEBUG=true
       - OPENAI_API_KEY=${OPENAI_API_KEY:-}
-      # Observability — ES/Jaeger/Prometheus 由 infra compose 提供
+      # Observability — ES/Prometheus 由 infra compose 提供
       - OTEL_SERVICE_NAME=autopublish-api
       - ELASTICSEARCH_URL=http://elasticsearch:9200
-      - JAEGER_HOST=http://jaeger:16686
       - PROMETHEUS_HOST=http://prometheus:9090
     volumes:
       - .:/app

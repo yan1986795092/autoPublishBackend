@@ -2,6 +2,7 @@
 
 保留基础 LLM 调用 + 流式支持。
 从 LLM 响应中提取实际 token 用量（不再用 estimate_tokens 估算）。
+自动上报调用指标到 StatsCollector + Prometheus。
 """
 
 from __future__ import annotations
@@ -13,6 +14,7 @@ from langchain_core.messages import BaseMessage
 from langchain_openai import ChatOpenAI
 
 from src.logging_shared.config import get_logger
+from src.observability.metrics import stats_collector
 
 logger = get_logger("agent.tool_utils")
 
@@ -65,7 +67,18 @@ async def call_llm(
         return result
 
     start = time.perf_counter()
-    result = await llm.ainvoke(messages)
+    try:
+        result = await llm.ainvoke(messages)
+    except Exception as exc:
+        duration_ms = (time.perf_counter() - start) * 1000
+        model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
+        provider = getattr(llm, "model_kwargs", {}).get("provider", "") or "unknown"
+        logger.warning(f"LLM {model_name} error: {exc}", _type="llm", model=model_name, duration_ms=round(duration_ms, 2))
+        stats_collector.record_llm_call(
+            model=model_name, provider=provider, status="error",
+            prompt_tokens=0, completion_tokens=0, duration_s=duration_ms / 1000,
+        )
+        raise
     duration_ms = (time.perf_counter() - start) * 1000
     content = result.content or ""
 
@@ -85,6 +98,7 @@ async def call_llm(
         logger.debug("未能从 LLM 响应中提取 token 用量", agent_type=agent_type)
 
     model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
+    provider = getattr(llm, "model_kwargs", {}).get("provider", "") or "unknown"
     logger.info(
         f"LLM {model_name}",
         _type="llm",
@@ -94,6 +108,13 @@ async def call_llm(
         total_tokens=prompt_tokens + completion_tokens,
         duration_ms=round(duration_ms, 2),
         agent_type=agent_type,
+    )
+
+    # Report to StatsCollector + Prometheus
+    stats_collector.record_llm_call(
+        model=model_name, provider=provider, status="success",
+        prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
+        duration_s=duration_ms / 1000,
     )
 
     return LLMResult(
