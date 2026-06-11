@@ -33,6 +33,7 @@ class AgentRunRequest(BaseModel):
     prompt: str
     context: Optional[dict] = None
     skill_id: Optional[str] = None  # 应用指定的 Skill ID
+    platform: Optional[str] = None  # 目标平台代码，如 xiaohongshu
 
 
 class AgentRunResponse(BaseModel):
@@ -44,6 +45,7 @@ class AgentRunResponse(BaseModel):
 class AgentAsyncSubmitRequest(BaseModel):
     prompt: str
     skill_id: Optional[str] = None
+    platform: Optional[str] = None  # 目标平台代码
 
 
 class AgentAsyncStatusResponse(BaseModel):
@@ -101,6 +103,17 @@ async def run_agent(
         else:
             prompt_to_use = request.prompt
 
+        # 平台注入
+        if request.platform:
+            context["platform"] = request.platform
+            from .platform_profile import get_profile
+            profile = get_profile(request.platform)
+            if profile:
+                context["platform_name"] = profile.get("name", request.platform)
+                context["platform_system_prompt"] = profile.get("system_prompt", "")
+                context["platform_writing_rules"] = profile.get("writing_rules", {})
+                context["platform_quality_check"] = profile.get("quality_check", "")
+
         orchestrator = _create_orchestrator()
         result = await orchestrator.run(
             user_request=prompt_to_use,
@@ -156,6 +169,16 @@ async def preview_plan(
                 db.close()
         else:
             prompt_to_use = request.prompt
+
+        # 平台注入
+        if request.platform:
+            context["platform"] = request.platform
+            from .platform_profile import get_profile
+            profile = get_profile(request.platform)
+            if profile:
+                context["platform_name"] = profile.get("name", request.platform)
+                context["platform_system_prompt"] = profile.get("system_prompt", "")
+                context["platform_writing_rules"] = profile.get("writing_rules", {})
 
         orchestrator = _create_orchestrator()
         plan = await orchestrator._decompose(
@@ -421,6 +444,7 @@ class AgentStreamRequest(BaseModel):
     prompt: str
     context: Optional[dict] = None
     skill_id: Optional[str] = None  # 应用指定的 Skill ID
+    platform: Optional[str] = None  # 目标平台代码，如 xiaohongshu
 
 
 @router.post("/agent/stream")
@@ -472,8 +496,25 @@ async def agent_stream(
                 template = template.replace("{content}", user_prompt)
                 user_prompt = template
 
-            # 1. 生成执行计划（支持 Skill preset_plan + 平台感知覆盖）
-            orchestrator = _create_orchestrator()
+            # 平台注入
+            platform_code = None
+            if request.platform:
+                # 前端显式选择了平台
+                platform_code = request.platform
+            else:
+                # 从用户输入文本中检测
+                platform_code = orchestrator._detect_platform(user_prompt)
+            if platform_code:
+                skill_context["platform"] = platform_code
+                # 从 platform_profile 加载平台名称
+                from .platform_profile import get_profile
+                profile = get_profile(platform_code)
+                if profile:
+                    skill_context["platform_name"] = profile.get("name", platform_code)
+                    skill_context["platform_system_prompt"] = profile.get("system_prompt", "")
+                    skill_context["platform_writing_rules"] = profile.get("writing_rules", {})
+                    skill_context["platform_agent_pipeline"] = profile.get("agent_pipeline", {})
+                    skill_context["platform_quality_check"] = profile.get("quality_check", "")
 
             # 优先使用 skill preset_plan
             if skill_context.get("skill_preset_plan"):
@@ -482,13 +523,10 @@ async def agent_stream(
                     user_request=user_prompt,
                     complexity=preset.get("complexity", "medium"),
                 )
+            elif platform_code:
+                plan = orchestrator._build_platform_plan(user_prompt, platform_code)
             else:
-                # 平台感知：检测平台类型，使用平台注册表
-                platform_code = orchestrator._detect_platform(user_prompt)
-                if platform_code:
-                    plan = orchestrator._build_platform_plan(user_prompt, platform_code)
-                else:
-                    plan = orchestrator._build_default_plan(user_prompt)
+                plan = orchestrator._build_default_plan(user_prompt)
             yield {
                 "event": "plan",
                 "data": json.dumps({

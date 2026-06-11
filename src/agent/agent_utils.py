@@ -61,22 +61,27 @@ Available agents and their capabilities:
 - CodeAgent: Generates code examples, tutorials, and technical documentation
 - TranslationAgent: Translates content between languages
 
-Platform-specific guidance (use the content_type matching the platform code from DB):
-- Xiaohongshu (xiaohongshu): content_type="xhs_post", conversational tone, emojis, short paragraphs, authentic voice, CTA at end
-- WeChat (wechat): content_type="wechat_article", deeper analysis, warmer tone, structured with subheadings, CTA at end
-- Zhihu (zhihu): content_type="zhihu_article", data-driven, logical structure, expertise showcase
-- Fiction (fiction): content_type="fiction", narrative voice, vivid characters, engaging plot
-- Storyboard (storyboard): content_type="storyboard", cinematic shots, clear scene descriptions
-- Script (script): content_type="script", natural dialogue, stage directions
+Platform-specific guidance (use the platform code matching the frontend PlatformSelector):
+- Xiaohongshu (xiaohongshu): content_type="xiaohongshu", conversational tone, emojis, short paragraphs, authentic voice, CTA at end
+- WeChat Official Account (wechat): content_type="wechat", deeper analysis, warmer tone, structured with subheadings, CTA at end
+- Weibo (weibo): content_type="weibo", punchy opinions, 140-500 chars, hashtags, shareable
+- Douyin (douyin): content_type="douyin", video script format, 3s hook, spoken language
+- Bilibili (bilibili): content_type="bilibili", medium-long video script, UP主 style, danmaku interaction
 - Copywriting (copywriting): content_type="copywriting", punchy headlines, clear value prop, strong CTA
-- Newsletter (newsletter): content_type="newsletter", friendly greeting, valuable insights, CTA
-- Technical Doc (technical_doc): content_type="technical_doc", clear structure, code examples, actionable
+- Brand Story (brand-story): content_type="brand-story", narrative voice, emotional resonance, brand identity
+- Ad Copy (ad-copy): content_type="ad-copy", conversion-driven, urgent, targeted
+- Fiction (fiction): content_type="fiction", narrative voice, vivid characters, engaging plot
+- Script (script): content_type="script", natural dialogue, stage directions
+- Technical Doc (tech-doc): content_type="tech-doc", clear structure, code examples, actionable
 - Tutorial (tutorial): content_type="tutorial", step-by-step, beginner-friendly, common pitfalls noted
+- SEO Article (seo): content_type="seo", keyword-optimized, search intent, featured snippets
+- Email Marketing (email): content_type="email", personalized, valuable, clear CTA, mobile-friendly
 
 SEO mode by platform:
-- Xiaohongshu/copywriting/newsletter: set SEOAgent rewrite=True (rewrite content)
-- WeChat/Zhihu/technical_doc/tutorial: set SEOAgent rewrite=False (analyze only)
-- Fiction/storyboard/script: skip SEOAgent entirely
+- Xiaohongshu/copywriting/ad-copy/seo/tutorial/tech-doc: set SEOAgent rewrite=True (rewrite content)
+- WeChat/Weibo/brand-story: set SEOAgent rewrite=False (analyze only)
+- Fiction/script/bilibili/douyin: skip SEOAgent entirely
+- Email: SEOAgent analyze title (rewrite=False)
 
 Rules:
 1. Analyze the actual user request and decide which agents to use. There is no fixed template — the right plan depends entirely on what the user asked for.

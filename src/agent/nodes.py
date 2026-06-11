@@ -74,21 +74,21 @@ def _classify_complexity(user_request: str) -> str:
     return "simple"
 
 
-def _build_fallback_plan(user_request: str) -> dict:
+def _build_fallback_plan(user_request: str, platform_code: str | None = None) -> dict:
     """极简兜底：只用 WritingAgent + ReviewAgent"""
     goal = user_request[:200]
-    detected = detect_platform(user_request)
+    detected = platform_code or detect_platform(user_request)
     p = PLATFORMS.get(detected) if detected else None
     content_type = p.content_type if p else "blog"
 
     task0 = {
         "id": str(uuid.uuid4()), "agent_type": "WritingAgent",
-        "input": {"topic": user_request, "content_type": content_type},
+        "input": {"topic": user_request, "content_type": content_type, "platform": detected or ""},
         "dependencies": [], "can_parallel_with": [], "retry_on_low_quality": True, "priority": "high",
     }
     task1 = {
         "id": str(uuid.uuid4()), "agent_type": "ReviewAgent",
-        "input": {"topic": user_request, "content_type": content_type},
+        "input": {"topic": user_request, "content_type": content_type, "platform": detected or ""},
         "dependencies": [0], "can_parallel_with": [], "retry_on_low_quality": False, "priority": "medium",
     }
     platform_hint = f"（{p.name}）" if p else ""
@@ -631,6 +631,26 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             if skill_system_prompt:
                 t_input["_skill_system_prompt"] = skill_system_prompt
                 t_input["_skill_name"] = state.get("skill_name", "")
+
+            # 平台上下文注入（来自前台 PlatformSelector 选择或文本检测）
+            context = state.get("context", {})
+            platform_code = context.get("platform", "")
+            if platform_code:
+                t_input["platform"] = platform_code
+                if context.get("platform_system_prompt"):
+                    t_input["_platform_system_prompt"] = context["platform_system_prompt"]
+                if context.get("platform_writing_rules"):
+                    t_input["_platform_writing_rules"] = context["platform_writing_rules"]
+                if context.get("platform_quality_check"):
+                    t_input["_platform_quality_check"] = context["platform_quality_check"]
+                if context.get("platform_agent_pipeline"):
+                    t_input["_platform_agent_pipeline"] = context["platform_agent_pipeline"]
+                # content_type 回退映射
+                if "content_type" not in t_input and context.get("platform"):
+                    from .platform_profile import get_profile
+                    profile = get_profile(platform_code)
+                    if profile:
+                        t_input["content_type"] = platform_code
 
             # MCP 工具
             mcp_tools = state.get("_mcp_tools", [])

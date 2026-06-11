@@ -1,6 +1,6 @@
 """ReviewAgent — 内容质量审核、违禁词检查、事实核查
 
-使用 PromptEngine 构建审核 prompt，支持记忆上下文注入。
+使用 PromptEngine 构建审核 prompt，支持记忆上下文注入和平台特定质量检查。
 """
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -10,6 +10,7 @@ from .factcheck import factcheck_report
 from src.prompts import PromptBuilder
 from src.core.exceptions import HandlerError
 from src.logging_shared.config import get_logger
+from ..platform_profile import get_profile
 
 logger = get_logger("agent.review")
 
@@ -25,6 +26,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                     break
 
         content_type = task_input.get("content_type", "general")
+        platform = task_input.get("platform", "")
         banned_found = check_banned_words(content) if content else []
         known_facts = task_input.get("known_facts")
 
@@ -34,6 +36,14 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                 "output": {"passed": False, "banned_words": [], "factcheck": None, "suggestions": ["无内容可审核"]},
                 "tokens_used": 0, "thinking_steps": [],
             }
+
+        # ── 加载平台质量检查标准 ──
+        platform_quality = task_input.get("_platform_quality_check", "")
+        profile = get_profile(platform) if platform and not platform_quality else None
+        if not platform_quality and profile:
+            platform_quality = profile.get("quality_check", "")
+        if platform_quality:
+            content_type = f"{content_type}（{platform}）"
 
         # 事实核查
         fc_report = factcheck_report(content, known_facts) if content else None
@@ -55,10 +65,15 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         if skill_system_prompt:
             builder.context(f"\n\n=== 创作指导 (Skill: {task_input.get('_skill_name', 'Custom')}) ===\n{skill_system_prompt}\n===")
 
+        # 注入平台质量检查标准
+        quality_context = ""
+        if platform_quality:
+            quality_context = f"\n\n**平台质量检查标准：**\n{platform_quality}"
+
         builder.instructions("review.task", {
             "content": content[:3000],
             "content_type": content_type,
-            "memory_section": memory_section,
+            "memory_section": memory_section + quality_context,
         })
 
         # 注入工具描述
@@ -93,6 +108,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                 "factcheck": fc_report,
                 "suggestions": suggestions[:5],
                 "content": quality_text,
+                "platform": platform,
             },
             "tokens_used": llm_result.total_tokens,
             "prompt_tokens": llm_result.prompt_tokens,
