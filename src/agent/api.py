@@ -489,24 +489,17 @@ async def agent_stream(
                     db.close()
 
             # 应用 Skill 的 user_prompt_template 转换
-            user_prompt = request.prompt
+            user_prompt, platform_code = request.prompt, request.platform
             if skill_context.get("skill_user_template"):
                 template = skill_context["skill_user_template"]
                 template = template.replace("{topic}", user_prompt.split("\n")[0])
                 template = template.replace("{content}", user_prompt)
                 user_prompt = template
 
-            # 创建 Orchestrator 实例
-            orchestrator = _create_orchestrator()
-
-            # 平台注入
-            platform_code = None
-            if request.platform:
-                # 前端显式选择了平台
-                platform_code = request.platform
-            else:
-                # 从用户输入文本中检测
-                platform_code = orchestrator._detect_platform(user_prompt)
+            # 平台检测（轻量：字符串匹配，无需 Orchestrator / LLM）
+            if not platform_code:
+                from .platform_registry import detect_platform
+                platform_code = detect_platform(user_prompt)
             if platform_code:
                 skill_context["platform"] = platform_code
                 # 从 platform_profile 加载平台名称
@@ -519,17 +512,30 @@ async def agent_stream(
                     skill_context["platform_agent_pipeline"] = profile.get("agent_pipeline", {})
                     skill_context["platform_quality_check"] = profile.get("quality_check", "")
 
-            # 优先使用 skill preset_plan
-            if skill_context.get("skill_preset_plan"):
-                preset = skill_context["skill_preset_plan"]
-                plan = orchestrator._build_template_plan(
-                    user_request=user_prompt,
-                    complexity=preset.get("complexity", "medium"),
+            # 构建计划（轻量：模板匹配 + 字符串拼接，无需 Orchestrator / LLM）
+            from .nodes import _build_fallback_plan as _build_plan_dict
+            from .schemas import ExecutionPlan, AgentTask
+
+            plan_dict = _build_plan_dict(user_prompt, platform_code)
+            tasks = [
+                AgentTask(
+                    id=t["id"],
+                    agent_type=t["agent_type"],
+                    input=t["input"],
+                    dependencies=t.get("dependencies", []),
+                    can_parallel_with=t.get("can_parallel_with", []),
+                    retry_on_low_quality=t.get("retry_on_low_quality", False),
+                    priority=t.get("priority", "medium"),
                 )
-            elif platform_code:
-                plan = orchestrator._build_platform_plan(user_prompt, platform_code)
-            else:
-                plan = orchestrator._build_default_plan(user_prompt)
+                for t in plan_dict.get("tasks", [])
+            ]
+            plan = ExecutionPlan(
+                goal=plan_dict.get("goal", user_prompt[:200]),
+                tasks=tasks,
+                reasoning=plan_dict.get("reasoning", ""),
+                estimated_steps=len(tasks),
+                plan_method="template",
+            )
             yield {
                 "event": "plan",
                 "data": json.dumps({
