@@ -496,6 +496,9 @@ async def agent_stream(
                 template = template.replace("{content}", user_prompt)
                 user_prompt = template
 
+            # 创建 Orchestrator 实例
+            orchestrator = _create_orchestrator()
+
             # 平台注入
             platform_code = None
             if request.platform:

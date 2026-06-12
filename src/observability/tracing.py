@@ -33,11 +33,11 @@ def setup_observability(
     Returns (None, None) — no OTel tracer; use AgentTracer for agent spans.
     """
     if settings is not None:
-        from src.core.logging import setup_logging
+        from src.logging_shared.config import setup as setup_logging
         setup_logging(settings)
     else:
         from src.config import Settings
-        from src.core.logging import setup_logging
+        from src.logging_shared.config import setup as setup_logging
         setup_logging(Settings(log_level="DEBUG", log_json_format=False))
 
     # UnifiedEsWriter is started in main.py lifespan — just ensure it's initialized
@@ -53,11 +53,11 @@ def setup_observability(
 def setup_local_dev(settings=None) -> tuple[None, None]:
     """Local dev mode: same as setup_observability, no OTel."""
     if settings is not None:
-        from src.core.logging import setup_logging
+        from src.logging_shared.config import setup as setup_logging
         setup_logging(settings)
     else:
         from src.config import Settings
-        from src.core.logging import setup_logging
+        from src.logging_shared.config import setup as setup_logging
         setup_logging(Settings(log_level="DEBUG", log_json_format=False))
 
     UnifiedEsWriter.get_instance()

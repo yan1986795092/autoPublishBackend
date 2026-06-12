@@ -17,11 +17,11 @@ logger = get_logger("service.content")
 SYSTEM_TEMPLATES = {
     "xiaohongshu": {
         "system": "你是一位专业的小红书内容创作者，擅长撰写知识干货类笔记。你的风格是：\n1. 标题吸引眼球，多用 emoji\n2. 内容实用有料，干货满满\n3. 排版清晰，分段适中\n4. 结尾有行动号召（引导收藏、评论）",
-        "user": """请帮我撰写一篇关于【{{topic}}】的小红书笔记。
+        "user": """请帮我撰写一篇关于【{topic}】的小红书笔记。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 - 目标平台：小红书
 
 ## 输出格式
@@ -39,11 +39,11 @@ SYSTEM_TEMPLATES = {
     },
     "wechat": {
         "system": "你是一位资深的微信公众号内容创作者，擅长撰写深度、有见地的长文。你的风格是：\n1. 逻辑严密，论证充分\n2. 引用数据或案例增加说服力\n3. 语言正式但不晦涩\n4. 结构清晰，有小标题",
-        "user": """请帮我撰写一篇关于【{{topic}}】的微信公众号文章。
+        "user": """请帮我撰写一篇关于【{topic}】的微信公众号文章。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 - 目标平台：微信公众号
 
 ## 输出格式
@@ -55,11 +55,11 @@ SYSTEM_TEMPLATES = {
     },
     "zhihu": {
         "system": "你是一位知乎上的专业内容创作者，擅长撰写有深度、有见地的回答和文章。你的风格是：\n1. 专业但不装，展示真实经验\n2. 善用数据和案例支撑观点\n3. 逻辑清晰，层次分明\n4. 结尾有独到见解",
-        "user": """请帮我撰写一篇关于【{{topic}}】的知乎回答/文章。
+        "user": """请帮我撰写一篇关于【{topic}】的知乎回答/文章。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 - 目标平台：知乎
 
 ## 输出格式
@@ -67,11 +67,11 @@ SYSTEM_TEMPLATES = {
     },
     "fiction": {
         "system": "你是一位优秀的小说创作者，擅长各种类型小说的创作。你的风格是：\n1. 人物形象鲜明，对话自然生动\n2. 情节跌宕起伏，节奏把控得当\n3. 环境描写细腻，氛围营造到位\n4. 有独特的叙事视角和文学质感",
-        "user": """请创作一篇关于【{{topic}}】的小说。
+        "user": """请创作一篇关于【{topic}】的小说。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 - 类型：小说创作
 
 ## 输出格式
@@ -92,11 +92,11 @@ SYSTEM_TEMPLATES = {
     },
     "storyboard": {
         "system": "你是一位专业的影视分镜师，擅长将文字剧本转化为可视化分镜脚本。你的风格是：\n1. 镜头语言专业，景别标注清晰（远景/中景/近景/特写）\n2. 画面描述具体，包含构图、色彩、光线\n3. 对白与画面配合精准\n4. 时长估算合理，节奏把控到位",
-        "user": """请根据【{{topic}}】创作一份详细的分镜脚本。
+        "user": """请根据【{topic}】创作一份详细的分镜脚本。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估总时长：{{length_words}} 字左右的分镜描述
+- 风格：{style}
+- 预估总时长：{length_words} 字左右的分镜描述
 - 类型：分镜脚本
 
 ## 输出格式
@@ -117,11 +117,11 @@ SYSTEM_TEMPLATES = {
     },
     "script": {
         "system": "你是一位专业的剧作家/编剧，擅长各种类型剧本创作。你的风格是：\n1. 场景设置清晰，时间地点明确\n2. 对白自然有力，展现人物性格\n3. 动作描述简洁明了\n4. 遵循标准剧本格式",
-        "user": """请创作一部关于【{{topic}}】的剧本。
+        "user": """请创作一部关于【{topic}】的剧本。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估长度：{{length_words}} 字
+- 风格：{style}
+- 预估长度：{length_words} 字
 - 类型：剧本创作
 
 ## 输出格式
@@ -151,11 +151,11 @@ SYSTEM_TEMPLATES = {
     },
     "copywriting": {
         "system": "你是一位资深的营销文案写手，擅长撰写高转化率的营销内容。你的风格是：\n1. 直击痛点，激发需求\n2. 价值主张清晰，卖点突出\n3. 行动号召有力\n4. 语言简练有力，避免废话",
-        "user": """请撰写一份关于【{{topic}}】的营销文案。
+        "user": """请撰写一份关于【{topic}】的营销文案。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 - 类型：营销文案
 
 ## 输出格式
@@ -175,11 +175,11 @@ SYSTEM_TEMPLATES = {
     },
     "newsletter": {
         "system": "你是一位优秀的邮件通讯(Newsletter)写手，擅长撰写高打开率和点击率的邮件内容。你的风格是：\n1. 开头抓人，让读者想继续看\n2. 内容有价值，提供独特见解\n3. 语气亲切，像朋友间的交流\n4. 结尾有明确的行动指引",
-        "user": """请撰写一份关于【{{topic}}】的邮件通讯(Newsletter)。
+        "user": """请撰写一份关于【{topic}】的邮件通讯(Newsletter)。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 - 类型：邮件通讯
 
 ## 输出格式
@@ -202,11 +202,11 @@ SYSTEM_TEMPLATES = {
     },
     "technical_doc": {
         "system": "你是一位专业的技术文档写手，擅长撰写清晰、准确、易读的技术文档。你的风格是：\n1. 结构层次分明，目录清晰\n2. 语言准确严谨，术语规范\n3. 示例代码/配置完整可用\n4. 注重可操作性和实用性",
-        "user": """请撰写一份关于【{{topic}}】的技术文档。
+        "user": """请撰写一份关于【{topic}】的技术文档。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 - 类型：技术文档
 
 ## 输出格式
@@ -234,11 +234,11 @@ SYSTEM_TEMPLATES = {
     },
     "tutorial": {
         "system": "你是一位经验丰富的教程作者，擅长将复杂知识转化为易于理解和跟随的教程。你的风格是：\n1. 循序渐进，由浅入深\n2. 步骤清晰，每个步骤有明确目标\n3. 配合示例，学练结合\n4. 提示常见错误和注意事项",
-        "user": """请撰写一份关于【{{topic}}】的教程指南。
+        "user": """请撰写一份关于【{topic}】的教程指南。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 - 类型：教程指南
 
 ## 输出格式
@@ -266,11 +266,11 @@ SYSTEM_TEMPLATES = {
 # 通用回退模板（用于未匹配的平台代码）
 DEFAULT_SYSTEM_TEMPLATE = {
     "system": "你是一位专业的内容创作者，擅长根据主题创作高质量内容。请根据用户的要求输出格式规范、内容充实的文章。",
-    "user": """请撰写一篇关于【{{topic}}】的内容。
+    "user": """请撰写一篇关于【{topic}】的内容。
 
 ## 内容要求
-- 风格：{{style}}
-- 预估字数：{{length_words}} 字
+- 风格：{style}
+- 预估字数：{length_words} 字
 
 ## 输出格式
 请用 Markdown 格式输出，包含标题和正文内容。内容需结构清晰、逻辑连贯、言之有物。"""
@@ -559,6 +559,14 @@ BANNED_WORDS: dict[str, list[str]] = {
 }
 
 
+def _render_template(template_text: str, variables: dict) -> str:
+    """渲染模板，兼容 {{var}} 和 {var} 两种语法"""
+    import re
+    converted = re.sub(r'\{\{(\w+)\}\}', r'{\1}', template_text)
+    from src.prompts import prompt_engine
+    return prompt_engine.render_text(converted, variables)
+
+
 class ContentService:
     """内容服务"""
 
@@ -632,7 +640,6 @@ class ContentService:
 
     async def generate_content(self, user_id: str, request: GenerateRequest) -> dict:
         """生成内容"""
-        from src.core.prompt_engine import prompt_engine
         from src.config import get_settings
 
         settings = get_settings()
@@ -648,10 +655,9 @@ class ContentService:
         variables = {
             "topic": request.topic,
             "platform_code": request.platform_code,
-            "length": length_pref,
             "length_words": length_words,
             "creativity": request.parameters.get("creativity", 0.7) if request.parameters else 0.7,
-            "tone": request.parameters.get("tone", "friendly") if request.parameters else "friendly",
+            "style": request.parameters.get("style", "自然流畅") if request.parameters else "自然流畅",
         }
 
         # 人设查询
@@ -668,7 +674,10 @@ class ContentService:
                 self.db.commit()
         variables["persona_desc"] = persona_desc
 
-        messages = prompt_engine.build_full_prompt(system_tmpl["system"], system_tmpl["user"], variables)
+        messages = [
+            {"role": "system", "content": _render_template(system_tmpl["system"], variables)},
+            {"role": "user",   "content": _render_template(system_tmpl["user"],   variables)},
+        ]
 
         # 注入人设到系统消息
         if persona_desc and messages and messages[0]["role"] == "system":
@@ -768,7 +777,6 @@ class ContentService:
         self, user_id: str, request: GenerateRequest
     ) -> AsyncGenerator[str, None]:
         """SSE 流式生成内容（逐 token 推送）"""
-        from src.core.prompt_engine import prompt_engine
         from src.config import get_settings
 
         settings = get_settings()
@@ -784,10 +792,9 @@ class ContentService:
         variables = {
             "topic": request.topic,
             "platform_code": request.platform_code,
-            "length": length_pref,
             "length_words": length_words,
             "creativity": request.parameters.get("creativity", 0.7) if request.parameters else 0.7,
-            "tone": request.parameters.get("tone", "friendly") if request.parameters else "friendly",
+            "style": request.parameters.get("style", "自然流畅") if request.parameters else "自然流畅",
         }
 
         # 人设查询
@@ -804,7 +811,10 @@ class ContentService:
                 self.db.commit()
         variables["persona_desc"] = persona_desc
 
-        messages = prompt_engine.build_full_prompt(system_tmpl["system"], system_tmpl["user"], variables)
+        messages = [
+            {"role": "system", "content": _render_template(system_tmpl["system"], variables)},
+            {"role": "user",   "content": _render_template(system_tmpl["user"],   variables)},
+        ]
 
         # 注入人设到系统消息
         if persona_desc and messages and messages[0]["role"] == "system":

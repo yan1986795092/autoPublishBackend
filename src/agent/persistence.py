@@ -235,7 +235,7 @@ def save_tool_call(
 
 
 def cleanup_old_records(retention_days: Optional[dict] = None) -> dict[str, int]:
-    """清理过期的 Agent 数据（AGENT_ARCHITECTURE.md §11.3 数据保留策略）"""
+    """清理过期的 Agent 数据"""
     retention = retention_days or {
         "thinking_traces": 7,
         "tool_calls": 30,

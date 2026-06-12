@@ -267,7 +267,6 @@ backend/
 │   ├── skills/               # Skill 内置注册表
 │   ├── core/                 # 核心模块
 │   │   ├── model_router.py     # ModelRouter (per-role 路由 → Gateway)
-│   │   ├── prompt_engine.py    # Prompt 引擎
 │   │   ├── content_service.py  # 内容生成服务
 │   │   └── security.py         # 安全认证
 │   ├── adapters/              # 平台适配器

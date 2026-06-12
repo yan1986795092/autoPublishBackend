@@ -83,7 +83,6 @@ autoGitub/
 │   │   ├── memory/           # 记忆系统
 │   │   ├── core/             # 核心模块
 │   │   │   ├── model_router.py   # per-role LLM 路由
-│   │   │   ├── prompt_engine.py
 │   │   │   └── security.py
 │   │   ├── adapters/         # 平台适配器
 │   │   ├── observability_v2/  # 统一可观测性

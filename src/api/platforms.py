@@ -5,7 +5,6 @@ from typing import Optional
 from src.database import get_db
 from src.models import Platform
 from src.config import get_settings
-from src.services.hot_topic_service import hot_topic_service
 
 router = APIRouter(prefix="/platforms", tags=["平台"])
 
@@ -65,16 +64,6 @@ def list_platforms(db: Session = Depends(get_db)):
             for p in platforms
         ]
     }
-
-
-@router.get("/hot-topics", response_model=dict)
-def get_hot_topics(
-    platform: Optional[str] = None,
-    limit: int = Query(10, ge=1, le=20),
-):
-    """获取各平台热门话题"""
-    data = hot_topic_service.get_hot_topics(platform, limit)
-    return {"success": True, "data": data}
 
 
 @router.get("/models", response_model=dict)

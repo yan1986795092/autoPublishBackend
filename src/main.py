@@ -11,7 +11,7 @@ from src.core.exceptions import (
     ConfigurationError, ValidationError, AuthenticationError, AuthorizationError,
     NotFoundError, ConflictError, RateLimitError, build_error_response,
 )
-from src.core.logging import setup_logging
+from src.logging_shared.config import setup as setup_logging
 from src.core.migrations import migration_manager
 from src.config import get_settings
 from src.database import engine, setup_db_logging
