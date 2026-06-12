@@ -79,7 +79,7 @@ class AIEditorService:
 
     async def translate(self, text: str, target_lang: str) -> str:
         if self._is_mock_mode():
-            return f"[Mock] Translation to {target_lang}"
+            return f"[Mock] 翻译到 {target_lang}"
         lang_name = {"en": "英语", "zh": "中文", "ja": "日语", "ko": "韩语"}
         name = lang_name.get(target_lang, target_lang)
         prompt = f"""请将以下文字翻译成{name}，保持原意和语气。只返回翻译结果。

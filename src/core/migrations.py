@@ -1,9 +1,9 @@
-"""Generic database migration framework.
+"""通用数据库迁移框架。
 
-Usage:
+用法：
     from src.core.migrations import migration_manager
 
-    @migration_manager.register("add_category_column", "Add category column to platforms table")
+    @migration_manager.register("add_category_column", "向 platforms 表添加 category 列")
     def add_category_column(engine):
         from sqlalchemy import inspect, text
         inspector = inspect(engine)
@@ -12,7 +12,7 @@ Usage:
                 conn.execute(text("ALTER TABLE platforms ADD COLUMN category VARCHAR(50) DEFAULT 'social_media'"))
                 conn.commit()
 
-    # In app lifespan:
+    # 在应用生命周期中：
     migration_manager.run_all(engine)
 """
 

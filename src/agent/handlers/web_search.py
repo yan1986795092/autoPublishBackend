@@ -1,4 +1,4 @@
-"""WebSearch Agent — Bocha 搜索"""
+"""WebSearch Agent — 博查搜索"""
 
 import logging
 import os
@@ -254,9 +254,9 @@ async def handle_url_crawl(task_input: dict, llm: ChatOpenAI | None = None, mcp_
                 "output": {"content": content, "url": url, "title": title, "source": source},
                 "tokens_used": 0,
                 "thinking_steps": [{
-                    "agent": "URLCrawler", "action": "crawl",
-                    "reasoning": f"Crawling: {url}",
-                    "output_summary": f"Got {len(text)} chars from {title}",
+                    "agent": "URLCrawler", "action": "抓取",
+                    "reasoning": f"抓取: {url}",
+                    "output_summary": f"从 {title} 获取 {len(text)} 字符",
                     "status": "done",
                 }],
             }

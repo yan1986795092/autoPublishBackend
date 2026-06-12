@@ -342,13 +342,13 @@ class Skill(Base):
     source = Column(SQLEnum(SkillSource), default=SkillSource.USER)
     author = Column(String(100))
     version = Column(String(20))
-    tags = Column(String(500))          # comma-separated
+    tags = Column(String(500))          # 逗号分隔
     is_enabled = Column(Boolean, default=True)
     use_count = Column(Integer, default=0)
 
     # 执行相关
     system_prompt = Column(Text, nullable=False)
-    user_prompt_template = Column(Text)  # Optional: template with {topic} {content} placeholders
+    user_prompt_template = Column(Text)  # 可选：包含 {topic} {content} 占位符的模板
     preset_plan_json = Column(Text)      # JSON: { complexity, agent_sequence }
     content_types_json = Column(Text)    # JSON: ["blog", "social_post"]
 
@@ -419,7 +419,7 @@ class Skill(Base):
         }
 
     def to_meta_dict(self) -> dict:
-        """List view — excludes system_prompt & config_schema"""
+        """列表视图 — 不包含 system_prompt 和 config_schema"""
         return {
             "id": self.id,
             "name": self.name,

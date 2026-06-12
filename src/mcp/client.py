@@ -85,8 +85,8 @@ class MCPClient:
 
         if not _langchain_mcp_adapters_available:
             logger.warning(
-                "langchain-mcp-adapters not installed. "
-                "MCP will be disabled. Install with: pip install langchain-mcp-adapters"
+                "langchain-mcp-adapters 未安装。"
+                "MCP 将被禁用。安装方式: pip install langchain-mcp-adapters"
             )
 
     def add_server(self, config: MCPServerConfig) -> None:
@@ -107,8 +107,8 @@ class MCPClient:
 
         enabled_configs = [c for c in self._configs if c.enabled]
         if not enabled_configs:
-            logger.info("No MCP servers configured, skipping start",
-                        _type="system", event_name="mcp_skip", message="No MCP servers configured", status="ok")
+            logger.info("未配置 MCP 服务器，跳过启动",
+                        _type="system", event_name="mcp_skip", message="未配置 MCP 服务器", status="ok")
             return True
 
         try:
@@ -117,7 +117,7 @@ class MCPClient:
             backend_root = str(Path(__file__).parent.parent.parent.absolute())
 
             for config in enabled_configs:
-                # 解析 module path
+                # 解析模块路径
                 if config.module:
                     module_path = Path(config.module)
                     if not module_path.is_absolute():
@@ -125,7 +125,7 @@ class MCPClient:
                 else:
                     module_path = Path(__file__).parent / f"{config.name}_server.py"
 
-                # 构建 server config dict
+                # 构建 server 配置字典
                 server_config: dict[str, Any] = {
                     "command": config.command,
                     "args": config.args or [str(module_path), "stdio"],
@@ -145,11 +145,11 @@ class MCPClient:
                 server_configs[config.name] = server_config
 
             logger.info(
-                "Starting MCP servers: %s",
+                "正在启动 MCP 服务器: %s",
                 ", ".join(f"{c.name}({c.category})" for c in enabled_configs),
                 _type="system",
                 event_name="mcp_starting",
-                message=f"Starting MCP servers: {', '.join(c.name for c in enabled_configs)}",
+                message=f"正在启动 MCP 服务器: {', '.join(c.name for c in enabled_configs)}",
                 status="started",
             )
 
@@ -163,19 +163,19 @@ class MCPClient:
             self._last_health_check = time.monotonic()
 
             logger.info(
-                "MCP started: %d tools total — %s",
+                "MCP 已启动: 共 %d 个工具 — %s",
                 len(self._tools),
                 ", ".join(f"{t.name}" for t in self._agent_tools),
                 _type="system",
                 event_name="mcp_started",
-                message=f"MCP started: {len(self._tools)} tools",
+                message=f"MCP 已启动: {len(self._tools)} 个工具",
                 status="ok",
             )
             return True
 
         except Exception as e:
-            logger.error("Failed to start MCP: %s", e, exc_info=True,
-                         _type="system", event_name="mcp_error", message=f"MCP start failed: {e}", status="error")
+            logger.error("MCP 启动失败: %s", e, exc_info=True,
+                         _type="system", event_name="mcp_error", message=f"MCP 启动失败: {e}", status="error")
             await self._cleanup()
             return False
 
@@ -205,14 +205,14 @@ class MCPClient:
         if await self.is_healthy():
             return True
         if self._reconnect_attempts >= self._max_reconnect_attempts:
-            logger.error("MCP reconnect exhausted (%d attempts)", self._reconnect_attempts)
+            logger.error("MCP 重连次数已耗尽（%d 次）", self._reconnect_attempts)
             return False
         self._reconnect_attempts += 1
-        logger.info("MCP reconnect attempt %d/%d...", self._reconnect_attempts, self._max_reconnect_attempts)
+        logger.info("MCP 重连尝试 %d/%d...", self._reconnect_attempts, self._max_reconnect_attempts)
         await self._cleanup()
         success = await self.start()
         if success:
-            logger.info("MCP reconnected successfully")
+            logger.info("MCP 重连成功")
         return success
 
     def get_tools(self) -> list[BaseTool]:
@@ -232,7 +232,7 @@ class MCPClient:
 
         result = []
         for t in tools:
-            # 根据工具名推断 category
+            # 根据工具名推断分类
             name = t.name.lower()
             if any(kw in name for kw in ["search", "web", "news", "fetch", "tavily", "brave"]):
                 category = "search"

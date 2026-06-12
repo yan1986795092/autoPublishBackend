@@ -10,16 +10,16 @@ from .registry_types import RegistryEntry
 
 
 def load_from_file(registry: PromptRegistry, path: str) -> list[str]:
-    """从 YAML 文件加载模板定义（含所有历史版本）。返回加载的模板名列表。"""
+    """从 YAML 文件加载模板定义（含所有历史版本）。返回已加载的模板名称列表。"""
     path = Path(path)
     if not path.exists():
-        raise FileNotFoundError(f"Prompt file not found: {path}")
+        raise FileNotFoundError(f"提示文件未找到: {path}")
 
     with open(path, "r", encoding="utf-8") as f:
         data = yaml.safe_load(f)
 
     if not data or not isinstance(data, dict):
-        raise ValueError(f"Invalid prompt file format: {path}")
+        raise ValueError(f"提示文件格式无效: {path}")
 
     name = data.get("name", path.stem)
     description = data.get("description", "")
@@ -76,7 +76,7 @@ def dump_to_file(registry: PromptRegistry, name: str, path: str) -> None:
     """将模板的完整版本链导出为 YAML 文件。"""
     entry = registry._entries.get(name)
     if not entry:
-        raise KeyError(f"Template not found: {name}")
+        raise KeyError(f"模板未找到: {name}")
 
     data = {
         "name": entry.name,

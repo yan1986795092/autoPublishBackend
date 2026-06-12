@@ -9,10 +9,10 @@
 使用方式：
     from src.memory import memory_manager
 
-    # Agent 执行前注入记忆
+    # 在 Agent 执行前注入相关记忆
     ctx = await memory_manager.build_agent_context(agent_type, task_input, user_id)
 
-    # Agent 执行后沉淀记忆
+    # 在 Agent 执行后将新知识沉淀到记忆中
     await memory_manager.remember(agent_type, task_input, result, user_id)
 """
 
@@ -22,7 +22,7 @@ from .semantic_memory import SemanticMemory
 from .episodic_memory import EpisodicMemory
 from .schemas import MemoryItem, Episode
 
-# Context management (multi-agent layered system)
+# 上下文管理（多 Agent 分层系统中的共享上下文）
 from .context_store import (
     SharedContextStore,
     CreativeAnchors,
@@ -65,7 +65,7 @@ from .structured_memory import (
 )
 
 __all__ = [
-    # Existing
+    # 核心记忆类
     "MemoryManager",
     "memory_manager",
     "WorkingMemory",
@@ -73,7 +73,7 @@ __all__ = [
     "EpisodicMemory",
     "MemoryItem",
     "Episode",
-    # Context store
+    # 上下文存储数据结构
     "SharedContextStore",
     "CreativeAnchors",
     "CreativeDecision",
@@ -89,7 +89,7 @@ __all__ = [
     "AGENT_PERMISSIONS",
     "VALID_TRANSITIONS",
     "WriteResult",
-    # Context management
+    # 上下文管理入口
     "ContextManager",
     "build_agent_context",
     "write_to_context",
@@ -100,11 +100,11 @@ __all__ = [
     "extract_anchors_from_content",
     "update_creative_anchors",
     "check_anchor_drift_from_review",
-    # Consolidator
+    # 记忆合并与一致性校验
     "ConsolidatorNode",
     "AnchorConsistencyChecker",
     "ConsolidationResult",
-    # Structured memory
+    # 结构化长期记忆
     "EntityMemory",
     "PlotMemory",
     "ProjectIndex",

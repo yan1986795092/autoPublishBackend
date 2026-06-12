@@ -16,7 +16,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/chat", tags=["chat"])
 
 
-# ===================== Request/Response Models =====================
+# ===================== 请求/响应模型 =====================
 
 
 class MessageCreate(BaseModel):
@@ -68,7 +68,7 @@ class ConversationResponse(BaseModel):
         from_attributes = True
 
 
-# ===================== Conversation APIs =====================
+# ===================== 对话 API =====================
 
 
 @router.get("/conversations")
@@ -263,7 +263,7 @@ async def delete_conversation(
     return {"success": True, "data": {"id": conversation_id}}
 
 
-# ===================== Message APIs =====================
+# ===================== 消息 API =====================
 
 
 @router.post("/conversations/{conversation_id}/messages")

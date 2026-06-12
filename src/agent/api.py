@@ -310,7 +310,7 @@ async def repurpose_content(
                                     "topic": source_title,
                                     "content": output_content,
                                     "platform": platform_code,
-                                    "task": f"Adapt the following content for {platform_code} platform format",
+                                    "task": f"将以下内容适配为 {platform_code} 平台格式",
                                 },
                             ),
                             context={},
@@ -484,7 +484,7 @@ async def agent_stream(
                         }
                     else:
                         logger.warning("未找到 Skill", _type="system", event_name="skill_not_found",
-                                      message=f"Skill not found: {request.skill_id}", status="error")
+                                      message=f"找不到 Skill: {request.skill_id}", status="error")
                 finally:
                     db.close()
 
@@ -704,8 +704,8 @@ async def agent_stream(
                     event_bus.unsubscribe(task_id_str, on_event)
 
         except Exception as e:
-            logger.exception("SSE stream error", _type="system", event_name="sse_error",
-                             message=f"SSE error: {e}", status="error")
+            logger.exception("SSE 流错误", _type="system", event_name="sse_error",
+                             message=f"SSE 流错误: {e}", status="error")
             yield {
                 "event": "error",
                 "data": json.dumps({"message": str(e)}, ensure_ascii=False),
@@ -759,7 +759,7 @@ async def crawl_url(
         )
     except Exception as e:
         logger.error("crawl_url 失败", exc_info=True,
-                     _type="system", event_name="crawl_error", message=f"crawl_url failed: {e}", status="error")
+                     _type="system", event_name="crawl_error", message=f"crawl_url 失败: {e}", status="error")
         raise HTTPException(status_code=500, detail=str(e))
 
 

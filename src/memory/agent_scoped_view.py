@@ -1,4 +1,4 @@
-"""Permission-scoped context views for multi-agent context management."""
+"""基于权限的多智能体上下文作用域视图。"""
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
@@ -19,7 +19,7 @@ from src.logging_shared.config import get_logger
 logger = get_logger("memory.agent_scoped_view")
 
 # ──────────────────────────────────────────
-# Task field map
+# 任务字段映射
 # ──────────────────────────────────────────
 
 _TASK_FIELD_MAP: Dict[str, str] = {
@@ -31,12 +31,12 @@ _TASK_FIELD_MAP: Dict[str, str] = {
 
 
 # ──────────────────────────────────────────
-# Filter task fields by permission
+# 按权限过滤任务字段
 # ──────────────────────────────────────────
 
 
 def filter_task_fields(agent_name: str, store: SharedContextStore) -> Dict[str, Any]:
-    """Return only the task-layer fields this agent is authorized to read."""
+    """返回该 Agent 有权读取的任务层字段。"""
     perm = AGENT_PERMISSIONS.get(agent_name)
     if not perm:
         logger.warning("未知 Agent 类型，返回空上下文", agent_name=agent_name)
@@ -59,33 +59,33 @@ def filter_task_fields(agent_name: str, store: SharedContextStore) -> Dict[str, 
 
 
 # ──────────────────────────────────────────
-# Build context for agent
+# 构建 Agent 上下文
 # ──────────────────────────────────────────
 
 
 def build_agent_context(agent_name: str, store: SharedContextStore) -> Dict[str, Any]:
     """
-    Returns a permission-filtered view of the SharedContextStore for the given agent.
+    返回给定 Agent 的 SharedContextStore 的权限过滤视图。
 
-    - system: SystemLayer fields (read-only contract)
-    - task: task fields the agent is authorized to read
-    - self: agent's own private state
+    - system: 系统层字段（只读契约）
+    - task: Agent 有权读取的任务字段
+    - self: Agent 自身的私有状态
     """
     perm = AGENT_PERMISSIONS.get(agent_name, AGENT_PERMISSIONS.get("WritingAgent"))
 
-    # System layer — always included for all agents
+    # 系统层 —— 所有 Agent 始终包含
     system = {
         "user_request": store.user_request,
         "project_manifest": store.project_manifest,
         "global_memory": store.global_memory,
-        "thinking_trace": store.thinking_trace[-20:],  # cap at 20 for injection
-        "creative_log": store.creative_log,  # always full — never compressed
+        "thinking_trace": store.thinking_trace[-20:],  # 限制 20 条以防止注入
+        "creative_log": store.creative_log,  # 始终完整 —— 永不压缩
     }
 
-    # Task layer — filtered by permission
+    # 任务层 —— 按权限过滤
     task = filter_task_fields(agent_name, store)
 
-    # Self layer — only the owning agent
+    # 自身层 —— 仅属于当前 Agent
     self_state = store.agent_private.get(agent_name, AgentPrivateState())
     self_dict = {
         "internal_reasoning": self_state.internal_reasoning,
@@ -99,7 +99,7 @@ def build_agent_context(agent_name: str, store: SharedContextStore) -> Dict[str,
         "self": self_dict,
     }
 
-    # For WritingAgent, add the creative_view with anchors and recent decisions
+    # 对于 WritingAgent，添加包含锚点和近期决策的 creative_view
     if agent_name == "WritingAgent":
         context["creative_view"] = _build_creative_view(store)
 
@@ -107,8 +107,8 @@ def build_agent_context(agent_name: str, store: SharedContextStore) -> Dict[str,
 
 
 def _build_creative_view(store: SharedContextStore) -> Dict[str, Any]:
-    """Build the creative_view section for WritingAgent."""
-    # Use last_* properties for backward-compatible access
+    """为 WritingAgent 构建 creative_view 部分。"""
+    # 使用 last_* 属性实现向后兼容的访问
     return {
         "anchors": store.creative_anchors,
         "active_feedback": {
@@ -121,12 +121,12 @@ def _build_creative_view(store: SharedContextStore) -> Dict[str, Any]:
 
 
 def get_context_for_writing_agent(store: SharedContextStore) -> Dict[str, Any]:
-    """Convenience wrapper: builds full context for WritingAgent with creative_view."""
+    """便捷封装：为 WritingAgent 构建包含 creative_view 的完整上下文。"""
     return build_agent_context("WritingAgent", store)
 
 
 # ──────────────────────────────────────────
-# Write permission enforcement
+# 写权限强制执行
 # ──────────────────────────────────────────
 
 
@@ -137,19 +137,19 @@ def write_to_context(
     store: SharedContextStore,
 ) -> WriteResult:
     """
-    Attempt to write a value to a dotted field path in the store,
-    enforcing permission. Appends to list fields, replaces scalar fields.
-    Returns WriteResult.ACCEPTED or WriteResult.REJECTED.
+    尝试将值写入存储中的点分字段路径，
+    强制执行权限。列表字段追加，标量字段替换。
+    返回 WriteResult.ACCEPTED 或 WriteResult.REJECTED。
     """
     perm = AGENT_PERMISSIONS.get(agent_name)
     if not perm:
-        logger.warning(f"write_to_context: unknown agent {agent_name}")
+        logger.warning(f"write_to_context: 未知 agent {agent_name}")
         return WriteResult.REJECTED
 
     if field_path not in perm.writable_fields:
         logger.warning(
-            f"Permission denied: {agent_name} attempted to write to {field_path}. "
-            f"Allowed: {perm.writable_fields}"
+            f"权限拒绝: {agent_name} 尝试写入 {field_path}。"
+            f"允许的字段: {perm.writable_fields}"
         )
         store.add_thinking_step(
             agent=agent_name,
@@ -165,9 +165,9 @@ def write_to_context(
 
 
 def _set_nested(store: SharedContextStore, field_path: str, value: Any, agent_name: str = "") -> None:
-    """Set a dotted field path on the store (e.g. 'task.writing_content').
+    """设置存储上的点分字段路径（例如 'task.writing_content'）。
 
-    For task-layer list fields, appends the value. For scalar fields, sets directly.
+    对于任务层列表字段，追加值。对于标量字段，直接设置。
     """
     parts = field_path.split(".", 1)
     layer = parts[0]
@@ -194,7 +194,7 @@ def _set_nested(store: SharedContextStore, field_path: str, value: Any, agent_na
 
 
 # ──────────────────────────────────────────
-# Creative decision logging
+# 创意决策日志
 # ──────────────────────────────────────────
 
 
@@ -205,9 +205,9 @@ def log_creative_decision(
     store: SharedContextStore,
 ) -> CreativeDecision:
     """
-    Log a creative decision to the store's creative_log.
-    WritingAgent calls this at the START of every output generation.
-    Even 'no significant decision' should be logged as continuation.
+    将创意决策记录到存储的 creative_log 中。
+    WritingAgent 在每次输出生成开始时调用此方法。
+    即使是 '无重要决策' 也应作为延续记录。
     """
     turn_number = 0
     if store.project_manifest:
@@ -225,7 +225,7 @@ def log_creative_decision(
         action="log_creative_decision",
         detail=f"tags={tags}, turn={turn_number}",
     )
-    logger.debug(f"Creative decision logged by {agent}: {decision_text[:50]}")
+    logger.debug(f"Creative decision 已由 {agent} 记录: {decision_text[:50]}")
     return decision
 
 
@@ -234,7 +234,7 @@ def log_review_anchor_drift(
     severity: str,
     store: SharedContextStore,
 ) -> None:
-    """Called when ReviewAgent detects content diverging from anchors."""
+    """当 ReviewAgent 检测到内容偏离锚点时调用。"""
     log_creative_decision(
         decision_text=f"[REVIEW ANCHOR DRIFT] {drift_text}",
         tags=["review_anchor_drift", f"severity:{severity}"],
@@ -244,17 +244,17 @@ def log_review_anchor_drift(
 
 
 # ──────────────────────────────────────────
-# Anchor extraction from WritingAgent output
+# 从 WritingAgent 输出中提取锚点
 # ──────────────────────────────────────────
 
 
 def extract_anchors_from_content(content: str) -> dict:
     """
-    Phase 1 anchor extraction from WritingAgent output text.
-    Looks for structured markdown sections to populate creative anchors.
+    从 WritingAgent 输出文本中提取阶段 1 锚点。
+    查找结构化 Markdown 部分以填充创意锚点。
 
-    Returns a dict with keys: story_outline, character_profiles, plot_milestones,
-    style_guide, world_setting.
+    返回包含以下键的字典: story_outline, character_profiles, plot_milestones,
+    style_guide, world_setting。
     """
     import re
 
@@ -272,7 +272,7 @@ def extract_anchors_from_content(content: str) -> dict:
     for i, line in enumerate(lines):
         lower = line.lower().strip()
 
-        # Detect section headers
+        # 检测章节标题
         if re.match(r"^#{1,3}\s*(outline|故事大纲|大纲)", lower):
             current_section = "outline"
             continue
@@ -289,14 +289,14 @@ def extract_anchors_from_content(content: str) -> dict:
             current_section = "world"
             continue
 
-        # Collect content for active section (skip headings)
+        # 为当前活动章节收集内容（跳过标题）
         if current_section and line.strip() and not line.strip().startswith("#"):
             text = line.strip().lstrip("-*").strip()
 
             if current_section == "outline":
                 anchors["story_outline"] += " " + text
             elif current_section == "character":
-                # Pattern: "Name: description" or "- Name: description"
+                # 格式: "Name: description" 或 "- Name: description"
                 m = re.match(r"^\*?\-?\s*(\w[\w\s]*?):\s*(.+)", text)
                 if m:
                     name, desc = m.group(1).strip(), m.group(2).strip()
@@ -319,8 +319,8 @@ def update_creative_anchors(
     store: SharedContextStore,
 ) -> bool:
     """
-    Extract anchor fields from WritingAgent output and update the store.
-    Called after WritingAgent completes. Returns True if any anchors were updated.
+    从 WritingAgent 输出中提取锚点字段并更新存储。
+    在 WritingAgent 完成后调用。如果任何锚点被更新则返回 True。
     """
     content = ""
     if isinstance(writing_result, dict):
@@ -360,14 +360,14 @@ def update_creative_anchors(
         store.add_thinking_step(
             agent="WritingAgent",
             action="anchor_update",
-            detail=f"Updated anchors from output: {list(extracted.keys())}",
+            detail=f"从输出中更新锚点: {list(extracted.keys())}",
         )
 
     return updated
 
 
 # ──────────────────────────────────────────
-# Anchor drift check from ReviewAgent output
+# 从 ReviewAgent 输出中检查锚点偏移
 # ──────────────────────────────────────────
 
 
@@ -376,8 +376,8 @@ def check_anchor_drift_from_review(
     store: SharedContextStore,
 ) -> int:
     """
-    Check ReviewAgent output for anchor drift indicators and log them.
-    Returns the number of drifts detected and logged.
+    检查 ReviewAgent 输出中的锚点偏移指标并记录。
+    返回检测到并记录的偏移数量。
     """
     output = review_result.get("output", {})
     if isinstance(output, dict):
@@ -390,7 +390,7 @@ def check_anchor_drift_from_review(
     if not content:
         return 0
 
-    # Phase 1: keyword-based drift detection from review text
+    # 阶段 1：基于关键词的偏移检测
     drift_keywords = [
         "与设定不符", "矛盾", "不一致", "偏离", "anchor drift",
         "contradict", "inconsistent", "deviation", "inconsistency",
@@ -400,18 +400,18 @@ def check_anchor_drift_from_review(
     for kw in drift_keywords:
         if kw.lower() in content.lower():
             log_review_anchor_drift(
-                drift_text=f"Review flagged keyword '{kw}' suggesting anchor deviation",
+                drift_text=f"审阅标记了关键词 '{kw}'，提示锚点偏离",
                 severity="medium",
                 store=store,
             )
             drifts_found += 1
 
-    # Also check suggestions for drift signals
+    # 同时检查建议中的偏移信号
     for suggestion in suggestions:
         for kw in drift_keywords:
             if kw.lower() in suggestion.lower():
                 log_review_anchor_drift(
-                    drift_text=f"Suggestion contains drift signal: '{suggestion[:100]}'",
+                    drift_text=f"建议包含偏移信号: '{suggestion[:100]}'",
                     severity="medium",
                     store=store,
                 )

@@ -101,7 +101,7 @@ async def search_images(
         return "\n".join(lines)
 
     except Exception as e:
-        logger.warning(f"Pexels API error: {e}")
+        logger.warning(f"Pexels API 出错: {e}")
         return await _mock_results(query, per_page)
 
 
@@ -160,12 +160,12 @@ async def get_curated_photos(
         return "\n".join(lines)
 
     except Exception as e:
-        logger.warning(f"Pexels curated error: {e}")
+        logger.warning(f"Pexels 精选图片出错: {e}")
         return await _mock_results("curated", per_page)
 
 
 async def _mock_results(query: str, per_page: int) -> str:
-    """Mock 结果（未配置 API Key 时展示）"""
+    """生成模拟搜索结果（当未配置 PEXELS_API_KEY 时展示的演示数据）"""
     mock_images = [
         {"title": f"{query} 相关图片 1", "url": "https://images.pexels.com/photos/1/pexels-photo-1.jpeg", "color": "#4A90E2"},
         {"title": f"{query} 相关图片 2", "url": "https://images.pexels.com/photos/2/pexels-photo-2.jpeg", "color": "#50C878"},

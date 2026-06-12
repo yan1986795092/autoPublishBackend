@@ -1,19 +1,19 @@
-"""Rich-based console renderer for structlog — colorful per-type output.
+"""基于 Rich 的控制台渲染器，用于 structlog — 按类型输出彩色日志。
 
-Supports 5 log categories, each with distinct icon, color, and layout:
+支持 5 种日志类别，每种类别有独特的图标、颜色和布局：
 
-    🌐 HTTP    — cyan/green/yellow/red by status
-    🤖 Agent   — indented step chain (start → thought → tool → finish)
-    🧠 LLM     — magenta, token breakdown, latency, cost
-    🗄️  DB     — yellow, SQL summary, rows, duration
-    ⚡ System  — green, startup/shutdown/lifecycle events
+    🌐 HTTP    — 按状态码显示青色/绿色/黄色/红色
+    🤖 Agent   — 缩进的步骤链（开始 → 思考 → 工具 → 完成）
+    🧠 LLM     — 洋红色，显示 Token 详情、延迟、成本
+    🗄️  DB     — 黄色，SQL 摘要、行数、耗时
+    ⚡ System  — 绿色，启动/关闭/生命周期事件
 
-Usage (via structlog config):
+用法（通过 structlog 配置）：
 
     processors.append(RichConsoleRenderer(colors=True))
 
-Each log event must carry a ``_type`` key in its event_dict matching one of the
-5 categories above. Untyped events fall back to structlog.dev.ConsoleRenderer.
+每个日志事件的 event_dict 中必须携带一个 ``_type`` 键，
+匹配上述 5 种类别之一。未分类的事件回退到 structlog.dev.ConsoleRenderer。
 """
 
 from __future__ import annotations
@@ -29,13 +29,13 @@ from rich.text import Text
 
 
 class RichConsoleRenderer:
-    """structlog processor: renders event_dict as Rich-colored output by ``_type``.
+    """structlog 处理器：根据 ``_type`` 将 event_dict 渲染为 Rich 彩色输出。
 
-    Handles 5 log categories (http, agent, llm, db, system).
-    Falls back to structlog.dev.ConsoleRenderer for untyped events.
+    处理 5 种日志类别（http, agent, llm, db, system）。
+    未分类的事件回退到 structlog.dev.ConsoleRenderer。
 
-    The renderer maintains one shared ``rich.Console`` connected to a reusable
-    ``StringIO`` buffer so that every call avoids fresh allocations.
+    该渲染器维护一个共享的 ``rich.Console``，连接到可复用的
+    ``StringIO`` 缓冲区，避免每次调用时重新分配。
     """
 
     def __init__(self, colors: bool = True):
@@ -50,24 +50,24 @@ class RichConsoleRenderer:
         )
         self._fallback = structlog.dev.ConsoleRenderer(colors=colors)
 
-    # ── Public API (structlog processor contract) ────────────────────────
+    # ── 公共 API（structlog 处理器契约）────────────────────────
 
     def __call__(self, logger: Any, name: str, event_dict: dict) -> str:
         event_type = event_dict.pop("_type", None)
         handler = getattr(self, f"_render_{event_type}", None) if event_type else None
         if handler is not None:
-            # Prepend colored level indicator — the root handler no longer adds [LEVEL]
+            # 添加带颜色的级别指示 — 根处理器不再添加 [LEVEL]
             level = event_dict.pop("level", "info").upper()
             text = self._render_level(level)
             text.append(handler(event_dict))
             return self._capture(text)
         return self._fallback(logger, name, event_dict)
 
-    # ── Internal helpers ────────────────────────────────────────
+    # ── 内部辅助方法 ─────────────────────────────────────
 
     @staticmethod
     def _render_level(level: str) -> Text:
-        """Render a colored level prefix: ``[INFO]  `` / ``[ERROR] `` etc."""
+        """渲染带颜色的级别前缀：``[INFO]  `` / ``[ERROR] `` 等"""
         level_colors = {
             "INFO": "green",
             "WARNING": "yellow",
@@ -80,7 +80,7 @@ class RichConsoleRenderer:
         return Text(f"[{level:<7}]  ", Style(color=color, bold=bold))
 
     def _capture(self, text: Text) -> str:
-        """Render a Rich ``Text`` to an ANSI-coloured string via the shared buffer."""
+        """将 Rich ``Text`` 渲染为带 ANSI 颜色的字符串，通过共享缓冲区。"""
         self._buffer.truncate(0)
         self._buffer.seek(0)
         self._console.print(text, end="")
@@ -114,15 +114,15 @@ class RichConsoleRenderer:
         t = Text()
         t.append("🌐  ", Style(color="cyan"))
 
-        # Method
+        # 请求方法
         method_colors = {"GET": "cyan", "POST": "green", "PUT": "yellow",
                          "PATCH": "yellow", "DELETE": "red"}
         t.append(f"{method:7s} ", Style(color=method_colors.get(method, "white"), bold=True))
 
-        # Path
+        # 路径
         t.append(f"{path}  ", Style(color="white"))
 
-        # Status
+        # 状态码
         if status >= 500:
             st = Style(color="red", bold=True)
         elif status >= 400:
@@ -135,7 +135,7 @@ class RichConsoleRenderer:
             st = Style(dim=True)
         t.append(f"{status}  ", st)
 
-        # Duration
+        # 耗时
         if duration_ms > 1000:
             ds = Style(color="red", bold=True)
         elif duration_ms > 500:
@@ -169,7 +169,7 @@ class RichConsoleRenderer:
         error_message = self._pop(d, "error_message", "")
         level = self._pop(d, "level", "INFO").upper()
 
-        # ── Determine indent level and icon ──
+        # ── 确定缩进级别和图标 ──
         if event_type in ("agent_start", "agent_finish"):
             indent = ""
         elif event_type == "thought":
@@ -183,7 +183,7 @@ class RichConsoleRenderer:
         else:
             indent = ""
 
-        # ── Icon ──
+        # ── 图标 ──
         icon_map = {
             "agent_start": "🚀",
             "agent_finish": "✅",
@@ -198,18 +198,18 @@ class RichConsoleRenderer:
         t = Text()
         t.append(f"{icon}  ", Style(color="magenta"))
 
-        # Event type label
+        # 事件类型标签
         t.append(f"{event_type:15s} ", Style(color="cyan", bold=True))
 
-        # Agent name
+        # 代理名称
         if agent_name:
             t.append(f"{agent_name:14s} ", Style(color="white"))
 
-        # Run ID
+        # 运行 ID
         if run_id:
             t.append(f"run={run_id[:8]}  ", Style(color="blue", dim=True))
 
-        # Duration
+        # 耗时
         if duration_ms:
             if duration_ms > 10000:
                 dur_style = Style(color="red", bold=True)
@@ -219,11 +219,11 @@ class RichConsoleRenderer:
                 dur_style = Style(color="green")
             t.append(f"{self._fmt_ms(duration_ms)}  ", dur_style)
 
-        # Model
+        # 模型
         if llm_model:
             t.append(f"[{llm_model}]  ", Style(color="magenta", dim=True))
 
-        # Token usage
+        # Token 用量
         if token_usage_raw:
             if isinstance(token_usage_raw, dict):
                 total = token_usage_raw.get("total_tokens", 0)
@@ -239,18 +239,18 @@ class RichConsoleRenderer:
             if cost:
                 t.append(f"${float(cost):.4f} ", Style(color="yellow", dim=True))
 
-        # Thought preview (first 100 chars)
+        # 思考过程预览（前 100 字符）
         if thought:
             preview = thought[:120].replace("\n", " ")
             t.append(f"\n{indent}  💭 {preview}", Style(color="grey50", italic=True))
 
-        # Tool name
+        # 工具名称
         if tool_name:
             tool_detail = self._pop(d, "tool_detail", "")
             if tool_detail:
                 t.append(f" {tool_detail[:80]}", Style(color="yellow", dim=True))
 
-        # Error
+        # 错误
         if error_type:
             t.append(f" {error_type}: {error_message[:100]}", Style(color="red", bold=True))
 
@@ -274,19 +274,19 @@ class RichConsoleRenderer:
         t = Text()
         t.append("🧠  ", Style(color="magenta"))
 
-        # Model
+        # 模型
         t.append(f"{model:18s} ", Style(color="magenta", bold=True))
 
-        # Tokens
+        # Token
         t.append(f"{total_tokens}tokens ", Style(color="cyan"))
         if prompt_tokens or completion_tokens:
             t.append(f"(↑{prompt_tokens}↓{completion_tokens})  ", Style(dim=True))
 
-        # Duration
+        # 耗时
         t.append(f"{self._fmt_ms(duration_ms)}  ",
                  Style(color="red", bold=True) if duration_ms > 10000 else Style(dim=True))
 
-        # Cost
+        # 成本
         if cost:
             t.append(f"${float(cost):.5f}  ", Style(color="yellow"))
 
@@ -294,7 +294,7 @@ class RichConsoleRenderer:
         if agent_type:
             t.append(f"[{agent_type}]  ", Style(color="blue", dim=True))
 
-        # Request ID
+        # 请求 ID
         if req_id and len(str(req_id)) > 6:
             t.append(f"req={req_id[:12]}", Style(dim=True))
 
@@ -311,13 +311,13 @@ class RichConsoleRenderer:
         t = Text()
         t.append("🗄️  ", Style(color="yellow"))
 
-        # SQL summary — truncate to 80 chars, replace params with ?
+        # SQL 摘要 — 截断到 80 字符，将参数替换为 ?
         sql = statement.strip()
         if len(sql) > 80:
             sql = sql[:77] + "..."
         t.append(f"{sql}  ", Style(color="white"))
 
-        # Duration
+        # 耗时
         if duration_ms > 500:
             ds = Style(color="red", bold=True)
         elif duration_ms > 100:
@@ -344,15 +344,15 @@ class RichConsoleRenderer:
         t = Text()
         t.append("⚡  ", Style(color="green"))
 
-        # Event label
+        # 事件标签
         if event:
             t.append(f"{event:20s} ", Style(color="green", bold=True))
 
-        # Message
+        # 消息
         if message:
             t.append(f"{message}  ", Style(color="white"))
 
-        # Status
+        # 状态
         if status:
             status_colors = {"ok": "green", "passed": "green",
                              "failed": "red", "error": "red",

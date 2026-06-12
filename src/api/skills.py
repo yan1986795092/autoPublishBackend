@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/skills", tags=["skills"])
 
 
-# ===================== Request/Response Models =====================
+# ===================== 请求/响应模型 =====================
 
 
 class SkillCreateRequest(BaseModel):
@@ -100,7 +100,7 @@ def _parse_frontmatter(content: str) -> tuple[dict, str]:
             i += 1
             continue
 
-        # Key: value
+        # Key: value 解析
         colon_idx = stripped.index(":") if ":" in stripped else -1
         if colon_idx <= 0:
             i += 1
@@ -209,7 +209,7 @@ def _parse_skill_md(content: str, source_url: str | None = None) -> dict | None:
 
         return skill
     except Exception as e:
-        logger.warning(f"Failed to parse skill markdown: {e}")
+        logger.warning(f"解析 Skill markdown 失败: {e}")
         return None
 
 
@@ -243,7 +243,7 @@ def _parse_skill_json(content: str, source_url: str | None = None) -> dict | Non
             "source": "imported",
         }
     except Exception as e:
-        logger.warning(f"Failed to parse skill JSON: {e}")
+        logger.warning(f"解析 Skill JSON 失败: {e}")
         return None
 
 
@@ -257,7 +257,7 @@ def parse_skill(content: str, file_name: str | None = None, source_url: str | No
     if content_stripped.startswith("{"):
         return _parse_skill_json(content_stripped, source_url)
 
-    # YAML frontmatter → SKILL.md 格式
+    # YAML frontmatter 检测 -> SKILL.md 格式
     if "---" in content_stripped[:200]:
         return _parse_skill_md(content_stripped, source_url)
 
@@ -542,7 +542,7 @@ async def preview_import(
     # 截断 system_prompt 预览
     preview = {**parsed}
     if len(preview.get("system_prompt", "")) > 500:
-        preview["system_prompt"] = preview["system_prompt"][:500] + "\n\n... (truncated)"
+        preview["system_prompt"] = preview["system_prompt"][:500] + "\n\n... (已截断)"
 
     return {"success": True, "data": preview}
 

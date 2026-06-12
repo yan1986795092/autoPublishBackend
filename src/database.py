@@ -21,10 +21,10 @@ engine = create_engine(
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-# ── SQLAlchemy Query Logging ──────────────────────────────────────────
+# ── SQLAlchemy 查询日志 ──────────────────────────────────────────
 
 def _should_log_db() -> bool:
-    """Check if DB logging is enabled (controlled by environment)."""
+    """检查数据库日志是否启用（由环境变量控制）。"""
     import os
     return os.getenv("ENABLE_DB_LOG", "false").lower() in ("true", "1", "yes")
 
@@ -46,7 +46,7 @@ def _after_cursor_execute(conn, cursor, statement, parameters, context, executem
         return
     duration_ms = (time.perf_counter() - start) * 1000
 
-    # Sanitize SQL: collapse whitespace, truncate at 200 chars
+    # 清理 SQL：合并空白字符，截断至 200 字符
     sql = " ".join(statement.split())
     if len(sql) > 200:
         sql = sql[:197] + "..."
@@ -64,7 +64,7 @@ def _after_cursor_execute(conn, cursor, statement, parameters, context, executem
 
 
 def setup_db_logging(enabled: bool = False) -> None:
-    """Enable or disable SQLAlchemy query logging at runtime."""
+    """在运行时启用或禁用 SQLAlchemy 查询日志记录。"""
     import os
     os.environ["ENABLE_DB_LOG"] = "true" if enabled else "false"
 

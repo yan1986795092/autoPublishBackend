@@ -73,7 +73,7 @@ async def call_llm(
         duration_ms = (time.perf_counter() - start) * 1000
         model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
         provider = getattr(llm, "model_kwargs", {}).get("provider", "") or "unknown"
-        logger.warning(f"LLM {model_name} error: {exc}", _type="llm", model=model_name, duration_ms=round(duration_ms, 2))
+        logger.warning(f"LLM {model_name} 调用出错: {exc}", _type="llm", model=model_name, duration_ms=round(duration_ms, 2))
         stats_collector.record_llm_call(
             model=model_name, provider=provider, status="error",
             prompt_tokens=0, completion_tokens=0, duration_s=duration_ms / 1000,
@@ -110,7 +110,7 @@ async def call_llm(
         agent_type=agent_type,
     )
 
-    # Report to StatsCollector + Prometheus
+    # 报告到 StatsCollector + Prometheus
     stats_collector.record_llm_call(
         model=model_name, provider=provider, status="success",
         prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,

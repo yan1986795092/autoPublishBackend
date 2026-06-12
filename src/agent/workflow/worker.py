@@ -16,7 +16,7 @@ logger = structlog.get_logger(__name__)
 
 
 class AgentWorker:
-    """Worker：从队列中取出任务，执行 Agent 编排"""
+    """Worker: 从队列中取出任务，执行 Agent 编排"""
 
     def __init__(self, orchestrator_factory=None, max_retries: Optional[int] = None):
         self._running = False
@@ -34,12 +34,12 @@ class AgentWorker:
         self._running = True
         self._last_cleanup_time = time.monotonic()
 
-        # 启动 MCP WebSearch Client
+        # 启动 MCP WebSearch 客户端
         try:
             self._mcp_client = await get_mcp_client()
             if self._mcp_client.is_started:
                 self._mcp_tools = self._mcp_client.get_tools()
-                logger.info("MCP WebSearch started", tool_count=len(self._mcp_tools))
+                logger.info("MCP WebSearch 已启动", tool_count=len(self._mcp_tools))
             else:
                 logger.warning("MCP WebSearch 不可用（网络/配置问题）")
         except Exception as e:
@@ -53,11 +53,11 @@ class AgentWorker:
             self._task.cancel()
             self._task = None
 
-        # 关闭 MCP Client
+        # 关闭 MCP 客户端
         try:
             await shutdown_mcp_client()
         except Exception as e:
-            logger.warning("MCP 关闭错误", error=str(e))
+            logger.warning("MCP 客户端关闭出错", error=str(e))
 
     async def _run_loop(self):
         while self._running:
@@ -73,7 +73,7 @@ class AgentWorker:
                             if any(counts.values()):
                                 logger.info("已清理过期记录", **counts)
                         except Exception as e:
-                            logger.warning("清理错误", error=str(e))
+                            logger.warning("清理过期记录失败", error=str(e))
                     continue
 
                 await self._process_task(async_task)
@@ -82,7 +82,7 @@ class AgentWorker:
                 break
             except Exception as e:
                 logger.error(
-                    "Worker 主循环未处理异常",
+                    "Worker 主循环出现未处理异常",
                     exc_info=True,
                     _type="system",
                     event_name="worker_loop_error",
@@ -144,12 +144,12 @@ class AgentWorker:
 
                 if result.status.value == "completed":
                     task_queue.complete_task(async_task.id, result.to_dict())
-                    # 注意：不再调用 save_agent_task。
+                    # 注意: 不再调用 save_agent_task。
                     # orchestrator.run_async 内部通过 _persist_results_async 已完成写入，
                     # 再次调用会导致 UNIQUE constraint failed (与 SSE 路径冲突)。
                     return  # 完全成功，退出重试循环
 
-                # partial 状态：有输出但质量不足，记录警告但不退出重试
+                # partial 状态: 有输出但质量不足，记录警告但不退出重试
                 if result.status.value == "partial":
                     last_error = result.error or "partial_result"
                 logger.warning(

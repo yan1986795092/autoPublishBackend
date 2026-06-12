@@ -12,7 +12,7 @@ class VectorSearchTool:
     """语义向量搜索工具，用于在知识库中检索相似内容"""
 
     name = "vector_search"
-    description = "Search for similar content in your knowledge base using semantic similarity."
+    description = "使用语义相似度在知识库中搜索相似内容"
 
     def __init__(self, persist_path: str = "./data/vector_db"):
         self._client = None
@@ -28,9 +28,9 @@ class VectorSearchTool:
             self._client = chromadb.PersistentClient(path=self._persist_path)
             self._collection = self._client.get_or_create_collection("content_vectors")
         except ImportError:
-            logger.warning("chromadb not installed, VectorSearch unavailable")
+            logger.warning("chromadb 未安装，VectorSearch 不可用")
         except Exception as e:
-            logger.warning(f"Failed to init ChromaDB: {e}")
+            logger.warning(f"ChromaDB 初始化失败：{e}")
 
     def _ensure_embeddings(self):
         if self._embeddings is not None:
@@ -41,7 +41,7 @@ class VectorSearchTool:
                 from langchain_openai import OpenAIEmbeddings
                 self._embeddings = OpenAIEmbeddings(openai_api_key=api_key)
             except Exception as e:
-                logger.warning(f"Failed to init embeddings: {e}")
+                logger.warning(f"嵌入模型初始化失败：{e}")
 
     def add_documents(self, texts: list[str], metadatas: Optional[list[dict]] = None, ids: Optional[list[str]] = None):
         """向向量库添加文档"""
@@ -59,7 +59,7 @@ class VectorSearchTool:
             )
             return True
         except Exception as e:
-            logger.warning(f"VectorSearch add failed: {e}")
+            logger.warning(f"VectorSearch 添加失败：{e}")
             return False
 
     def search(self, query: str, top_k: int = 5) -> dict:
@@ -83,9 +83,9 @@ class VectorSearchTool:
 
             return {"query": query, "matches": matches, "total": len(matches)}
         except Exception as e:
-            logger.warning(f"VectorSearch query failed: {e}")
+            logger.warning(f"VectorSearch 查询失败：{e}")
             return {"query": query, "matches": [], "total": 0, "error": str(e)}
 
 
-# Singleton
+# 单例
 vector_search = VectorSearchTool()

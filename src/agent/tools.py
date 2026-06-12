@@ -1,4 +1,4 @@
-"""Agent Tool 抽象层 — AgentTool / AgentToolMeta
+"""Agent 工具抽象层 — AgentTool / AgentToolMeta
 
 MCP Client 通过 AgentTool.from_langchain() 将 LangChain BaseTool 适配为内部工具体系，
 使 MCP 工具可以无缝注册到 ToolRegistry 并按 category/agent_type 过滤。
@@ -29,14 +29,14 @@ class AgentToolMeta:
 class AgentTool:
     """LangChain BaseTool 的内部包装器
 
-    Attributes:
+    属性:
         name: 工具名（与底层 BaseTool.name 一致）
         description: 工具描述
         meta: 工具元信息（category / agent_types / builtin / visible）
         _tool: 底层 LangChain BaseTool
     """
 
-    # 注册表：name -> AgentTool 实例
+    # 注册表: name -> AgentTool 实例
     _registry: ClassVar[dict[str, "AgentTool"]] = {}
 
     def __init__(
@@ -52,14 +52,14 @@ class AgentTool:
         self._func: Callable[..., Any] | None = func
         AgentTool._registry[self.name] = self
 
-    # ── LangChain BaseTool 代理 ──────────────────────
+    # ── LangChain BaseTool 代理方法 ────────────────────
 
     @property
     def args_schema(self):
         return self._tool.args_schema
 
     def invoke(self, input: Any, **kwargs) -> Any:
-        """Invoke tool synchronously with metrics."""
+        """同步调用工具并记录指标"""
         start = time.perf_counter()
         try:
             result = self._tool.invoke(input, **kwargs)
@@ -70,7 +70,7 @@ class AgentTool:
             raise
 
     async def ainvoke(self, input: Any, **kwargs) -> Any:
-        """Invoke tool asynchronously with metrics."""
+        """异步调用工具并记录指标"""
         start = time.perf_counter()
         try:
             result = await self._tool.ainvoke(input, **kwargs)
@@ -95,7 +95,7 @@ class AgentTool:
             return cls._registry[tool.name]
         return cls(tool=tool, meta=meta)
 
-    # ── 工具注册表 ────────────────────────────────────
+    # ── 工具注册表管理 ──────────────────────────────────
 
     @classmethod
     def get_registry(cls) -> dict[str, "AgentTool"]:

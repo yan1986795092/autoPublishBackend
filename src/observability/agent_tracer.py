@@ -1,10 +1,10 @@
-"""Lightweight agent tracing — OTel-compatible interface → UnifiedEsWriter
+"""轻量级 Agent 追踪 —— 符合 OTel 接口 → UnifiedEsWriter
 
-Replaces the OTel tracer's no-op spans with real trace writes to ES.
-Provides AgentTracer / AgentSpan that mirror OTel's start_as_current_span
-API but write directly to UnifiedEsWriter, avoiding the OTel exporter overhead.
+替代 OTel tracer 的 no-op span，将真实的 trace 写入 ES。
+提供 AgentTracer / AgentSpan，镜像 OTel 的 start_as_current_span
+API，但直接写入 UnifiedEsWriter，避免 OTel exporter 的开销。
 
-Usage (swap in nodes.py / orchestrator.py):
+用法（在 nodes.py / orchestrator.py 中替换）：
     from src.observability.agent_tracer import get_agent_tracer
     tracer = get_agent_tracer()
     with tracer.start_as_current_span("agent.classify", ...) as span:
@@ -24,9 +24,9 @@ from src.logging_shared.unified_writer import UnifiedEsWriter
 
 @dataclass
 class AgentSpan:
-    """Lightweight span that writes to UnifiedEsWriter on exit.
+    """轻量级 span，退出时写入 UnifiedEsWriter。
 
-    Mirrors OTel Span interface: add_event, set_attribute, set_status, record_exception.
+    镜像 OTel Span 接口：add_event, set_attribute, set_status, record_exception。
     """
 
     name: str
@@ -55,7 +55,7 @@ class AgentSpan:
         self.attributes[key] = value
 
     def set_status(self, status: Any) -> None:
-        """Accepts OTel Status objects or plain strings."""
+        """接受 OTel Status 对象或普通字符串。"""
         if hasattr(status, 'status_code'):
             self.status = status.status_code.name if hasattr(status.status_code, 'name') else str(status.status_code)
         else:
@@ -102,9 +102,9 @@ class AgentSpan:
 
 
 class AgentTracer:
-    """Lightweight tracer producing AgentSpan → UnifiedEsWriter.
+    """轻量级 tracer，生成 AgentSpan → UnifiedEsWriter。
 
-    Interface-compatible with OTel Tracer.start_as_current_span().
+    接口兼容 OTel Tracer.start_as_current_span()。
     """
     def __init__(self, trace_id: str = ""):
         self._trace_id = trace_id
@@ -137,7 +137,7 @@ _tracer_cache: dict[str, AgentTracer] = {}
 
 
 def get_agent_tracer(trace_id: str = "") -> AgentTracer:
-    """Get or create an AgentTracer."""
+    """获取或创建一个 AgentTracer。"""
     key = trace_id or "_default"
     if key not in _tracer_cache:
         _tracer_cache[key] = AgentTracer(trace_id=trace_id)

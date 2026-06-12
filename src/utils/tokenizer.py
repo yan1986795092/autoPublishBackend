@@ -24,13 +24,13 @@ def _get_tiktoken_encoder(encoding_name: str = "cl100k_base"):
     try:
         import tiktoken
         _tiktoken_encoder = tiktoken.get_encoding(encoding_name)
-        logger.debug("tiktoken encoder loaded: %s", encoding_name)
+        logger.debug("tiktoken 编码器已加载：%s", encoding_name)
         return _tiktoken_encoder
     except ImportError:
-        logger.warning("tiktoken not installed, falling back to char/4 estimation")
+        logger.warning("tiktoken 未安装，降级为字符/4 估算")
         return None
     except Exception as e:
-        logger.warning("tiktoken init failed (%s), falling back to char/4 estimation", e)
+        logger.warning("tiktoken 初始化失败（%s），降级为字符/4 估算", e)
         return None
 
 
@@ -50,14 +50,14 @@ def estimate_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
         try:
             return len(encoder.encode(text))
         except Exception as e:
-            logger.warning("tiktoken encode failed (%s), using char fallback", e)
+            logger.warning("tiktoken 编码失败（%s），使用字符降级", e)
 
     # 降级估算：混合中英文内容
     chinese_chars = sum(1 for c in text if "\u4e00" <= c <= "\u9fff")
     total_chars = len(text)
-    # tiktoken 对中文按 UTF-8 编码，约 2-3 个字节/token
-    # 中文约 1 token = 1.5-2 字符；英文约 1 token = 4 字符
-    # 加权平均：chinese * 2 + (total - chinese) * 0.25
+    # tiktoken 对中文按 UTF-8 编码，约 2-3 个字节/令牌
+    # 中文约 1 令牌 = 1.5-2 字符；英文约 1 令牌 = 4 字符
+    # 加权平均：中文 * 2 + (总数 - 中文) * 0.25
     if chinese_chars > 0:
         return int(chinese_chars / 1.5 + (total_chars - chinese_chars) / 4)
     return int(total_chars / 4)

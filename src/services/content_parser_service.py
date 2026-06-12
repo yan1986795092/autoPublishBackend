@@ -33,7 +33,7 @@ class ContentParserService:
         if title_match:
             title = self._clean_text(title_match.group(1))
 
-        # 提取 meta description
+        # 提取 meta 描述
         description = ""
         desc_match = re.search(
             r'<meta[^>]+name=["\']description["\'][^>]+content=["\']([^"\']*)["\']',
@@ -73,7 +73,7 @@ class ContentParserService:
 
     def _extract_body_text(self, html: str) -> str:
         """提取可读正文（移除 script/style 标签后提取文本）"""
-        # 移除 script, style, nav, footer 等
+        # 移除 script、style、nav、footer 等标签
         for tag in ['script', 'style', 'nav', 'footer', 'header', 'noscript']:
             html = re.sub(rf'<{tag}[^>]*>.*?</{tag}>', '', html, flags=re.IGNORECASE | re.DOTALL)
 

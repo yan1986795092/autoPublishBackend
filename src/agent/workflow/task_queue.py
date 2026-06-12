@@ -40,6 +40,7 @@ class AsyncTask:
     retry_count: int = 0
 
     def to_dict(self) -> dict:
+        """转换为字典格式"""
         d: dict[str, Any] = {
             "id": self.id,
             "user_id": self.user_id,
@@ -75,7 +76,7 @@ class AsyncTask:
 class StreamEvent:
     """流式事件结构"""
     task_id: str
-    event_type: str       # plan | thinking_step | progress | result | error | llm_chunk
+    event_type: str       # 事件类型: plan | thinking_step | progress | result | error | llm_chunk
     data: dict
 
 EventCallback = Callable[[StreamEvent], Awaitable[None]]
@@ -109,10 +110,10 @@ class EventBus:
                     await cb(event)
                 except Exception as e:
                     logger.warning(
-                        "EventBus subscriber failed",
+                        "EventBus 订阅者执行失败",
                         _type="system",
                         event_name="subscriber_error",
-                        message=f"EventBus subscriber error for task {event.task_id[:8]}: {e}",
+                        message=f"EventBus 订阅者错误，任务 {event.task_id[:8]}: {e}",
                         status="error",
                     )
         for cb in self._all_subscribers:
@@ -120,10 +121,10 @@ class EventBus:
                 await cb(event)
             except Exception as e:
                 logger.warning(
-                    "EventBus global subscriber failed",
+                    "EventBus 全局订阅者执行失败",
                     _type="system",
                     event_name="subscriber_error",
-                    message=f"EventBus global subscriber error: {e}",
+                    message=f"EventBus 全局订阅者错误: {e}",
                     status="error",
                 )
 
@@ -154,7 +155,7 @@ class TaskQueue:
             "任务已入队",
             _type="system",
             event_name="task_enqueued",
-            message=f"Task {task.id[:8]} enqueued for user {user_id[:8]}",
+            message=f"任务 {task.id[:8]} 已入队，用户 {user_id[:8]}",
             status="pending",
         )
         return task
@@ -182,7 +183,7 @@ class TaskQueue:
                 "任务已完成",
                 _type="system",
                 event_name="task_completed",
-                message=f"Task {task_id[:8]} completed",
+                message=f"任务 {task_id[:8]} 已完成",
                 status="ok",
             )
             asyncio.create_task(self._publish_event(StreamEvent(
@@ -202,7 +203,7 @@ class TaskQueue:
                 "任务失败",
                 _type="system",
                 event_name="task_failed",
-                message=f"Task {task_id[:8]} failed: {error[:80]}",
+                message=f"任务 {task_id[:8]} 失败: {error[:80]}",
                 status="failed",
             )
             asyncio.create_task(self._publish_event(StreamEvent(
@@ -221,7 +222,7 @@ class TaskQueue:
                 "任务已取消",
                 _type="system",
                 event_name="task_cancelled",
-                message=f"Task {task_id[:8]} cancelled",
+                message=f"任务 {task_id[:8]} 已取消",
                 status="stopped",
             )
             return True
@@ -253,7 +254,7 @@ class TaskQueue:
                 "事件发布失败",
                 _type="system",
                 event_name="publish_failed",
-                message=f"publish_event failed: {e}",
+                message=f"事件发布失败: {e}",
                 status="error",
             )
 
@@ -268,7 +269,7 @@ class TaskQueue:
         task = self._tasks.get(task_id)
         if task:
             task.state = TaskState.FAILED
-            task.error = f"DLQ: {reason or 'All retries exhausted'}"
+            task.error = f"DLQ: {reason or '所有重试已耗尽'}"
             task.completed_at = datetime.utcnow().isoformat()
             self._dead_letter_queue[task_id] = task
             self._notify_progress(task_id)
@@ -276,7 +277,7 @@ class TaskQueue:
                 "任务进入死信队列",
                 _type="system",
                 event_name="dlq",
-                message=f"Task {task_id[:8]} sent to DLQ: {reason}",
+                message=f"任务 {task_id[:8]} 已发送至死信队列: {reason}",
                 status="failed",
             )
 

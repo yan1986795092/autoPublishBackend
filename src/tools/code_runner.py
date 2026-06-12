@@ -24,12 +24,12 @@ class CodeRunner:
     """安全的代码沙箱执行器
 
     支持两种模式:
-    - subprocess: 本地子进程（默认），通过 timeout 限制
+    - subprocess: 本地子进程（默认），通过超时限制
     - docker: Docker 容器隔离（需 Docker 可用）
     """
 
-    DEFAULT_TIMEOUT = 30  # seconds
-    MAX_OUTPUT_BYTES = 64 * 1024  # 64KB output limit
+    DEFAULT_TIMEOUT = 30  # 秒
+    MAX_OUTPUT_BYTES = 64 * 1024  # 64KB 输出限制
 
     def __init__(self, mode: str = "subprocess", timeout: int = DEFAULT_TIMEOUT):
         self.mode = mode
@@ -105,7 +105,7 @@ class CodeRunner:
             elapsed = (time.time() - start) * 1000
             return CodeRunResult(
                 success=False,
-                error=f"执行超时 ({self.timeout}s)",
+                error=f"执行超时 ({self.timeout}秒)",
                 execution_time_ms=round(elapsed, 1),
             )
         except FileNotFoundError:
@@ -153,7 +153,7 @@ class CodeRunner:
             elapsed = (time.time() - start) * 1000
             return CodeRunResult(
                 success=False,
-                error=f"执行超时 ({self.timeout}s)",
+                error=f"执行超时 ({self.timeout}秒)",
                 execution_time_ms=round(elapsed, 1),
             )
         except Exception as e:

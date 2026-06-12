@@ -75,7 +75,7 @@ class MemoryManager:
         if agent_type not in AGENT_MEMORY_ENABLED:
             return ""
 
-        parts: list[tuple[str, str, int]] = []  # (tag, content, priority)
+        parts: list[tuple[str, str, int]] = []  # (标签, 内容, 优先级)
 
         # 1. 语义记忆 — 向量检索
         query = self._build_search_query(agent_type, task_input)
@@ -116,7 +116,7 @@ class MemoryManager:
         result_parts = []
         total_chars = 0
         for _, content, _ in parts:
-            if total_chars + len(content) > max_tokens * 4:  # 1 token ≈ 4 chars
+            if total_chars + len(content) > max_tokens * 4:  # 1 token ≈ 4 字符
                 break
             result_parts.append(content)
             total_chars += len(content)
@@ -124,7 +124,7 @@ class MemoryManager:
         context = "\n\n".join(result_parts)
         if context:
             logger.info(
-                "MemoryManager: 为 %s 注入记忆上下文 (%d chars, 来源: %s)",
+                "MemoryManager: 为 %s 注入记忆上下文 (%d 字符, 来源: %s)",
                 agent_type, total_chars,
                 ", ".join(p[0] for p in parts),
             )

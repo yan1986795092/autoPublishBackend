@@ -1,4 +1,4 @@
-"""PlatformRegistry — 平台元数据中央注册表
+"""平台注册表 — 平台元数据中央注册表
 
 DB 的 `Platform` 表是平台元数据的来源（code、name、category）。
 本模块提供：

@@ -1,4 +1,4 @@
-"""FastAPI 中间件: per-request access-log + trace span.
+"""FastAPI 中间件: per-request access-log + trace span。
 
 每个 HTTP 请求:
 1. 生成/提取 trace_id，绑定到 structlog context
@@ -43,7 +43,7 @@ def _build_trace_span(
     service_name: str,
     error_info: str = "",
 ) -> dict:
-    """Construct a trace span dict (Jaeger-compatible format) for UnifiedEsWriter."""
+    """构造一个 trace span 字典（Jaeger 兼容格式），用于 UnifiedEsWriter。"""
     span: dict = {
         "traceID": trace_id,
         "spanID": span_id,
@@ -69,7 +69,7 @@ def _build_trace_span(
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    """FastAPI 中间件: 单行 access-log + trace span 写入 UnifiedEsWriter."""
+    """FastAPI 中间件: 单行 access-log + trace span 写入 UnifiedEsWriter。"""
 
     def __init__(self, app: ASGIApp, service_name: str):
         super().__init__(app)
@@ -112,7 +112,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             elapsed_us = int((time.perf_counter_ns() - start_ns) / 1000)
             status_code = response.status_code
 
-            # Single access-log line (replaces http_request_start + http_request_end)
+            # 单行 access-log（替代 http_request_start + http_request_end）
             self.logger.info(
                 f"{method} {path} {status_code} {self._fmt_ms(elapsed_ms)}",
                 _type="http",
@@ -123,7 +123,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 trace_id=trace_id,
             )
 
-            # Write Jaeger span via UnifiedEsWriter
+            # 通过 UnifiedEsWriter 写入 Jaeger span
             span = _build_trace_span(
                 method=method, path=path, url=str(request.url),
                 trace_id=trace_id, span_id=span_id,

@@ -1,7 +1,7 @@
-"""Observability module: lightweight setup.
+"""可观测性模块：轻量级设置。
 
-HTTP trace spans are written by LoggingMiddleware directly to ES traces-*
-via UnifiedEsWriter. No OTel SDK is used.
+HTTP 追踪 span 由 LoggingMiddleware 通过 UnifiedEsWriter 直接写入 ES traces-* 索引。
+不使用 OTel SDK。
 """
 
 from .tracing import (

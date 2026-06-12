@@ -1,4 +1,4 @@
-"""Structured memory backends — entity, plot, project index, creative summary."""
+"""结构化记忆后端 — 实体、情节、项目索引、创作摘要。"""
 from __future__ import annotations
 
 import logging
@@ -11,14 +11,14 @@ logger = logging.getLogger(__name__)
 
 
 # ──────────────────────────────────────────
-# EntityMemory
+# EntityMemory（实体记忆）
 # ──────────────────────────────────────────
 
 
 class EntityMemory:
     """
-    Stores character, scene, and organization entities.
-    Supports exact lookup by entity_id and project_id.
+    存储角色、场景和组织实体。
+    支持通过 entity_id 和 project_id 精确查找。
     """
 
     def __init__(self):
@@ -30,7 +30,7 @@ class EntityMemory:
             return
         self._by_entity_id[entry.entity_id] = entry
         self._by_project_id.setdefault(entry.project_id or "", []).append(entry.entity_id)
-        logger.debug(f"EntityMemory: stored {entry.entity_id}")
+        logger.debug(f"EntityMemory: 已存储 {entry.entity_id}")
 
     def retrieve_by_entity_id(self, entity_id: str) -> List[StructuredMemoryEntry]:
         entry = self._by_entity_id.get(entity_id)
@@ -60,13 +60,13 @@ class EntityMemory:
 
 
 # ──────────────────────────────────────────
-# PlotMemory
+# PlotMemory（情节记忆）
 # ──────────────────────────────────────────
 
 
 class PlotMemory:
     """
-    Stores plot events and turning points in chronological order.
+    按时间顺序存储情节事件和转折点。
     """
 
     def __init__(self):
@@ -77,13 +77,13 @@ class PlotMemory:
             return
         project_id = entry.project_id or ""
         self._by_project_id.setdefault(project_id, []).append(entry)
-        logger.debug(f"PlotMemory: stored event for project {project_id}")
+        logger.debug(f"PlotMemory: 已为项目 {project_id} 存储事件")
 
     def retrieve_by_project(self, project_id: str) -> List[StructuredMemoryEntry]:
         return self._by_project_id.get(project_id, [])
 
     def retrieve_timeline(self, project_id: str) -> List[Dict[str, Any]]:
-        """Return plot events as a timeline dict for context injection."""
+        """将情节事件以时间线字典形式返回，用于上下文注入。"""
         events = self.retrieve_by_project(project_id)
         return [
             {
@@ -96,13 +96,13 @@ class PlotMemory:
 
 
 # ──────────────────────────────────────────
-# ProjectIndex
+# ProjectIndex（项目索引）
 # ──────────────────────────────────────────
 
 
 class ProjectIndex:
     """
-    Registry of all projects with their metadata.
+    所有项目的注册表，包含其元数据。
     """
 
     def __init__(self):
@@ -122,7 +122,7 @@ class ProjectIndex:
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat(),
         }
-        logger.info(f"ProjectIndex: registered {project_id} ({title})")
+        logger.info(f"ProjectIndex: 已注册 {project_id} ({title})")
 
     def get(self, project_id: str) -> Optional[Dict[str, Any]]:
         return self._projects.get(project_id)
@@ -149,13 +149,13 @@ class ProjectIndex:
 
 
 # ──────────────────────────────────────────
-# CreativeSummaryMemory
+# CreativeSummaryMemory（创作摘要记忆）
 # ──────────────────────────────────────────
 
 
 class CreativeSummaryMemory:
     """
-    Stores per-session creative summaries (intent + output + style template).
+    存储每次会话的创作摘要（意图 + 输出 + 风格模板）。
     """
 
     def __init__(self):
@@ -176,7 +176,7 @@ class CreativeSummaryMemory:
             "created_at": datetime.now().isoformat(),
         }
         self._by_project.setdefault(project_id, []).append(entry)
-        logger.debug(f"CreativeSummaryMemory: stored summary for {project_id}")
+        logger.debug(f"CreativeSummaryMemory: 已为 {project_id} 存储摘要")
 
     def get_latest(self, project_id: str) -> Optional[Dict[str, Any]]:
         entries = self._by_project.get(project_id, [])
@@ -186,7 +186,7 @@ class CreativeSummaryMemory:
         return self._by_project.get(project_id, [])
 
     def to_structured_entries(self) -> List[StructuredMemoryEntry]:
-        """Convert all summaries to StructuredMemoryEntry format."""
+        """将所有摘要转换为 StructuredMemoryEntry 格式。"""
         entries = []
         for project_id, summaries in self._by_project.items():
             for s in summaries:

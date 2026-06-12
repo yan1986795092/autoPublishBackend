@@ -1,4 +1,4 @@
-"""Elasticsearch client for querying traces, structured logs, and agent events."""
+"""用于查询 trace、结构化日志和 Agent 事件的 Elasticsearch 客户端。"""
 
 from __future__ import annotations
 
@@ -8,7 +8,7 @@ from typing import Any, Optional
 
 logger = logging.getLogger(__name__)
 
-_es_client: Optional[Any] = None  # AsyncElasticsearch (lazy import)
+_es_client: Optional[Any] = None  # AsyncElasticsearch（延迟导入）
 
 
 def get_es_url() -> str:
@@ -19,10 +19,10 @@ def get_es_url() -> str:
 
 
 async def get_es() -> Optional[Any]:
-    """Get or create the Elasticsearch client."""
+    """获取或创建 Elasticsearch 客户端。"""
     global _es_client
     if _es_client is None:
-        from elasticsearch import AsyncElasticsearch  # lazy import
+        from elasticsearch import AsyncElasticsearch  # 延迟导入
         url = get_es_url()
         try:
             _es_client = AsyncElasticsearch(
@@ -32,9 +32,9 @@ async def get_es() -> Optional[Any]:
                 max_retries=3,
             )
             info = await _es_client.info()
-            logger.info("Connected to Elasticsearch %s", info["version"]["number"])
+            logger.info("已连接到 Elasticsearch %s", info["version"]["number"])
         except Exception as e:
-            logger.warning("Failed to connect to Elasticsearch at %s: %s", url, e)
+            logger.warning("无法连接到 Elasticsearch %s：%s", url, e)
             return None
     return _es_client
 
@@ -46,12 +46,12 @@ async def close_es() -> None:
         _es_client = None
 
 
-# ── Index patterns ────────────────────────────────────────────────────────────
+# ── 索引模式 ────────────────────────────────────────────────────────────
 _TRACE_INDEX = "traces-{date}"
 _TRACE_INDEX_PATTERN = "traces-*"
 _AGENT_EVENTS_INDEX_PATTERN = "agent-events-*"
 
-# Trace field mappings from Jaeger ES schema
+# 来自 Jaeger ES schema 的 Trace 字段映射
 _TRACE_ID = "traceID"
 _SPAN_ID = "spanID"
 _PARENT_SPAN_ID = "parentSpanID"
@@ -62,8 +62,8 @@ _PARENT_SPAN_ID_HR = "parentSpanId"
 _OPERATION_NAME = "operationName"
 _START_TIME_MS = "startTimeMillis"
 _START_TIME = "startTime"
-_DURATION_MS = "durationMicros"   # microseconds in Jaeger ES schema
-_DURATION_MS_HR = "duration"      # milliseconds in OTel format
+_DURATION_MS = "durationMicros"   # Jaeger ES schema 中以微秒为单位
+_DURATION_MS_HR = "duration"      # OTel 格式中以毫秒为单位
 _SERVICE_NAME = "process.serviceName"
 _SERVICE_NAME_ROOT = "serviceName"
 _SERVICE_NAME_DOTTED = "service.name"
@@ -78,12 +78,12 @@ _ERROR = "error"
 
 
 def _keyword_field(field: str) -> str:
-    """Return the keyword subfield commonly used for exact-match aggregations."""
+    """返回常用于精确匹配聚合的关键词子字段。"""
     return f"{field}.keyword"
 
 
 def _extract_tag_value(tag: dict) -> Any:
-    """Extract Jaeger/OTel tag values across possible serialized shapes."""
+    """提取跨可能序列化形状的 Jaeger/OTel tag 值。"""
     if not isinstance(tag, dict):
         return None
     for key in ("value", "vStr", "vInt64", "vInt", "vFloat64", "vFloat", "vBool", "vBinary"):
@@ -93,7 +93,7 @@ def _extract_tag_value(tag: dict) -> Any:
 
 
 def _normalize_tags(tags_list: Any) -> dict[str, Any]:
-    """Flatten Jaeger tag arrays into a simple key/value dict."""
+    """将 Jaeger tag 数组展平为简单的键/值字典。"""
     if not isinstance(tags_list, list):
         return {}
     return {
@@ -104,7 +104,7 @@ def _normalize_tags(tags_list: Any) -> dict[str, Any]:
 
 
 def _extract_service_name(src: dict, tags: dict[str, Any]) -> str:
-    """Resolve service name across Jaeger and OTel span document layouts."""
+    """跨 Jaeger 和 OTel span 文档布局解析服务名称。"""
     process = src.get(_PROCESS, {})
     if isinstance(process, dict):
         service = (
@@ -125,7 +125,7 @@ def _extract_service_name(src: dict, tags: dict[str, Any]) -> str:
 
 
 def _service_filter_clause(service: str) -> dict:
-    """Match service name across trace schemas used by Jaeger/OTel exports."""
+    """跨 Jaeger/OTel 导出使用的 trace schema 匹配服务名称。"""
     return {
         "bool": {
             "should": [
@@ -142,7 +142,7 @@ def _service_filter_clause(service: str) -> dict:
 
 
 def _safe_trace_sort(order: str) -> list[dict]:
-    """Sort traces without failing on mixed index mappings."""
+    """在不因混合索引映射而失败的情况下对 trace 排序。"""
     return [
         {
             _START_TIME_MS: {
@@ -173,11 +173,11 @@ _TAG_KEYS = [
 
 
 def _normalize_span(hit: dict) -> dict:
-    """Normalize Jaeger ES span document to a consistent format."""
+    """将 Jaeger ES span 文档规范化为一致的格式。"""
     src = hit["_source"]
     fields = src.get("fields", {})
 
-    # Jaeger stores spanID/traceID in "fields" and "tag" format
+    # Jaeger 将 spanID/traceID 存储在 "fields" 和 "tag" 格式中
     span_id = (
         fields.get(_SPAN_ID, [None])[0]
         if isinstance(fields.get(_SPAN_ID), list) else fields.get(_SPAN_ID)
@@ -188,31 +188,31 @@ def _normalize_span(hit: dict) -> dict:
         if isinstance(fields.get(_TRACE_ID), list) else fields.get(_TRACE_ID)
     ) or src.get(_TRACE_ID)
 
-    # Start time (Jaeger stores microseconds)
+    # 开始时间（Jaeger 存储微秒）
     start_us = src.get(_START_TIME_MS) or int(src.get(_START_TIME, 0))
     start_ms = start_us // 1000 if start_us > 1e15 else start_us
 
-    # Duration (Jaeger stores microseconds, normalize to ms)
+    # 持续时间（Jaeger 存储微秒，标准化为毫秒）
     dur_us = src.get(_DURATION_MS, 0)
     dur_ms = dur_us / 1000 if dur_us else 0
 
-    # Tags → flat dict
+    # Tags → 扁平字典
     tags_list = src.get(_TAGS, [])
     tags = _normalize_tags(tags_list)
 
-    # Service name
+    # 服务名称
     process = src.get(_PROCESS, {})
     service = _extract_service_name(src, tags)
 
-    # Status
+    # 状态
     status_obj = src.get("status", {})
     status_code = status_obj.get("code", 0)
     is_error = status_code == 2 or tags.get(_ERROR) is not None
 
-    # Log events
+    # 日志事件
     logs = src.get(_LOGS, [])
 
-    # References (parent-child)
+    # 引用（父子关系）
     refs = src.get(_REFERENCES, [])
 
     return {
@@ -246,12 +246,12 @@ def _normalize_span(hit: dict) -> dict:
 
 
 def _get_parent_span_id(src: dict) -> str:
-    """Extract parent span ID from span references."""
+    """从 span 引用中提取父 span ID。"""
     refs = src.get(_REFERENCES, [])
     for r in refs:
         if r.get("refType") == "CHILD_OF":
             return r.get("spanID", "")
-    # Also check tags for parentSpanID
+    # 同时检查 tags 中的 parentSpanID
     for t in src.get(_TAGS, []):
         if t.get("key") == "parentSpanId":
             return str(t.get("value", ""))
@@ -268,7 +268,7 @@ def _ms_to_iso(ms: int) -> str:
         return ""
 
 
-# ── Query builders ───────────────────────────────────────────────────────────
+# ── 查询构建器 ──────────────────────────────────────────────────────────
 
 async def search_spans(
     service: str | None = None,
@@ -283,32 +283,32 @@ async def search_spans(
     size: int = 50,
     from_: int = 0,
 ) -> dict:
-    """Search spans in Elasticsearch (Jaeger index).
+    """在 Elasticsearch 中搜索 span（Jaeger 索引）。
 
     Args:
-        service: Filter by service name
-        operation: Filter by operation (span) name
-        trace_id: Filter by trace ID
-        span_id: Filter by span ID
-        keyword: Full-text search in tag values
-        span_type: Filter by span type (e.g., agent_think, tool_call, model_request)
+        service: 按服务名称过滤
+        operation: 按操作（span）名称过滤
+        trace_id: 按 trace ID 过滤
+        span_id: 按 span ID 过滤
+        keyword: 在 tag 值中执行全文搜索
+        span_type: 按 span 类型过滤（例如 agent_think, tool_call, model_request）
         status: "error" | "ok" | "all"
-        start_time_ms: Start of time range (Unix ms)
-        end_time_ms: End of time range (Unix ms)
-        size: Max results
-        from_: Pagination offset
+        start_time_ms: 时间范围开始（Unix 毫秒）
+        end_time_ms: 时间范围结束（Unix 毫秒）
+        size: 最大结果数
+        from_: 分页偏移量
 
     Returns:
         {"total": int, "hits": [normalized_span, ...]}
     """
     es = await get_es()
     if not es:
-        return {"total": 0, "hits": [], "error": "Elasticsearch not available"}
+        return {"total": 0, "hits": [], "error": "Elasticsearch 不可用"}
 
     must_clauses = []
     filter_clauses = []
 
-    # Time range (required for performance)
+    # 时间范围（为性能考虑，建议提供）
     if start_time_ms or end_time_ms:
         range_query = {}
         if start_time_ms:
@@ -370,12 +370,12 @@ async def search_spans(
         return {"total": total, "hits": hits}
 
     except Exception as e:
-        logger.error("Elasticsearch search failed: %s", e)
+        logger.error("Elasticsearch 搜索失败：%s", e)
         return {"total": 0, "hits": [], "error": str(e)}
 
 
 async def get_trace_spans(trace_id: str) -> list[dict]:
-    """Get all spans for a given trace ID."""
+    """获取指定 trace ID 的所有 span。"""
     es = await get_es()
     if not es:
         return []
@@ -391,17 +391,17 @@ async def get_trace_spans(trace_id: str) -> list[dict]:
         return [_normalize_span(hit) for hit in resp["hits"]["hits"]]
 
     except Exception as e:
-        logger.error("Failed to get trace spans for %s: %s", trace_id, e)
+        logger.error("获取 trace %s 的 span 失败：%s", trace_id, e)
         return []
 
 
 async def get_trace_by_id(trace_id: str) -> dict | None:
-    """Get a complete trace with all spans, organized."""
+    """获取完整的 trace，包含所有已组织的 span。"""
     spans = await get_trace_spans(trace_id)
     if not spans:
         return None
 
-    # Build tree structure
+    # 构建树结构
     span_map = {s["span_id"]: s for s in spans}
     roots = []
 
@@ -415,13 +415,13 @@ async def get_trace_by_id(trace_id: str) -> dict | None:
         else:
             roots.append(span)
 
-    # Compute relative timestamps
+    # 计算相对时间戳
     if roots:
         min_start = min(_parse_ts(s["start_time"]) for s in spans if s["start_time"])
         for span in spans:
             span["relative_start_ms"] = max(0, _parse_ts(span["start_time"]) - min_start)
 
-    # Trace-level stats
+    # Trace 级别统计
     start_times = [_parse_ts(s["start_time"]) for s in spans if s["start_time"]]
     end_times = [(_parse_ts(s["start_time"]) + s["duration_us"] / 1000) for s in spans if s["start_time"]]
     total_duration = max(end_times) - min(start_times) if start_times and end_times else 0
@@ -448,14 +448,14 @@ async def search_logs(
     size: int = 100,
     from_: int = 0,
 ) -> dict:
-    """Search structured logs from stdout/stderr forwarded via Filebeat/OTel.
+    """搜索通过 Filebeat/OTel 转发的 stdout/stderr 结构化日志。
 
-    Note: Currently searches Jaeger spans (which contain log events).
-    For full log search, route structlog JSON to a dedicated "logs-*" ES index.
+    注意：当前搜索 Jaeger span（其中包含日志事件）。
+    如需完整的日志搜索，可将 structlog JSON 路由到专用的 "logs-*" ES 索引。
     """
     es = await get_es()
     if not es:
-        return {"total": 0, "hits": [], "error": "Elasticsearch not available"}
+        return {"total": 0, "hits": [], "error": "Elasticsearch 不可用"}
 
     must_clauses = []
     filter_clauses = []
@@ -491,7 +491,7 @@ async def search_logs(
     }
 
     try:
-        # Search in traces (which have log events) and a logs index
+        # 在 trace（包含日志事件）和 logs 索引中搜索
         resp = await es.search(
             index="logs-*,traces-*",
             query=query,
@@ -515,7 +515,7 @@ async def search_logs(
         return {"total": total, "hits": hits}
 
     except Exception as e:
-        logger.error("Elasticsearch logs search failed: %s", e)
+        logger.error("Elasticsearch 日志搜索失败：%s", e)
         return {"total": 0, "hits": [], "error": str(e)}
 
 
@@ -562,7 +562,7 @@ def _normalize_agent_event(hit: dict) -> dict:
 
 
 def _agent_event_term_clause(field: str, value: str) -> dict:
-    """Match agent-event exact fields with or without keyword subfields."""
+    """匹配 agent 事件的精确字段，带或不带 keyword 子字段。"""
     return {
         "bool": {
             "should": [
@@ -575,7 +575,7 @@ def _agent_event_term_clause(field: str, value: str) -> dict:
 
 
 def _safe_agent_event_sort() -> list[dict]:
-    """Sort agent events across layouts that may use timestamp or @timestamp."""
+    """在可能使用 timestamp 或 @timestamp 的布局中对 agent 事件排序。"""
     return [
         {"@timestamp": {"order": "desc", "unmapped_type": "date", "missing": "_last"}},
         {"timestamp": {"order": "desc", "unmapped_type": "date", "missing": "_last"}},
@@ -583,7 +583,7 @@ def _safe_agent_event_sort() -> list[dict]:
 
 
 def _agent_event_time_filter_clause(start_time_ms: int | None, end_time_ms: int | None) -> dict | None:
-    """Match agent event time range across possible timestamp fields."""
+    """跨可能的 timestamp 字段匹配 agent 事件的时间范围。"""
     if not start_time_ms and not end_time_ms:
         return None
 
@@ -619,7 +619,7 @@ async def search_agent_events(
 ) -> dict:
     es = await get_es()
     if not es:
-        return {"total": 0, "hits": [], "error": "Elasticsearch not available"}
+        return {"total": 0, "hits": [], "error": "Elasticsearch 不可用"}
 
     must_clauses = []
     filter_clauses = []
@@ -680,18 +680,18 @@ async def search_agent_events(
         total = total_obj.get("value", 0) if isinstance(total_obj, dict) else int(total_obj)
         return {"total": total, "hits": hits}
     except Exception as e:
-        logger.error("Elasticsearch agent event search failed: %s", e)
+        logger.error("Elasticsearch agent 事件搜索失败：%s", e)
         return {"total": 0, "hits": [], "error": str(e)}
 
 
-# ── Aggregation helpers ────────────────────────────────────────────────────────
+# ── 聚合辅助函数 ────────────────────────────────────────────────────────
 
 async def get_trace_stats(
     service: str | None = None,
     start_time_ms: int | None = None,
     end_time_ms: int | None = None,
 ) -> dict:
-    """Get aggregated stats for traces."""
+    """获取 trace 的聚合统计信息。"""
     es = await get_es()
     default_stats = {
         "total_traces": 0,
@@ -775,7 +775,7 @@ async def get_trace_stats(
         }
 
     except Exception as e:
-        logger.warning("Elasticsearch stats aggregation degraded, falling back to totals only: %s", e)
+        logger.warning("Elasticsearch 统计聚合降级，回退到仅总数：%s", e)
         try:
             resp = await es.search(
                 index=_TRACE_INDEX_PATTERN,
@@ -791,5 +791,5 @@ async def get_trace_stats(
                 "total_spans": total_spans,
             }
         except Exception as fallback_error:
-            logger.error("Elasticsearch stats fallback failed: %s", fallback_error)
+            logger.error("Elasticsearch 统计回退失败：%s", fallback_error)
             return {**default_stats, "error": str(fallback_error)}

@@ -1,7 +1,7 @@
-"""Registered database migrations.
+"""注册的数据库迁移。
 
-Each migration is a function registered with the @migration_manager.register decorator.
-The migration manager tracks which have been applied in the _migrations table.
+每个迁移都是一个通过 @migration_manager.register 装饰器注册的函数。
+迁移管理器会跟踪哪些迁移已在 _migrations 表中应用。
 """
 
 from __future__ import annotations
@@ -11,7 +11,7 @@ from sqlalchemy import inspect, text
 from src.core.migrations import migration_manager
 
 
-@migration_manager.register("add_category_column", "Add category column to platforms table")
+@migration_manager.register("add_category_column", "向 platforms 表添加 category 列")
 def add_category_column(engine) -> None:
     inspector = inspect(engine)
     columns = [c["name"] for c in inspector.get_columns("platforms")]
@@ -28,7 +28,7 @@ def add_category_column(engine) -> None:
 
 @migration_manager.register(
     "rename_thinking_trace_json_to_agent_events_json",
-    "Add agent_events_json column and backfill from thinking_trace_json",
+    "添加 agent_events_json 列并从 thinking_trace_json 回填",
 )
 def rename_thinking_trace_json_to_agent_events_json(engine) -> None:
     inspector = inspect(engine)

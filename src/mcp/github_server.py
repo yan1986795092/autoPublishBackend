@@ -108,7 +108,7 @@ async def search_code(
         return "\n".join(lines)
 
     except Exception as e:
-        logger.warning(f"GitHub code search error: {e}")
+        logger.warning(f"GitHub 代码搜索出错: {e}")
         return f"GitHub 代码搜索暂时不可用：{e}。请检查网络连接或配置 GITHUB_TOKEN。"
 
 
@@ -182,7 +182,7 @@ async def search_repositories(
         return "\n".join(lines)
 
     except Exception as e:
-        logger.warning(f"GitHub repo search error: {e}")
+        logger.warning(f"GitHub 仓库搜索出错: {e}")
         return f"GitHub 仓库搜索暂时不可用：{e}"
 
 

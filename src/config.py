@@ -6,9 +6,9 @@ from typing import Optional
 
 
 def _env_file_path() -> Path:
-    """Return absolute path to backend/.env, resolved from this file's location.
+    """返回 backend/.env 的绝对路径，从本文件所在位置解析。
 
-    Works regardless of the process current working directory.
+    无论进程当前工作目录是什么均可正常工作。
     """
     return Path(__file__).resolve().parent.parent / ".env"
 
@@ -38,7 +38,7 @@ class Settings(BaseSettings):
     zhipu_model: str = "glm-4-flash"
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
 
-    # DeepSeek — OpenAI 协议兼容
+    # DeepSeek — 兼容 OpenAI 协议
     deepseek_api_key: Optional[str] = None
     deepseek_model: str = "deepseek-chat"
     deepseek_base_url: str = "https://api.deepseek.com/v1"
@@ -49,7 +49,7 @@ class Settings(BaseSettings):
     default_temperature: float = 0.7
     default_max_tokens: int = 2000
 
-    # ========== Per-role model configuration (optional) ==========
+    # ========== 按角色模型配置（可选） ==========
     # 主模型 (Manager/Orchestrator) — 任务拆解与规划
     manager_llm_provider: Optional[str] = None
     manager_model: Optional[str] = None
@@ -68,7 +68,7 @@ class Settings(BaseSettings):
     image_api_key: Optional[str] = None
     image_base_url: Optional[str] = None
 
-    # 子Agent模型 (ReviewAgent, SEOAgent 等)
+    # 子 Agent 模型 (ReviewAgent, SEOAgent 等)
     subagent_llm_provider: Optional[str] = None
     subagent_model: Optional[str] = None
     subagent_api_key: Optional[str] = None
@@ -108,11 +108,11 @@ class Settings(BaseSettings):
             "base_url": base_url or "",
         }
 
-    # ========== Logging configuration ==========
+    # ========== 日志配置 ==========
     log_level: str = "INFO"
     log_json_format: bool = False
 
-    # ========== Agent orchestration ==========
+    # ========== Agent 编排 ==========
     worker_max_retries: int = 3
     orchestrator_timeout: float = 180.0
     task_concurrency: int = 3
@@ -126,10 +126,10 @@ class Settings(BaseSettings):
     mcp_enable_pexels: bool = False
     mcp_enable_github: bool = False
 
-    # ========== LLM Gateway ==========
+    # ========== LLM 网关 ==========
     llm_gateway_url: str = "http://localhost:9010/v1"
 
-    # ========== Agent token budgets ==========
+    # ========== Agent Token 预算 ==========
     agent_token_budgets: dict = {
         "ManagerAgent": 4000,
         "WritingAgent": 4000,

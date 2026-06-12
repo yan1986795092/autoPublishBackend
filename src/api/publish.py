@@ -39,7 +39,7 @@ def publish_content(
     if not content:
         raise HTTPException(status_code=404, detail="内容不存在")
 
-    # 定时发布
+    # 定时发布场景
     if request.schedule_time:
         try:
             scheduled_at = datetime.fromisoformat(request.schedule_time)

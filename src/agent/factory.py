@@ -37,7 +37,7 @@ def create_orchestrator(
                 agent_type=agent_type,
             )
         except Exception:
-            logger.warning("Failed to create LLM for %s", agent_type)
+            logger.warning("无法为 %s 创建 LLM", agent_type)
 
     # 低成本 Agent → 指定智谱模型（绕过 AutoRouter，Gateway 精确匹配到智谱 adapter）
     for agent_type in [

@@ -72,7 +72,7 @@ class EpisodicMemory:
     def retrieve_user_preferences(self, user_id: str) -> dict:
         """从用户历史任务中学习偏好
 
-        Returns:
+        返回值格式：
             {
                 "writing_style": str,        # 常用写作风格
                 "preferred_platforms": list,  # 常用平台

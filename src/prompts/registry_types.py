@@ -13,7 +13,7 @@ class RegistryTemplateVersion:
     """模板的一个版本"""
     version: str                          # "v2.3"
     template: str                         # 模板文本（含 {variable}）
-    hash: str                             # SHA256(content + variables_def)[:12]
+    hash: str                             # SHA256(内容 + 变量定义)[:12]
     date: datetime                        # 创建时间
     status: VersionStatus = "active"
     changelog: str = ""
@@ -45,7 +45,7 @@ class RegistryEntry:
         for v in self.versions:
             if v.status == "active":
                 return v
-        # 不静默降级到 versions[0]：无 active 意味着配置错误，返回 None 让调用方处理
+        # 不静默降级到 versions[0]：无 active 版本意味着配置错误，返回 None 让调用方处理
         return None
 
     @property

@@ -1,4 +1,4 @@
-"""ContextManager — hybrid routing, session management, token budget monitoring."""
+"""ContextManager —— 混合路由、会话管理、Token 预算监控。"""
 from __future__ import annotations
 
 import logging
@@ -58,13 +58,13 @@ def _serialize_creative_log(log: List) -> str:
 
 class ContextManager:
     """
-    Manages multi-turn context across conversations.
+    管理跨对话的多轮上下文。
 
-    Responsibilities:
-    - Hybrid routing: similarity + explicit override to decide new vs. continue
-    - Session lifecycle: create, track, archive
-    - Token budget monitoring and context compression
-    - Stage transitions with validation
+    职责：
+    - 混合路由：相似度 + 显式覆盖，决定新建还是继续会话
+    - 会话生命周期：创建、跟踪、归档
+    - Token 预算监控与上下文压缩
+    - 带验证的阶段转换
     """
 
     def __init__(
@@ -80,7 +80,7 @@ class ContextManager:
         self._session_history: List[SharedContextStore] = []
 
     # ═══════════════════════════════════════════
-    # Message handling — routing
+    # 消息处理 —— 路由
     # ═══════════════════════════════════════════
 
     def handle_message(
@@ -91,8 +91,8 @@ class ContextManager:
         project_directive: Optional[str] = None,
     ) -> SharedContextStore:
         """
-        Main entry point. Determines whether to continue or start a new session,
-        then returns the appropriate SharedContextStore.
+        主入口。判断是继续现有会话还是新建会话，
+        然后返回相应的 SharedContextStore。
         """
         if project_directive == "new_session":
             return self._start_new_session(user_message, conversation_id, project_id)
@@ -142,7 +142,7 @@ class ContextManager:
             is_new_session=True,
         )
         self._active_sessions[session_id] = store
-        logger.info(f"ContextManager: new session {session_id} for conversation {conversation_id}")
+        logger.info(f"ContextManager: 新建会话 {session_id}，所属对话 {conversation_id}")
         return store
 
     def _continue_session(
@@ -156,8 +156,8 @@ class ContextManager:
             store.project_manifest.turn_count += 1
         store.add_thinking_step(agent="ContextManager", action="route", detail="continue_session")
         logger.debug(
-            f"ContextManager: continuing session {store.session_id}, "
-            f"turn {store.project_manifest.turn_count if store.project_manifest else 0}"
+            f"ContextManager: 继续会话 {store.session_id}，"
+            f"轮次 {store.project_manifest.turn_count if store.project_manifest else 0}"
         )
         return store
 
@@ -165,16 +165,16 @@ class ContextManager:
         self._session_history.append(store)
         if store.session_id in self._active_sessions:
             del self._active_sessions[store.session_id]
-        logger.info(f"ContextManager: archived session {store.session_id}")
+        logger.info(f"ContextManager: 已归档会话 {store.session_id}")
 
     # ═══════════════════════════════════════════
-    # Similarity computation
+    # 相似度计算
     # ═══════════════════════════════════════════
 
     def _compute_similarity(self, message_a: str, message_b: str) -> float:
         """
-        Compute similarity between two messages.
-        Falls back to keyword overlap if embedding unavailable.
+        计算两条消息之间的相似度。
+        如果嵌入向量不可用，回退到关键词重叠。
         """
         try:
             from .semantic_memory import SemanticMemory
@@ -190,7 +190,7 @@ class ContextManager:
         return _keyword_similarity(message_a, message_b)
 
     # ═══════════════════════════════════════════
-    # Stage transitions
+    # 阶段转换
     # ═══════════════════════════════════════════
 
     def transition_stage(
@@ -198,16 +198,16 @@ class ContextManager:
         store: SharedContextStore,
         new_stage: ProjectStage,
     ) -> bool:
-        """Attempt to transition project stage. Returns True if valid, False otherwise."""
+        """尝试进行项目阶段转换。如果有效返回 True，否则返回 False。"""
         manifest = store.project_manifest
         if not manifest:
-            logger.warning("transition_stage: no project manifest")
+            logger.warning("transition_stage: 没有项目清单")
             return False
 
         current = manifest.stage
         if new_stage not in VALID_TRANSITIONS.get(current, set()):
             logger.warning(
-                f"Invalid stage transition: {current.value} -> {new_stage.value}"
+                f"无效的阶段转换: {current.value} -> {new_stage.value}"
             )
             store.add_thinking_step(
                 agent="ContextManager",
@@ -222,15 +222,15 @@ class ContextManager:
             action="stage_transition",
             detail=f"{current.value} -> {new_stage.value}",
         )
-        logger.info(f"ContextManager: stage transition {current.value} -> {new_stage.value}")
+        logger.info(f"ContextManager: 阶段转换 {current.value} -> {new_stage.value}")
         return True
 
     # ═══════════════════════════════════════════
-    # Token budget and compression
+    # Token 预算和压缩
     # ═══════════════════════════════════════════
 
     def estimate_token_count(self, store: SharedContextStore) -> int:
-        """Rough token estimation using character count / 4."""
+        """使用字符数 / 4 进行粗略的 Token 估算。"""
         parts = [
             store.user_request or "",
             _str_of(store.project_manifest),
@@ -245,12 +245,12 @@ class ContextManager:
         return total_chars // 4
 
     def should_compress(self, store: SharedContextStore, threshold_pct: float = 0.80) -> bool:
-        """Check if context exceeds the token budget threshold."""
+        """检查上下文是否超过 Token 预算阈值。"""
         tokens = self.estimate_token_count(store)
         budget = 32000
         return (tokens / budget) >= threshold_pct
 
-    # ── Stage-aware retention limits for compression ─────────────────────────
+    # ── 按阶段保留限制（用于压缩） ─────────────────────────
     _STAGE_RETENTION: dict = {
         # (priority_field, max_items_per_stage)
         "thinking_trace": {
@@ -263,7 +263,7 @@ class ContextManager:
             ProjectStage.ABANDONED: 0,
         },
         "writing_content": {
-            ProjectStage.CONCEPTUALIZATION: -1,  # -1 = keep all
+            ProjectStage.CONCEPTUALIZATION: -1,  # -1 = 保留全部
             ProjectStage.OUTLINING: 10,
             ProjectStage.DRAFTING: 5,
             ProjectStage.REVISION: 3,
@@ -271,7 +271,7 @@ class ContextManager:
             ProjectStage.COMPLETED: 2,
             ProjectStage.ABANDONED: 0,
         },
-        # review_feedback and seo_suggestions are always stage-independent
+        # review_feedback 和 seo_suggestions 始终与阶段无关
         "review_feedback": {
             stage: 2 for stage in ProjectStage
         },
@@ -282,17 +282,17 @@ class ContextManager:
 
     def compress_context(self, store: SharedContextStore) -> None:
         """
-        Apply stage-aware compression across 4 priority levels.
+        按阶段感知的 4 个优先级级别应用压缩。
 
-        Priority 1: thinking_trace — stage-dependent retention (ideation preserved longer)
-        Priority 2: review_feedback — keep last 2 blocks
-        Priority 3: seo_suggestions — keep last 1 block
-        Priority 4: writing_content — stage-dependent retention (early stages keep more)
+        优先级 1: thinking_trace —— 按阶段决定保留数量（概念阶段保留更长）
+        优先级 2: review_feedback —— 保留最近 2 个块
+        优先级 3: seo_suggestions —— 保留最近 1 个块
+        优先级 4: writing_content —— 按阶段决定保留数量（早期阶段保留更多）
 
-        NEVER compressed:
-        - creative_anchors — immutable creative state
-        - creative_log — decision audit trail
-        - user_request — the active task
+        永不压缩的内容：
+        - creative_anchors —— 不可变的创作状态
+        - creative_log —— 决策审计追踪
+        - user_request —— 当前活跃任务
         """
         manifest = store.project_manifest
         stage = manifest.stage if manifest else ProjectStage.DRAFTING
@@ -304,12 +304,12 @@ class ContextManager:
         )
 
         def _cap(items: list, limit: int) -> list:
-            """Keep last N items; -1 means keep all."""
+            """保留最近 N 项；-1 表示保留全部。"""
             if limit == -1 or len(items) <= limit:
                 return items
             return items[-limit:]
 
-        # ── Priority 1: thinking_trace ──────────────────────────────────────
+        # ── 优先级 1: thinking_trace ──────────────────────────────────────
         tt_limit = self._STAGE_RETENTION["thinking_trace"].get(stage, 20)
         if len(store.thinking_trace) > tt_limit:
             old_len = len(store.thinking_trace)
@@ -319,17 +319,17 @@ class ContextManager:
                 old_len, len(store.thinking_trace), tt_limit, stage.value,
             )
 
-        # ── Priority 2: review_feedback — keep last 2 ─────────────────────
+        # ── 优先级 2: review_feedback —— 保留最近 2 个 ─────────────────────
         fb_limit = self._STAGE_RETENTION["review_feedback"].get(stage, 2)
         if len(store.review_feedback) > fb_limit:
             store.review_feedback = _cap(list(store.review_feedback), fb_limit)
 
-        # ── Priority 3: seo_suggestions — keep last 1 ──────────────────────
+        # ── 优先级 3: seo_suggestions —— 保留最近 1 个 ──────────────────────
         seo_limit = self._STAGE_RETENTION["seo_suggestions"].get(stage, 1)
         if len(store.seo_suggestions) > seo_limit:
             store.seo_suggestions = _cap(list(store.seo_suggestions), seo_limit)
 
-        # ── Priority 4: writing_content — stage-dependent ──────────────────
+        # ── 优先级 4: writing_content —— 按阶段决定 ──────────────────
         wc_limit = self._STAGE_RETENTION["writing_content"].get(stage, 5)
         if wc_limit != -1 and len(store.writing_content) > wc_limit:
             old_len = len(store.writing_content)
@@ -350,12 +350,12 @@ class ContextManager:
             ),
         )
         logger.info(
-            "compress_context: done, stage=%s, trace=%d, content=%d",
+            "compress_context: 完成, stage=%s, trace=%d, content=%d",
             stage.value, len(store.thinking_trace), len(store.writing_content),
         )
 
     # ═══════════════════════════════════════════
-    # Session management
+    # 会话管理
     # ═══════════════════════════════════════════
 
     def get_active_session(self, conversation_id: str) -> Optional[SharedContextStore]:
@@ -379,7 +379,7 @@ def _str_of(obj: Any) -> str:
 
 
 def _str_of_list(items: Any) -> str:
-    """Serialize a list of dataclass items for token counting."""
+    """将数据类项目列表序列化，用于 Token 计数。"""
     if not items:
         return ""
     if isinstance(items, list):

@@ -26,7 +26,7 @@ class AgentEventEmitter:
                 if loop.is_running():
                     UnifiedEsWriter.get_instance().write("events", event_dict)
                 else:
-                    pass  # No running loop, skip
+                    pass  # 没有正在运行的事件循环，跳过
             except RuntimeError:
                 pass
         except Exception:
@@ -104,7 +104,7 @@ class AgentEventEmitter:
         if self._env == "production":
             # 生产：简约错误行
             msg = event_dict.get("message", "") or event_type
-            self._logger.warning("agent %s: %s", event_type, msg)
+            self._logger.warning("agent %s: %s", event_type, msg)  # 生产环境精简日志
             return
 
         # 开发：通过 structlog + _type="agent" 路由到 RichConsoleRenderer

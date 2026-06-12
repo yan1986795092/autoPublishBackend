@@ -46,7 +46,7 @@ async def brave_search(
         try:
             return await _brave_api_search(query, api_key, max_results)
         except Exception as e:
-            logger.warning(f"Brave Search API failed: {e}, falling back to DuckDuckGo")
+            logger.warning(f"Brave Search API 失败: {e}，降级到 DuckDuckGo")
 
     return await _duckduckgo_fallback(query, max_results)
 

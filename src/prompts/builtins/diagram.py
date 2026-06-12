@@ -6,7 +6,7 @@ from ..variables import VariableDef
 templates = [
     PromptTemplateDef(
         name="diagram.task",
-        template='Generate a Mermaid.js {diagram_type} about "{topic}". Detail level: detailed',
+        template='生成一个关于"{topic}"的 {diagram_type} Mermaid.js 图表。详细程度：详细',
         description="图表生成任务指令",
         version="1.0",
         role="DiagramAgent",

@@ -98,7 +98,7 @@ class PromptEngine:
                 variables=variables_dicts,
             )
             if new_ver:
-                logger.debug("Template %s: new registry version %s", template.name, new_ver.version)
+                logger.debug("模板 %s: 注册表新版本 %s", template.name, new_ver.version)
         else:
             self._registry.register(
                 name=template.name,
@@ -109,7 +109,7 @@ class PromptEngine:
                 group=template.group,
                 changelog="从代码注册",
             )
-        logger.debug("Template registered: %s (v%s, role=%s)",
+        logger.debug("模板已注册: %s (v%s, role=%s)",
                      template.name, template.version, template.role)
 
     def register_many(self, templates: list[PromptTemplateDef]) -> None:
@@ -245,7 +245,7 @@ class PromptEngine:
                 if rendered.template_name not in used_templates:
                     used_templates.append(rendered.template_name)
                 if rendered.errors:
-                    logger.warning("compose: %s", rendered.errors)
+                    logger.warning("组合模板: %s", rendered.errors)
             else:
                 # 是纯文本
                 if variables:

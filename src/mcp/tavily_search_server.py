@@ -48,9 +48,9 @@ async def tavily_search(
         try:
             return await _tavily_api_search(query, api_key, max_results, search_type, days)
         except Exception as e:
-            logger.warning(f"Tavily API failed: {e}, falling back to DuckDuckGo")
+            logger.warning(f"Tavily API 失败: {e}，降级到 DuckDuckGo")
     else:
-        logger.info("TAVILY_API_KEY not set, using DuckDuckGo fallback")
+        logger.info("TAVILY_API_KEY 未设置，使用 DuckDuckGo 作为降级方案")
 
     return await _duckduckgo_fallback(query, max_results)
 
@@ -88,7 +88,7 @@ async def _tavily_api_search(
 
     data = resp.json()
 
-    # AI 生成的答案摘要
+    # AI 为搜索结果生成的答案摘要
     answer = data.get("answer", "")
     results = data.get("results", [])
 

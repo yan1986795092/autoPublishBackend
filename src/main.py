@@ -25,7 +25,7 @@ from src.agent.workflow.worker import worker
 from src.observability import setup_observability
 from src.observability.metrics import up_gauge, info_gauge
 from src.logging_shared.unified_writer import UnifiedEsWriter
-import src.migrations  # noqa: F401 — register migrations
+import src.migrations  # noqa: F401 — 注册迁移
 
 import structlog
 logger = structlog.get_logger(__name__)
@@ -34,7 +34,7 @@ logger = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
-    # Unified logging configuration (reads settings.log_level, settings.log_json_format)
+    # 统一日志配置（读取 settings.log_level, settings.log_json_format）
     setup_logging(settings)
 
     # 统一 tracing 初始化（structlog only，OTel SDK 已移除）
@@ -44,7 +44,7 @@ async def lifespan(app: FastAPI):
         settings=settings,
     )
 
-    # Set Prometheus lifecycle gauges
+    # 设置 Prometheus 生命周期仪表指标
     up_gauge.set(1)
     info_gauge.labels(version="2.0.0").set(1)
 
@@ -56,17 +56,17 @@ async def lifespan(app: FastAPI):
         writer = UnifiedEsWriter.get_instance()
         await writer.start()
     except Exception as exc:
-        logger.warning("UnifiedEsWriter start failed (non-fatal): %s", exc,
-                       _type="system", event_name="es_writer_start", message=f"ES Writer start failed: {exc}", status="error")
+        logger.warning("UnifiedEsWriter 启动失败（非致命）: %s", exc,
+                       _type="system", event_name="es_writer_start", message=f"ES Writer 启动失败: {exc}", status="error")
 
-    # Start DB + migrations + worker
+    # 启动数据库 + 迁移 + Worker
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: Base.metadata.create_all(bind=engine))
     await loop.run_in_executor(None, lambda: migration_manager.run_all(engine))
 
-    # Worker handles lifecycle internally
+    # Worker 内部管理生命周期
     await worker.start()
-    logger.info("Agent Worker started", _type="system", event_name="worker_start", message="Agent Worker started", status="started")
+    logger.info("Agent Worker 已启动", _type="system", event_name="worker_start", message="Agent Worker 已启动", status="started")
     yield
 
     # 关闭 UnifiedEsWriter
@@ -74,8 +74,8 @@ async def lifespan(app: FastAPI):
         writer = UnifiedEsWriter.get_instance()
         await writer.stop()
     except Exception as exc:
-        logger.warning("UnifiedEsWriter stop error: %s", exc,
-                       _type="system", event_name="es_writer_stop", message=f"ES Writer stop error: {exc}", status="error")
+        logger.warning("UnifiedEsWriter 停止错误: %s", exc,
+                       _type="system", event_name="es_writer_stop", message=f"ES Writer 停止错误: {exc}", status="error")
 
     await worker.stop()
 
@@ -101,9 +101,8 @@ ALLOWED_ORIGINS = [
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Exception handlers — registered in priority order (FastAPI matches first
-# registered, then more specific subclasses). Handlers must be registered
-# BEFORE middleware and routers so the decorators take effect correctly.
+# 异常处理器 — 按优先级注册（FastAPI 匹配先注册的，再匹配更具体的子类）。
+# 处理器必须在中间件和路由之前注册，装饰器才能正确生效。
 # ─────────────────────────────────────────────────────────────────────────────
 
 
@@ -117,7 +116,7 @@ async def validation_error_handler(request: Request, exc: ValidationError) -> JS
     return JSONResponse(**resp)
 
 
-# 2.  RequestValidationError — 422 (FastAPI built-in, Pydantic)
+# 2.  RequestValidationError — 422（FastAPI 内置，Pydantic）
 @app.exception_handler(RequestValidationError)
 async def request_validation_error_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
     errors = exc.errors()
@@ -188,7 +187,7 @@ async def rate_limit_error_handler(request: Request, exc: RateLimitError) -> JSO
     return JSONResponse(**resp)
 
 
-# 8.  HTTPException — FastAPI native (any status code)
+# 8.  HTTPException — FastAPI 原生（任意状态码）
 @app.exception_handler(HTTPException)
 async def http_exception_handler(request: Request, exc: HTTPException) -> JSONResponse:
     logger.warning("HTTP 异常", status_code=exc.status_code, detail=exc.detail,
@@ -201,7 +200,7 @@ async def http_exception_handler(request: Request, exc: HTTPException) -> JSONRe
     return JSONResponse(**resp)
 
 
-# 9.  ServiceError — 5xx service-layer errors (GenerateError, AgentError, etc.)
+# 9.  ServiceError — 5xx 服务层错误（GenerateError, AgentError 等）
 @app.exception_handler(ServiceError)
 async def service_error_handler(request: Request, exc: ServiceError) -> JSONResponse:
     logger.error("服务层异常", message=exc.message, exc_type=type(exc).__name__,
@@ -212,13 +211,13 @@ async def service_error_handler(request: Request, exc: ServiceError) -> JSONResp
     return JSONResponse(**resp)
 
 
-# 10.  WebSocketDisconnect — pass through silently (not an error)
+# 10.  WebSocketDisconnect — 静默透传（非错误）
 @app.exception_handler(WebSocketDisconnect)
 async def websocket_disconnect_handler(request: Request, exc: WebSocketDisconnect) -> JSONResponse:
-    pass  # FastAPI handles this by closing the WebSocket connection
+    pass  # FastAPI 通过关闭 WebSocket 连接来处理
 
 
-# 11.  Exception — final catch-all (500)
+# 11.  Exception — 最终兜底（500）
 @app.exception_handler(Exception)
 async def global_exception_handler(request: Request, exc: Exception) -> JSONResponse:
     exc_type = type(exc).__name__
@@ -227,14 +226,14 @@ async def global_exception_handler(request: Request, exc: Exception) -> JSONResp
                  path=request.url.path, status=500,
                  error_type=exc_type, exc_info=True)
 
-    # Build response with sanitised message (do not leak internal details)
+    # 构建经过清理的响应（不泄露内部细节）
     sanitised = exc.__class__.__name__
     resp = build_error_response(
         exc, request, 500, "INTERNAL_ERROR",
         details={"type": sanitised}
     )
-    # Override message to hide internal stack traces
-    resp["content"]["error"]["message"] = "An internal error occurred. Please try again later."
+    # 覆盖消息以隐藏内部堆栈跟踪
+    resp["content"]["error"]["message"] = "发生内部错误，请稍后重试。"
     return JSONResponse(**resp)
 
 
@@ -273,7 +272,7 @@ def root():
 
 @app.get("/health")
 async def health_check():
-    """Health check with subsystem verification."""
+    """健康检查，附带子系统验证。"""
     from src.database import SessionLocal
 
     db_healthy = False
@@ -288,7 +287,7 @@ async def health_check():
                 db.close()
         db_healthy = await asyncio.get_running_loop().run_in_executor(None, _ping)
     except Exception as e:
-        logger.warning("Health check DB ping failed: %s", e)
+        logger.warning("健康检查数据库 Ping 失败: %s", e)
 
     worker_healthy = worker._running if hasattr(worker, '_running') else False
 
@@ -307,7 +306,7 @@ async def health_check():
 
 @app.get("/metrics")
 async def prometheus_metrics():
-    """Prometheus metrics endpoint — real prometheus_client metrics."""
+    """Prometheus 指标端点 — 真实的 prometheus_client 指标。"""
     from fastapi.responses import Response
     from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
 

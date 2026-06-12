@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 
 
 def _compute_hash(template: str, variables: list[dict]) -> str:
-    """计算模板的内容 hash（SHA256 的前 12 位）。"""
+    """计算模板的内容哈希（SHA256 的前 12 位）。"""
     var_str = json.dumps(sorted(json.dumps(v, sort_keys=True) for v in variables))
     raw = template.strip() + "|" + var_str
     return hashlib.sha256(raw.encode()).hexdigest()[:12]
@@ -57,7 +57,7 @@ class PromptRegistry:
         """首次注册模板。如果已存在则转为 new_version。"""
         existing = self._entries.get(name)
         if existing:
-            logger.info("Template %s already registered, creating new version", name)
+            logger.info("模板 %s 已注册，创建新版本", name)
             self.new_version(name, template, changelog=changelog, variables=variables)
             return existing
 
@@ -81,7 +81,7 @@ class PromptRegistry:
             versions=[version],
         )
         self._entries[name] = entry
-        logger.info("Template registered: %s (v1.0, hash=%s)", name, content_hash)
+        logger.info("模板已注册: %s (v1.0, hash=%s)", name, content_hash)
         return entry
 
     def new_version(self, name: str, template: str, *,
@@ -118,7 +118,7 @@ class PromptRegistry:
             parent_hash=latest.hash,
         )
         entry.versions.insert(0, new_ver)
-        logger.info("Template %s: new version %s (hash=%s)", name, next_ver, content_hash)
+        logger.info("模板 %s: 新版本 %s (hash=%s)", name, next_ver, content_hash)
         return new_ver
 
     # ── 查询 ──
@@ -155,11 +155,11 @@ class PromptRegistry:
         version = self.get(name, pin=pin, pin_hash=pin_hash)
         if not version:
             if strict:
-                raise KeyError(f"Template not found: {name}")
+                raise KeyError(f"模板未找到: {name}")
             return RenderedPrompt(
                 text="", template_name=name,
                 template_version="", variables_used={},
-                errors=[f"Template not found: {name}"],
+                errors=[f"模板未找到: {name}"],
             )
 
         variables = variables or {}
@@ -228,7 +228,7 @@ class PromptRegistry:
         """改变某个版本的状态。设为 active 时自动降级其他 active 版本。"""
         entry = self._entries.get(name)
         if not entry:
-            raise KeyError(f"Template not found: {name}")
+            raise KeyError(f"模板未找到: {name}")
 
         target = None
         for v in entry.versions:
@@ -237,7 +237,7 @@ class PromptRegistry:
                 break
 
         if not target:
-            raise KeyError(f"Version {version_str} not found for {name}")
+            raise KeyError(f"版本 {version_str} 未找到: {name}")
 
         if status == "active":
             for v in entry.versions:
@@ -251,7 +251,7 @@ class PromptRegistry:
         va = self.get(name, pin=version_a)
         vb = self.get(name, pin=version_b)
         if not va or not vb:
-            raise KeyError(f"Version not found: {name}@{version_a} or {version_b}")
+            raise KeyError(f"版本未找到: {name}@{version_a} 或 {version_b}")
 
         lines_a = va.template.splitlines()
         lines_b = vb.template.splitlines()

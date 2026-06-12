@@ -130,7 +130,7 @@ class PromptBuilder:
             try:
                 _on_build_complete(composed=result, messages=merged)
             except Exception as e:
-                logger.warning("PromptBuilder build hook failed: %s", e)
+                logger.warning("PromptBuilder 构建钩子执行失败: %s", e)
 
         return result
 

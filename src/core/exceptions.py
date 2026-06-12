@@ -1,23 +1,23 @@
-"""Custom exception hierarchy for AutoPublish API.
+"""AutoPublish API 的自定义异常层次结构。
 
-Architecture:
-  - APIException: base for all client-facing API errors (4xx)
-  - ServiceError: base for service-layer errors (Agent, Generate, Config)
-  - SystemError: base for system errors (not exposed to clients)
+架构：
+  - APIException：所有面向客户端的 API 错误基类（4xx）
+  - ServiceError：服务层错误基类（Agent、Generate、Config）
+  - SystemError：系统错误基类（不暴露给客户端）
 
-All exception classes expose: message, details, and their own error_code.
-The exception handler layer maps these to HTTP status codes.
+所有异常类暴露：message、details 及其自身的 error_code。
+异常处理器层将这些映射为 HTTP 状态码。
 """
 
 from __future__ import annotations
 
 
 class APIException(Exception):
-    """Base class for all client-facing API errors."""
+    """所有面向客户端的 API 错误的基类。"""
 
     status_code: int = 500
     error_code: str = "INTERNAL_ERROR"
-    default_message: str = "An internal error occurred"
+    default_message: str = "发生内部错误"
 
     def __init__(self, message: str | None = None, details: dict | None = None):
         self.message = message or self.default_message
@@ -26,58 +26,58 @@ class APIException(Exception):
 
 
 class ValidationError(APIException):
-    """422 — One or more request parameters failed validation."""
+    """422 — 一个或多个请求参数验证失败。"""
     status_code = 422
     error_code = "VALIDATION_ERROR"
-    default_message = "Request validation failed"
+    default_message = "请求验证失败"
 
 
 class AuthenticationError(APIException):
-    """401 — Authentication is required or has failed."""
+    """401 — 需要身份验证或身份验证失败。"""
     status_code = 401
     error_code = "AUTHENTICATION_REQUIRED"
-    default_message = "Authentication required"
+    default_message = "需要身份验证"
 
 
 class AuthorizationError(APIException):
-    """403 — Authenticated but lacks required permissions."""
+    """403 — 已通过身份验证但缺少所需权限。"""
     status_code = 403
     error_code = "PERMISSION_DENIED"
-    default_message = "Permission denied"
+    default_message = "权限不足"
 
 
 class NotFoundError(APIException):
-    """404 — The requested resource does not exist."""
+    """404 — 请求的资源不存在。"""
     status_code = 404
     error_code = "NOT_FOUND"
-    default_message = "Resource not found"
+    default_message = "资源未找到"
 
 
 class ConflictError(APIException):
-    """409 — The request conflicts with the current state of the resource."""
+    """409 — 请求与资源的当前状态冲突。"""
     status_code = 409
     error_code = "CONFLICT"
-    default_message = "Resource conflict"
+    default_message = "资源冲突"
 
 
 class RateLimitError(APIException):
-    """429 — The client has sent too many requests."""
+    """429 — 客户端发送了太多请求。"""
     status_code = 429
     error_code = "RATE_LIMIT_EXCEEDED"
-    default_message = "Rate limit exceeded"
+    default_message = "请求频率超限"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Service layer exceptions
+# 服务层异常
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class ServiceError(Exception):
-    """Base class for service-layer errors (Agent, Generate, Config)."""
+    """服务层错误的基类（Agent、Generate、Config）。"""
 
     status_code: int = 500
     error_code: str = "SERVICE_ERROR"
-    default_message: str = "Service error"
+    default_message: str = "服务错误"
 
     def __init__(self, message: str | None = None, details: dict | None = None):
         self.message = message or self.default_message
@@ -86,22 +86,22 @@ class ServiceError(Exception):
 
 
 class GenerateError(ServiceError):
-    """Content generation failed (e.g. LLM returned invalid output)."""
+    """内容生成失败（例如 LLM 返回无效输出）。"""
     status_code = 500
     error_code = "GENERATION_ERROR"
-    default_message = "Content generation failed"
+    default_message = "内容生成失败"
 
 
 class AgentError(ServiceError):
-    """Base class for agent execution errors."""
+    """Agent 执行错误的基类。"""
     error_code = "AGENT_ERROR"
-    default_message = "Agent execution failed"
+    default_message = "Agent 执行失败"
 
 
 class HandlerError(AgentError):
-    """A handler (prompt node) failed during execution."""
+    """处理器（提示节点）在执行期间失败。"""
     error_code = "HANDLER_ERROR"
-    default_message = "Handler execution failed"
+    default_message = "处理器执行失败"
 
     def __init__(self, message: str | None = None, handler: str | None = None, details: dict | None = None):
         self.handler = handler
@@ -111,39 +111,39 @@ class HandlerError(AgentError):
 
 
 class ToolExecutionError(AgentError):
-    """An MCP tool call failed during execution."""
+    """MCP 工具调用在执行期间失败。"""
     error_code = "TOOL_EXECUTION_ERROR"
-    default_message = "Tool execution failed"
+    default_message = "工具执行失败"
 
 
 class ConfigurationError(AgentError):
-    """A configuration value is missing or invalid."""
+    """配置值缺失或无效。"""
     error_code = "CONFIGURATION_ERROR"
-    default_message = "Configuration error"
+    default_message = "配置错误"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# System layer exceptions
+# 系统层异常
 # ─────────────────────────────────────────────────────────────────────────────
 
 
 class SystemError(Exception):
-    """Base class for system errors (not exposed to clients)."""
+    """系统错误的基类（不暴露给客户端）。"""
     pass
 
 
 class DatabaseError(SystemError):
-    """A database operation failed."""
+    """数据库操作失败。"""
     pass
 
 
 class ExternalServiceError(SystemError):
-    """An external service (e.g. Elasticsearch, queue) is unavailable."""
+    """外部服务（例如 Elasticsearch、队列）不可用。"""
     pass
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Shared response builder (used by exception handlers in main.py)
+# 共享响应构建器（由 main.py 中的异常处理器使用）
 # ─────────────────────────────────────────────────────────────────────────────
 
 CORS_HEADERS = {
@@ -172,25 +172,25 @@ def build_error_response(
     error_code: str,
     details: dict | None = None,
 ) -> dict:
-    """Build the shared error response payload dict.
+    """构建共享的错误响应负载字典。
 
     Args:
-        exc: The exception instance.
-        request_or_headers: Either a FastAPI Request (has .headers) or a
-            plain dict of headers. Used to extract trace_id and CORS origin.
-        status_code: HTTP status code.
-        error_code: Stable error code string for client branching.
-        details: Optional extra data (field errors, resource ids, etc.).
+        exc: 异常实例。
+        request_or_headers: 可以是 FastAPI Request（具有 .headers）或
+            简单的 headers 字典。用于提取 trace_id 和 CORS 来源。
+        status_code: HTTP 状态码。
+        error_code: 用于客户端分支的稳定错误码字符串。
+        details: 可选的额外数据（字段错误、资源 ID 等）。
 
     Returns:
-        A dict ready to be JSON-serialised as the response body.
+        准备进行 JSON 序列化作为响应体的字典。
     """
-    # Extract trace_id from request state (set by LoggingMiddleware)
+    # 从请求状态中提取 trace_id（由 LoggingMiddleware 设置）
     trace_id = None
     if hasattr(request_or_headers, "state"):
         trace_id = getattr(request_or_headers.state, "trace_id", None)
 
-    # Extract CORS origin from request headers
+    # 从请求头中提取 CORS 来源
     if hasattr(request_or_headers, "headers"):
         headers_dict = dict(request_or_headers.headers)
     elif isinstance(request_or_headers, dict):
@@ -204,7 +204,7 @@ def build_error_response(
         "Access-Control-Allow-Credentials": "true",
     }
 
-    # Attach Retry-After header for rate limit errors
+    # 为速率限制错误附加 Retry-After 头
     if error_code == "RATE_LIMIT_EXCEEDED" and details:
         retry_after = details.get("retry_after")
         if retry_after:

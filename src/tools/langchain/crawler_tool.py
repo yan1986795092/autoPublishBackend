@@ -26,7 +26,7 @@ class CrawlerTool(BaseTool):
         return json.dumps(self._mock_crawl(url, max_length), ensure_ascii=False)
 
     def _run(self, **kwargs) -> str:
-        raise NotImplementedError("Use async _arun")
+        raise NotImplementedError("请使用异步 _arun")
 
     async def _real_crawl(self, url: str, max_length: int) -> dict:
         try:
@@ -50,7 +50,7 @@ class CrawlerTool(BaseTool):
                         "summary": f"成功抓取：{title or url}",
                     }
         except ImportError:
-            pass  # beautifulsoup not installed
+            pass  # beautifulsoup 未安装
         except Exception as e:
             return {"success": False, "error": str(e)}
         return self._mock_crawl(url, max_length)

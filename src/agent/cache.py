@@ -114,7 +114,7 @@ class AgentCache:
             return [AgentCache._sanitize_for_json(item) for item in obj]
         if isinstance(obj, bytes):
             return obj.decode("utf-8", errors="replace")
-        # Fallback: convert to string representation
+        # 回退：转换为字符串表示
         try:
             json.dumps(obj)
             return obj

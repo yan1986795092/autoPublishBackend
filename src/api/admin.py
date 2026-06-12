@@ -1,4 +1,4 @@
-"""Admin metrics API — 运维中心后端接口。
+"""运维中心后端接口 — Admin metrics API。
 
 提供产能看板、发布监控、成本分析三个端点所需的数据。
 """
@@ -95,7 +95,7 @@ async def get_production_metrics() -> dict:
                 })
 
             # AI 生成占比（假设所有内容都是 AI 生成，或根据生成来源字段判断）
-            data["ai_generation_ratio"] = 0.85  # default
+            data["ai_generation_ratio"] = 0.85  # 默认值
 
             # 平台分布
             platform_rows = db.execute(
@@ -248,7 +248,7 @@ async def get_cost_metrics() -> dict:
         ],
     }
 
-    # Adjust cost_by_stage percentages when cost > 0
+    # 当 cost > 0 时调整 cost_by_stage 百分比
     if estimated_cost > 0:
         data["cost_by_stage"][0]["percentage"] = 1.0
 

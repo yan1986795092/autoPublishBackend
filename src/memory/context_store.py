@@ -1,15 +1,15 @@
-"""Context Store — data models for layered multi-agent context management."""
+"""Context Store —— 分层多智能体上下文管理的数据模型。"""
 from __future__ import annotations
 
 import time as _time_module
 
 from dataclasses import dataclass, field as _dc_field
-from dataclasses import field  # re-export for non-conflicting use
+from dataclasses import field  # 重新导出，避免冲突使用
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set
 
 # ──────────────────────────────────────────
-# Project Stage
+# 项目阶段
 # ──────────────────────────────────────────
 
 
@@ -35,13 +35,13 @@ VALID_TRANSITIONS: Dict[ProjectStage, Set[ProjectStage]] = {
 
 
 # ──────────────────────────────────────────
-# Creative Anchors
+# 创意锚点
 # ──────────────────────────────────────────
 
 
 @dataclass
 class CreativeAnchors:
-    """Creative elements that are NEVER compressed or discarded."""
+    """永不压缩或丢弃的创意元素。"""
     story_outline: str = ""
     character_profiles: Dict[str, str] = field(default_factory=dict)
     world_setting: str = ""
@@ -50,13 +50,13 @@ class CreativeAnchors:
 
 
 # ──────────────────────────────────────────
-# Creative Decisions
+# 创意决策
 # ──────────────────────────────────────────
 
 
 @dataclass
 class CreativeDecision:
-    """A logged creative decision, preserved in creative_log (never compressed)."""
+    """记录的创意决策，保存在 creative_log 中（永不压缩）。"""
     decision_text: str
     tags: List[str] = field(default_factory=list)
     turn_number: int = 0
@@ -76,28 +76,28 @@ class CreativeDecision:
 
 
 # ──────────────────────────────────────────
-# Thinking Step (audit chain)
+# 思考步骤（审计链）
 # ──────────────────────────────────────────
 
 
 @dataclass
 class ThinkingStep:
-    """A single step in the thinking trace (audit chain)."""
+    """思考追踪中的单个步骤（审计链）。"""
     agent: str
     action: str  # "read" | "write" | "route" | "compress" | "log_creative_decision"
-    step_field: str = ""  # renamed to avoid shadowing dataclasses.field
+    step_field: str = ""  # 重命名以避免与 dataclasses.field 冲突
     detail: str = ""
     timestamp: float = _dc_field(default_factory=_time_module.time)
 
 
 # ──────────────────────────────────────────
-# Structured Memory Entry
+# 结构化记忆条目
 # ──────────────────────────────────────────
 
 
 @dataclass
 class StructuredMemoryEntry:
-    """A node in the structured global memory graph."""
+    """结构化全局记忆图中的节点。"""
     entry_type: str  # "entity" | "plot_event" | "project" | "style_template" | "creative_summary"
     entity_id: Optional[str] = None
     project_id: Optional[str] = None
@@ -107,13 +107,13 @@ class StructuredMemoryEntry:
 
 
 # ──────────────────────────────────────────
-# Anchor Drift
+# 锚点偏移
 # ──────────────────────────────────────────
 
 
 @dataclass
 class AnchorDrift:
-    """A detected inconsistency between creative anchors and actual content."""
+    """检测到的创意锚点与实际内容之间的不一致。"""
     anchor_field: str
     drift_type: str  # "contradiction" | "implication_conflict" | "tone_mismatch"
     anchor_value: str
@@ -122,7 +122,7 @@ class AnchorDrift:
 
 
 # ──────────────────────────────────────────
-# Project Manifest
+# 项目清单
 # ──────────────────────────────────────────
 
 
@@ -147,20 +147,20 @@ class ProjectManifest:
 
 
 # ──────────────────────────────────────────
-# Agent Private State
+# Agent 私有状态
 # ──────────────────────────────────────────
 
 
 @dataclass
 class AgentPrivateState:
-    """Private state visible only to the owning agent."""
+    """仅对所属 Agent 可见的私有状态。"""
     internal_reasoning: str = ""
     confidence_score: float = 0.0
     local_draft_cache: str = ""
 
 
 # ──────────────────────────────────────────
-# Content / Review / SEO Blocks
+# 内容 / 审阅 / SEO 块
 # ──────────────────────────────────────────
 
 
@@ -185,29 +185,29 @@ class SEOBlock:
 
 
 # ──────────────────────────────────────────
-# Shared Context Store
+# 共享上下文存储
 # ──────────────────────────────────────────
 
 
 @dataclass
 class SharedContextStore:
-    # SystemLayer (all agents can read; only Consolidator writes)
+    # 系统层（所有 Agent 可读；仅 Consolidator 写入）
     user_request: str = ""
     project_manifest: Optional[ProjectManifest] = None
     global_memory: List[StructuredMemoryEntry] = field(default_factory=list)
     thinking_trace: List[ThinkingStep] = field(default_factory=list)
     creative_log: List[CreativeDecision] = field(default_factory=list)
 
-    # TaskLayer (permissioned read/write per agent) — always lists
+    # 任务层（每个 Agent 有权限控制的读写）—— 始终为列表
     writing_content: List[ContentBlock] = field(default_factory=list)
     review_feedback: List[ReviewBlock] = field(default_factory=list)
     seo_suggestions: List[SEOBlock] = field(default_factory=list)
     creative_anchors: CreativeAnchors = field(default_factory=CreativeAnchors)
 
-    # AgentLayer (private to each agent)
+    # Agent 层（每个 Agent 私有）
     agent_private: Dict[str, AgentPrivateState] = field(default_factory=dict)
 
-    # Routing metadata
+    # 路由元数据
     session_id: str = ""
     conversation_id: str = ""
     similarity_score: float = 0.0
@@ -223,7 +223,7 @@ class SharedContextStore:
             agent=agent, action=action, step_field=step_field, detail=detail,
         ))
 
-    # Convenience accessors — last item in each list (preserves backward compatibility)
+    # 便捷访问器 —— 每个列表的最后一项（保持向后兼容）
     @property
     def last_writing_content(self) -> Optional[ContentBlock]:
         return self.writing_content[-1] if self.writing_content else None
@@ -238,7 +238,7 @@ class SharedContextStore:
 
 
 # ──────────────────────────────────────────
-# Agent Permissions
+# Agent 权限
 # ──────────────────────────────────────────
 
 
@@ -275,7 +275,7 @@ AGENT_PERMISSIONS: Dict[str, AgentPermission] = {
 
 
 # ──────────────────────────────────────────
-# Write Result
+# 写入结果
 # ──────────────────────────────────────────
 
 

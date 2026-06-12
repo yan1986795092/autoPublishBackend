@@ -15,9 +15,9 @@ Jina Reader 特点：
 2. 直接 HTTP 抓取（兜底降级）
 """
 
-# Note: DO NOT use `from __future__ import annotations` here.
-# The MCP SDK's `issubclass(param.annotation, Context)` inspection requires
-# eagerly-evaluated type annotations, not strings.
+# 注意: 不要在此处使用 `from __future__ import annotations`。
+# MCP SDK 的 `issubclass(param.annotation, Context)` 内省需要
+# 立即求值的类型注解，而不是字符串形式的注解。
 import logging
 
 # 抑制 MCP SDK 内部 INFO 日志
@@ -43,7 +43,7 @@ async def read_url(
     max_length: int = 8000,
     return_format: str = "markdown",
 ) -> str:
-    """抓取 URL 并转换为 Markdown"""
+    """抓取指定 URL 并将其内容转换为 Markdown 格式"""
     try:
         import httpx
         import urllib.parse
@@ -66,7 +66,7 @@ async def read_url(
             if max_length and len(content) > max_length:
                 content = content[:max_length] + f"\n\n_(内容已被截断至 {max_length} 字)_"
 
-            # Jina 返回格式：title + --- + markdown
+            # Jina 返回格式为：标题 + --- + markdown 正文
             parts = content.split("\n---\n", 1)
             if len(parts) == 2:
                 title, body = parts
@@ -74,11 +74,11 @@ async def read_url(
             else:
                 return f"🔗 来源：{url}\n\n---\n\n{content.strip()}"
 
-        logger.warning(f"Jina Reader failed for {url} (HTTP {resp.status_code})")
+        logger.warning(f"Jina Reader 抓取失败 {url} (HTTP {resp.status_code})")
         return await _direct_fetch(url, max_length)
 
     except Exception as e:
-        logger.warning(f"Jina Reader error for {url}: {e}")
+        logger.warning(f"Jina Reader 抓取出错 {url}: {e}")
         return await _direct_fetch(url, max_length)
 
 
@@ -90,7 +90,7 @@ async def read_urls_batch(
     urls: list[str],
     max_length_per_url: int = 4000,
 ) -> str:
-    """批量抓取多个 URL"""
+    """批量抓取多个 URL 并返回每个页面的 Markdown 内容"""
     if not urls:
         return "未提供 URL 列表。"
 
@@ -103,7 +103,7 @@ async def read_urls_batch(
 
 
 async def _direct_fetch(url: str, max_length: int) -> str:
-    """直接 HTTP 抓取（降级兜底）"""
+    """通过直接 HTTP 请求抓取网页（作为 Jina Reader 的降级方案）"""
     try:
         import httpx
         from bs4 import BeautifulSoup
@@ -121,21 +121,21 @@ async def _direct_fetch(url: str, max_length: int) -> str:
 
         soup = BeautifulSoup(resp.text, "html.parser")
 
-        # 移除干扰元素
+        # 移除干扰元素（如脚本、样式、导航、页脚等）
         for tag in soup.find_all(["script", "style", "nav", "header", "footer", "aside", "noscript", "iframe", "form", "button"]):
             tag.decompose()
 
-        # 提取标题
+        # 从页面中提取标题
         title = ""
         if soup.title and soup.title.string:
             title = soup.title.string.strip()
 
-        # 提取 meta 描述
+        # 提取 meta 描述（来自页面 meta 标签）
         meta_desc = ""
         if soup.find("meta", attrs={"name": "description"}):
             meta_desc = soup.find("meta", attrs={"name": "description"}).get("content", "")
 
-        # 提取正文
+        # 提取正文内容（优先取 article 或 main 标签）
         article = soup.find("article") or soup.find("main") or soup
         paragraphs = article.find_all("p")
 
