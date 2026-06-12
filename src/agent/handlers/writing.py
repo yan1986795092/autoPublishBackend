@@ -35,12 +35,15 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         # ── 构建上下文 ──
         dep_context = task_input.get("_context", {})
         context_str_parts = []
-        for cdata in dep_context.values():
+        # 给第一个依赖更多 token（主内容），其余适当减少
+        dep_items = list(dep_context.items())
+        for idx, (_cid, cdata) in enumerate(dep_items):
             raw = cdata.get("content")
             if raw:
+                char_limit = 3000 if idx == 0 else 1500
                 # 支持纯字符串和结构化内容（如 MCP 工具返回的 [{"type":"text","text":"..."}]）
                 if isinstance(raw, str):
-                    text = raw[:1000]
+                    text = raw[:char_limit]
                 elif isinstance(raw, list):
                     parts = []
                     for item in raw:
@@ -53,11 +56,11 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                                     parts.append(str(sc["result"]))
                         elif isinstance(item, str):
                             parts.append(item)
-                    text = "\n".join(parts)[:1000]
+                    text = "\n".join(parts)[:char_limit]
                 elif isinstance(raw, dict):
-                    text = str(raw.get("result", raw))[:1000]
+                    text = str(raw.get("result", raw))[:char_limit]
                 else:
-                    text = str(raw)[:1000]
+                    text = str(raw)[:char_limit]
                 context_str_parts.append(text)
 
         # 记忆上下文（由 MemoryManager 注入）

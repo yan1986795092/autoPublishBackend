@@ -1,6 +1,6 @@
-"""语义记忆 — 基于向量检索的长期知识存储
+"""语义记忆 — 基于 pgvector 的长期知识存储
 
-包装已有的 VectorSearchTool，提供带命名空间的语义存储和检索。
+包装 VectorSearchTool（pgvector 版），提供带命名空间的语义存储和检索。
 """
 
 from __future__ import annotations
@@ -26,10 +26,7 @@ NAMESPACES = {
 class SemanticMemory:
     """语义记忆：向量化写入和检索，多命名空间隔离
 
-    使用方式：
-        mem = SemanticMemory()
-        mem.store("好内容...", namespace="content")
-        results = mem.retrieve("查询", namespace="content")
+    基于 pgvector（PostgreSQL 内置向量检索），无需独立向量数据库。
     """
 
     def __init__(self):
@@ -41,13 +38,11 @@ class SemanticMemory:
         """延迟初始化向量搜索引擎"""
         try:
             from src.tools.vector_search import vector_search
-            # 触发一次空查询验证连接
-            vector_search.search(query="__init__", top_k=1)
             self._vs = vector_search
             self._ready = True
-            logger.info("SemanticMemory: VectorSearchTool 就绪")
+            logger.info("SemanticMemory: pgvector 就绪")
         except Exception as e:
-            logger.warning(f"SemanticMemory: VectorSearchTool 不可用 ({e})，降级为纯文本模式")
+            logger.warning("SemanticMemory: 向量检索不可用 (%s)，降级为纯文本模式", e)
 
     @property
     def available(self) -> bool:
@@ -92,7 +87,7 @@ class SemanticMemory:
             )
             return True
         except Exception as e:
-            logger.warning(f"SemanticMemory.store 失败: {e}")
+            logger.warning("SemanticMemory.store 失败: %s", e)
             return False
 
     # ── 检索 ──
@@ -117,7 +112,7 @@ class SemanticMemory:
             results = self._vs.search(query=query, top_k=top_k * 2)
             matches = results.get("matches", [])
         except Exception as e:
-            logger.warning(f"SemanticMemory.retrieve 失败: {e}")
+            logger.warning("SemanticMemory.retrieve 失败: %s", e)
             return []
 
         items = []
@@ -165,13 +160,18 @@ class SemanticMemory:
     # ── 管理 ──
 
     def count(self, namespace: Optional[str] = None) -> int:
-        """统计记忆数量（目前仅支持全局计数）"""
+        """统计记忆数量"""
         if not self._ready:
             return 0
-        return 0  # ChromaDB 无轻量计数接口，预留
+        try:
+            return self._vs.count(namespace=namespace)
+        except Exception as e:
+            logger.warning("SemanticMemory.count 失败: %s", e)
+            return 0
 
     def clear(self) -> None:
         """清空记忆"""
-        self._vs = None
+        if self._ready:
+            self._vs.clear()
         self._ready = False
         self._init_vector_search()

@@ -31,8 +31,8 @@ llama-index>=0.14.0
 # Redis (optional, for production task queue)
 redis>=5.0.0
 
-# Vector DB (optional, for semantic search)
-chromadb>=0.5.0
+# pgvector (PostgreSQL 向量检索，替代 ChromaDB)
+pgvector>=0.3.0
 
 # MCP (Model Context Protocol) — Web Search
 mcp>=1.10.0

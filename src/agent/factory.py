@@ -8,6 +8,16 @@ from .orchestrator import Orchestrator
 
 logger = logging.getLogger(__name__)
 
+# 模块级单例 — ModelRouter 内部有 ChatOpenAI 实例缓存
+_shared_router: ModelRouter | None = None
+
+
+def _get_router() -> ModelRouter:
+    global _shared_router
+    if _shared_router is None:
+        _shared_router = ModelRouter()
+    return _shared_router
+
 
 def create_orchestrator(
     router: Optional[ModelRouter] = None,
@@ -17,14 +27,14 @@ def create_orchestrator(
     """创建 Orchestrator 实例，用 ModelRouter 为各 Agent 分配独立 LLM 实例。
 
     Args:
-        router: ModelRouter 实例，不传则自动创建
+        router: ModelRouter 实例，不传则使用共享单例
         mcp_tools: 可选的 MCP 工具列表
         **kwargs: 传递给 Orchestrator 的额外参数
 
     Returns:
         已就绪的 Orchestrator 实例
     """
-    router = router or ModelRouter()
+    router = router or _get_router()
 
     # 按 Agent 类型获取 LLM
     chat_models = {}

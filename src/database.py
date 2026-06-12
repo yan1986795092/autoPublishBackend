@@ -1,7 +1,7 @@
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import sessionmaker, Session
-from sqlalchemy.pool import StaticPool
+from sqlalchemy.pool import QueuePool
 from typing import Generator
 import structlog
 import time
@@ -11,10 +11,16 @@ logger = structlog.get_logger("db")
 
 settings = get_settings()
 
+# PostgreSQL 生产环境连接池
+# 本地开发与生产统一使用 PostgreSQL，配置保持一致
 engine = create_engine(
     settings.database_url,
-    connect_args={"check_same_thread": False} if "sqlite" in settings.database_url else {},
-    poolclass=StaticPool if "sqlite" in settings.database_url else None,
+    poolclass=QueuePool,
+    pool_size=10,
+    max_overflow=10,
+    pool_pre_ping=True,
+    pool_recycle=3600,
+    pool_use_lifo=True,
     echo=False,
 )
 

@@ -18,7 +18,7 @@ class Settings(BaseSettings):
     debug: bool = True
     api_prefix: str = "/api/v1"
 
-    database_url: str = "sqlite:///./autopublish.db"
+    database_url: str = "postgresql+psycopg2://autopublish:autopublish_dev@localhost:5432/autopublish"
 
     secret_key: str = "autopublish-local-dev-key-change-in-production-123456"
     jwt_algorithm: str = "HS256"

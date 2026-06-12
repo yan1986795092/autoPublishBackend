@@ -661,7 +661,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             cacheable_types = {"SEOAgent", "ReviewAgent", "WebSearch"}
             use_cache = agent_type in cacheable_types and not t_input.get("_skip_cache")
             if use_cache:
-                cached = agent_cache.get(agent_type, t_input)
+                cached = await agent_cache.get(agent_type, t_input)
                 if cached:
                     elapsed = round(time.time() - start_time, 2)
                     cached["time_elapsed"] = elapsed
@@ -743,7 +743,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             if use_cache and result.get("status") in ("completed", "partial"):
                 try:
                     _cache_input = {k: v for k, v in t_input.items() if not k.startswith('_')}
-                    agent_cache.set(agent_type, _cache_input, result)
+                    await agent_cache.set(agent_type, _cache_input, result)
                 except Exception as e:
                     logger.warning("缓存结果失败", agent_type=agent_type, error=str(e))
 
@@ -886,8 +886,19 @@ def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
                 content = output.get("content", "")
             elif isinstance(output, str):
                 content = output
+            elif isinstance(output, (list, tuple)):
+                # 列表/元组取第一个元素的 content
+                content = ""
+                for item in output:
+                    if isinstance(item, dict):
+                        content = item.get("content", item.get("text", ""))
+                    elif isinstance(item, str):
+                        content = item
+                    if content:
+                        break
             else:
-                content = str(output) if output else ""
+                # 非标准类型：只取前 200 字符的 repr，避免 str() 整个大对象
+                content = repr(output)[:200] if output else ""
             context[dep_id] = {
                 "content": _truncate_text(content, budget_per_dep),
                 "agent": prev.get("agent_type", ""),

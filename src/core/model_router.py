@@ -111,8 +111,15 @@ class ModelRouter:
         当前适用于 ManagerAgent / CodeAgent → 固定走 DeepSeek。
         不传 X-Route-Hint，避免 Gateway 误入 AutoRouter 路径。
 
-        不缓存实例（因为每次可能用不同模型/参数）。
+        缓存实例（以 model:agent_type 为键），避免 repeated create_orchestrator 调用
+        重复创建相同的 LLM 连接。
         """
+        cache_key = f"{model}:{agent_type}"
+        if cache_key in self._cache:
+            logger.debug("ModelRouter cache hit (exact-model)",
+                         agent_type=agent_type, model=model)
+            return self._cache[cache_key]
+
         llm = ChatOpenAI(
             model=model,
             api_key="gateway",
@@ -126,6 +133,7 @@ class ModelRouter:
             },
         )
 
+        self._cache[cache_key] = llm
         logger.info("ModelRouter -> Gateway (exact-model)",
                     agent_type=agent_type,
                     model=model,

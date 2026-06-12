@@ -49,3 +49,38 @@ def rename_thinking_trace_json_to_agent_events_json(engine) -> None:
                 "WHERE agent_events_json IS NULL AND thinking_trace_json IS NOT NULL"
             ))
             conn.commit()
+
+
+@migration_manager.register(
+    "create_vector_search_extension",
+    "启用 pgvector 扩展 + 创建 vector_search 表",
+)
+def create_vector_search_extension(engine) -> None:
+    inspector = inspect(engine)
+    with engine.connect() as conn:
+        conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        conn.commit()
+
+    if "vector_search" not in inspector.get_table_names():
+        with engine.connect() as conn:
+            conn.execute(text("""
+                CREATE TABLE vector_search (
+                    id SERIAL PRIMARY KEY,
+                    text TEXT NOT NULL,
+                    metadata JSONB DEFAULT '{}'::jsonb,
+                    embedding vector(1536),
+                    namespace VARCHAR(50) DEFAULT 'general',
+                    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+                )
+            """))
+            conn.execute(text("""
+                CREATE INDEX idx_vector_search_embedding
+                ON vector_search
+                USING ivfflat (embedding vector_cosine_ops)
+                WITH (lists = 100)
+            """))
+            conn.execute(text("""
+                CREATE INDEX idx_vector_search_namespace
+                ON vector_search (namespace)
+            """))
+            conn.commit()

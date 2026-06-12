@@ -1,36 +1,45 @@
-"""VectorSearch 工具 — 语义相似内容检索"""
+"""VectorSearch 工具 — 语义相似内容检索（基于 pgvector）
+
+直接在 PostgreSQL 中存储和检索向量，无需额外向量数据库。
+依赖 PostgreSQL 的 pgvector 扩展 + langchain 的 OpenAIEmbeddings。
+"""
 
 from __future__ import annotations
-import os
+import json
 import logging
-from typing import Optional
+import os
+from typing import Any, Optional
+
+from sqlalchemy import text
+
+from src.database import SessionLocal
 
 logger = logging.getLogger(__name__)
 
+_EMBEDDING_DIM = 1536  # OpenAI text-embedding-ada-002
+
 
 class VectorSearchTool:
-    """语义向量搜索工具，用于在知识库中检索相似内容"""
+    """语义向量搜索工具，使用 PostgreSQL + pgvector + OpenAI Embeddings"""
 
     name = "vector_search"
     description = "使用语义相似度在知识库中搜索相似内容"
 
-    def __init__(self, persist_path: str = "./data/vector_db"):
-        self._client = None
-        self._collection = None
+    def __init__(self):
         self._embeddings = None
-        self._persist_path = persist_path
+        self._pgvector_available = False
 
-    def _ensure_client(self):
-        if self._client is not None:
-            return
+    def _ensure_pgvector(self) -> bool:
+        """检查 pgvector 扩展是否可用"""
+        if self._pgvector_available:
+            return True
         try:
-            import chromadb
-            self._client = chromadb.PersistentClient(path=self._persist_path)
-            self._collection = self._client.get_or_create_collection("content_vectors")
+            __import__("pgvector")
+            self._pgvector_available = True
+            return True
         except ImportError:
-            logger.warning("chromadb 未安装，VectorSearch 不可用")
-        except Exception as e:
-            logger.warning(f"ChromaDB 初始化失败：{e}")
+            logger.warning("pgvector 未安装（pip install pgvector），向量搜索不可用")
+            return False
 
     def _ensure_embeddings(self):
         if self._embeddings is not None:
@@ -41,50 +50,169 @@ class VectorSearchTool:
                 from langchain_openai import OpenAIEmbeddings
                 self._embeddings = OpenAIEmbeddings(openai_api_key=api_key)
             except Exception as e:
-                logger.warning(f"嵌入模型初始化失败：{e}")
+                logger.warning("嵌入模型初始化失败：%s", e)
+        else:
+            logger.warning("未配置 OPENAI_API_KEY，向量搜索不可用")
 
-    def add_documents(self, texts: list[str], metadatas: Optional[list[dict]] = None, ids: Optional[list[str]] = None):
-        """向向量库添加文档"""
-        self._ensure_client()
+    def _to_pgvector_str(self, embedding: list[float]) -> str:
+        """将 embedding 列表格式化为 pgvector 可用的字符串"""
+        return "[" + ",".join(str(x) for x in embedding) + "]"
+
+    # ── 写入 ──────────────────────────────────────────────
+
+    def add_documents(
+        self,
+        texts: list[str],
+        metadatas: Optional[list[dict]] = None,
+        ids: Optional[list[str]] = None,
+    ) -> bool:
+        """向向量库添加文档
+
+        Args:
+            texts: 文档文本列表
+            metadatas: 可选元数据列表
+            ids: 可选 ID 列表（仅用于兼容旧接口，pgvector 使用 SERIAL 自增）
+
+        Returns:
+            是否成功写入
+        """
         self._ensure_embeddings()
-        if not self._collection or not self._embeddings:
+        if not self._embeddings or not texts:
             return False
+        if not self._ensure_pgvector():
+            return False
+
         try:
             embeddings = self._embeddings.embed_documents(texts)
-            self._collection.add(
-                embeddings=embeddings,
-                documents=texts,
-                metadatas=metadatas or [{}] * len(texts),
-                ids=ids or [str(i) for i in range(len(texts))],
-            )
-            return True
+            metadatas = metadatas or [{}] * len(texts)
+
+            db = SessionLocal()
+            try:
+                for i, doc_text in enumerate(texts):
+                    embedding_str = self._to_pgvector_str(embeddings[i])
+                    meta_json = json.dumps(metadatas[i], ensure_ascii=False) if metadatas[i] else "{}"
+                    namespace = metadatas[i].get("namespace", "general") if metadatas[i] else "general"
+
+                    db.execute(
+                        text(
+                            "INSERT INTO vector_search (text, metadata, embedding, namespace) "
+                            "VALUES (:text, :metadata::jsonb, :embedding::vector, :namespace)"
+                        ),
+                        {
+                            "text": doc_text,
+                            "metadata": meta_json,
+                            "embedding": embedding_str,
+                            "namespace": namespace,
+                        },
+                    )
+                db.commit()
+                return True
+            except Exception as e:
+                db.rollback()
+                logger.warning("VectorSearch 写入失败: %s", e)
+                return False
+            finally:
+                db.close()
+
         except Exception as e:
-            logger.warning(f"VectorSearch 添加失败：{e}")
+            logger.warning("VectorSearch 嵌入生成失败: %s", e)
             return False
 
-    def search(self, query: str, top_k: int = 5) -> dict:
-        """搜索相似内容"""
-        self._ensure_client()
-        self._ensure_embeddings()
+    # ── 检索 ──────────────────────────────────────────────
 
-        if not self._collection or not self._embeddings:
-            return {"query": query, "matches": [], "total": 0, "fallback": "vector_search_unavailable"}
+    def search(self, query: str, top_k: int = 5) -> dict:
+        """搜索相似内容
+
+        Args:
+            query: 查询文本
+            top_k: 返回条数
+
+        Returns:
+            {"query": str, "matches": [...], "total": int}
+        """
+        self._ensure_embeddings()
+        if not self._embeddings:
+            return {"query": query, "matches": [], "total": 0, "fallback": "embedding_unavailable"}
+        if not self._ensure_pgvector():
+            return {"query": query, "matches": [], "total": 0, "fallback": "pgvector_unavailable"}
 
         try:
             query_embedding = self._embeddings.embed_query(query)
-            results = self._collection.query(query_embeddings=[query_embedding], n_results=top_k)
+            embedding_str = self._to_pgvector_str(query_embedding)
 
-            matches = []
-            if results.get("documents") and results["documents"][0]:
-                for i, doc in enumerate(results["documents"][0]):
-                    dist = results.get("distances", [[0]])[0][i] if results.get("distances") else 0
-                    meta = results.get("metadatas", [[{}]])[0][i] if results.get("metadatas") else {}
-                    matches.append({"content": doc, "distance": dist, "metadata": meta})
+            db = SessionLocal()
+            try:
+                rows = db.execute(
+                    text(
+                        "SELECT id, text, metadata, namespace, "
+                        "  (embedding <=> :query_vec::vector) AS distance "
+                        "FROM vector_search "
+                        "ORDER BY embedding <=> :query_vec2::vector "
+                        "LIMIT :limit"
+                    ),
+                    {"query_vec": embedding_str, "query_vec2": embedding_str, "limit": top_k},
+                ).fetchall()
 
-            return {"query": query, "matches": matches, "total": len(matches)}
+                matches = []
+                for row in rows:
+                    meta = {}
+                    try:
+                        meta = json.loads(row.metadata) if row.metadata else {}
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    matches.append({
+                        "content": row.text,
+                        "distance": float(row.distance),
+                        "metadata": meta,
+                        "namespace": row.namespace,
+                    })
+
+                return {"query": query, "matches": matches, "total": len(matches)}
+
+            except Exception as e:
+                logger.warning("VectorSearch SQL 查询失败: %s", e)
+                return {"query": query, "matches": [], "total": 0, "error": str(e)}
+            finally:
+                db.close()
+
         except Exception as e:
-            logger.warning(f"VectorSearch 查询失败：{e}")
+            logger.warning("VectorSearch 查询嵌入生成失败: %s", e)
             return {"query": query, "matches": [], "total": 0, "error": str(e)}
+
+    # ── 管理 ──────────────────────────────────────────────
+
+    def count(self, namespace: Optional[str] = None) -> int:
+        """统计条目数"""
+        db = SessionLocal()
+        try:
+            if namespace:
+                row = db.execute(
+                    text("SELECT COUNT(*) FROM vector_search WHERE namespace = :ns"),
+                    {"ns": namespace},
+                ).scalar()
+            else:
+                row = db.execute(text("SELECT COUNT(*) FROM vector_search")).scalar()
+            return row or 0
+        except Exception as e:
+            logger.warning("VectorSearch count 失败: %s", e)
+            return 0
+        finally:
+            db.close()
+
+    def clear(self, namespace: Optional[str] = None) -> None:
+        """清空数据"""
+        db = SessionLocal()
+        try:
+            if namespace:
+                db.execute(text("DELETE FROM vector_search WHERE namespace = :ns"), {"ns": namespace})
+            else:
+                db.execute(text("DELETE FROM vector_search"))
+            db.commit()
+        except Exception as e:
+            logger.warning("VectorSearch clear 失败: %s", e)
+            db.rollback()
+        finally:
+            db.close()
 
 
 # 单例

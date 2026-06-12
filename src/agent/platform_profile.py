@@ -591,8 +591,16 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
 
 # ── 辅助函数 ─────────────────────────────────────────────────────────
 
+from functools import lru_cache
+
+
+@lru_cache(maxsize=32)
 def get_profile(platform_code: str) -> dict[str, Any] | None:
-    """获取平台配置，不存在返回 None"""
+    """获取平台配置，不存在返回 None
+
+    使用 lru_cache 避免在同一请求路径中重复 dict 查找。
+    平台配置在运行时不变，缓存安全。
+    """
     return PLATFORM_PROFILES.get(platform_code)
 
 

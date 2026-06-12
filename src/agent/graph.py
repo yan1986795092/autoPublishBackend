@@ -17,7 +17,10 @@ Graph 结构:
 
 from __future__ import annotations
 
+from functools import lru_cache
+
 from langgraph.graph import END, StateGraph
+from langgraph.graph.state import CompiledStateGraph
 
 from .nodes import (
     classify_and_decompose,
@@ -29,8 +32,9 @@ from .nodes import (
 from .state import AgentGraphState
 
 
-def build_agent_graph() -> StateGraph:
-    """构建 Agent 编排 StateGraph"""
+@lru_cache(maxsize=1)
+def build_agent_graph() -> CompiledStateGraph:
+    """构建 Agent 编排 StateGraph（缓存编译结果，避免重复构建）"""
     builder = StateGraph(AgentGraphState)
 
     builder.add_node("classify_and_decompose", classify_and_decompose)
