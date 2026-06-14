@@ -34,11 +34,18 @@ def setup_observability(
     """
     if settings is not None:
         from src.logging_shared.config import setup as setup_logging
-        setup_logging(settings)
+        setup_logging(
+            log_level=settings.log_level,
+            log_json=settings.log_json_format,
+            service_name=service_name,
+        )
     else:
-        from src.config import Settings
         from src.logging_shared.config import setup as setup_logging
-        setup_logging(Settings(log_level="DEBUG", log_json_format=False))
+        setup_logging(
+            log_level="DEBUG",
+            log_json=False,
+            service_name=service_name,
+        )
 
     # UnifiedEsWriter 在 main.py 的 lifespan 中启动 —— 此处仅确保已初始化
     UnifiedEsWriter.get_instance()
@@ -54,11 +61,18 @@ def setup_local_dev(settings=None) -> tuple[None, None]:
     """本地开发模式：与 setup_observability 相同，无 OTel。"""
     if settings is not None:
         from src.logging_shared.config import setup as setup_logging
-        setup_logging(settings)
+        setup_logging(
+            log_level=settings.log_level,
+            log_json=settings.log_json_format,
+            service_name="autopublish-api-dev",
+        )
     else:
-        from src.config import Settings
         from src.logging_shared.config import setup as setup_logging
-        setup_logging(Settings(log_level="DEBUG", log_json_format=False))
+        setup_logging(
+            log_level="DEBUG",
+            log_json=False,
+            service_name="autopublish-api-dev",
+        )
 
     UnifiedEsWriter.get_instance()
     logger.info("本地开发可观测性已初始化")

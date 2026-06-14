@@ -35,7 +35,11 @@ logger = structlog.get_logger(__name__)
 async def lifespan(app: FastAPI):
     settings = get_settings()
     # 统一日志配置（读取 settings.log_level, settings.log_json_format）
-    setup_logging(settings)
+    setup_logging(
+        log_level=settings.log_level,
+        log_json=settings.log_json_format,
+        service_name="autopublish-api",
+    )
 
     # 统一 tracing 初始化（structlog only，OTel SDK 已移除）
     tracer, meter = setup_observability(

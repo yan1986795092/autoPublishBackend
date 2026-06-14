@@ -942,6 +942,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         }
 
         primary_content = ""
+        review_content = ""
         meta_sections = {}
 
         # 按优先级收集候选内容：SEO改写 > WritingAgent > 其他
@@ -952,11 +953,14 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             output = result.get("output", {})
             agent_type = result.get("agent_type", task.get("agent_type", ""))
 
+            if agent_type == "ReviewAgent" and isinstance(output, dict):
+                # 审核内容单独收集，不进入主正文
+                review_content = output.get("content", "")
+
             if agent_type == "SEOAgent" and isinstance(output, dict):
                 metadata = output.get("metadata", {})
                 if metadata:
                     meta_sections["seo"] = metadata
-                # SEO rewrite=True 模式的 output.content 应作为主内容
                 seo_content = output.get("content", "")
                 if seo_content and output.get("type") != "metadata":
                     content_candidates.append(("seo_rewrite", seo_content))
@@ -964,7 +968,8 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             if agent_type == "WritingAgent" and isinstance(output, dict):
                 content = output.get("content", "")
                 content_type = output.get("content_type", "")
-                if content and content_type in _CONTENT_TYPES:
+                output_type = output.get("type", "")
+                if content and (content_type in _CONTENT_TYPES or output_type == "text"):
                     content_candidates.append(("writing", content))
             elif agent_type == "WritingAgent" and isinstance(output, str) and output:
                 content_candidates.append(("writing", output))
@@ -979,19 +984,24 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 break
 
         if not primary_content:
-            logger.warning("未找到主内容，退回到拼接方式")
+            logger.warning("未找到主内容，退回到拼接方式，但跳过审核 Agent")
             for task in task_queue:
                 tid = task.get("id", "")
                 result = task_results.get(tid, {})
+                agent_type = result.get("agent_type", task.get("agent_type", ""))
+                # 跳过审核 agent，不进入主正文
+                if agent_type == "ReviewAgent":
+                    if not review_content:
+                        output = result.get("output", {})
+                        review_content = output.get("content", "") if isinstance(output, dict) else ""
+                    continue
                 output = result.get("output", {})
                 if isinstance(output, dict):
                     content = output.get("content", "")
                 else:
                     content = str(output) if output else ""
                 if content:
-                    full_text_parts.append(
-                        f"\n\n--- {result.get('agent_type', task.get('agent_type', ''))} ---\n{content}"
-                    )
+                    full_text_parts.append(content)
             primary_content = "".join(full_text_parts)
         else:
             full_text_parts = [primary_content]
@@ -1029,6 +1039,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 "platform": plan.get("platform", ""),
                 "sections": sections,
                 "full_text": "".join(full_text_parts),
+                "review_content": review_content,  # 审核内容独立字段，不混入 full_text
             },
             "status": status,
         }
