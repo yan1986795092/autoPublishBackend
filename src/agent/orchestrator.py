@@ -21,7 +21,6 @@ from langchain_openai import ChatOpenAI
 from .graph import build_agent_graph
 from .state import AgentGraphState
 from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
-from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, validate_plan_structure
 from src.observability.metrics import record_agent_run
 from src.observability.agent_tracer import get_agent_tracer, AgentTracer
 
@@ -224,14 +223,6 @@ class Orchestrator:
     # 以下方法保留供 /agent/plan 和 /agent/repurpose 使用
     # ══════════════════════════════════════════════
 
-    def _classify_complexity(self, user_request: str) -> str:
-        from .nodes import _classify_complexity as _cc
-        return _cc(user_request)
-
-    def _detect_platform(self, user_request: str) -> str | None:
-        from .platform_registry import detect_platform
-        return detect_platform(user_request)
-
     def _build_fallback_plan(self, user_request: str, *args, **kwargs) -> "ExecutionPlan":
         from .nodes import _build_fallback_plan as _bfp
         plan_dict = _bfp(user_request)
@@ -259,48 +250,92 @@ class Orchestrator:
     _build_template_plan = _build_fallback_plan
 
     async def _decompose(self, user_request: str, context: dict) -> ExecutionPlan:
-        from .nodes import _classify_complexity, _build_fallback_plan
-        detected = self._detect_platform(user_request)
-        detected_name = ""
-        if detected:
-            from .platform_registry import PLATFORMS
-            detected_name = PLATFORMS.get(detected, type("", (), {"name": ""})()).name
+        """将用户请求分解为执行计划（用于 /agent/plan 端点）"""
+        from .nodes import (
+            UNDERSTANDING_SYSTEM_PROMPT, PLANNING_SYSTEM_PROMPT,
+            _build_fallback_understanding, _parse_plan_from_response, _build_fallback_plan,
+        )
+
+        # Step 1: 理解（纯 LLM）
+        understanding = None
+        platform_tag = context.get("platform", "")
+        platform_context = ""
+        if platform_tag:
+            from .platform_registry import PLATFORMS as _P
+            meta = _P.get(platform_tag)
+            if meta:
+                platform_context = f"\nPlatform tag from UI: {meta.name} ({platform_tag})"
 
         if self._planner_llm:
             try:
-                complexity = _classify_complexity(user_request)
-                context_str = json.dumps(context, ensure_ascii=False, indent=2) if context else "{}"
-                prompt = f"""用户请求: {user_request}
-
-复杂度: {complexity}
-检测到的平台: {detected_name or "无"}
-额外上下文:
-{context_str}
-
-请将其分解为可分配给可用代理的子任务。"""
-
-                llm_result = await self._planner_llm.ainvoke(
+                response = await self._planner_llm.ainvoke(
                     [
-                        {"role": "system", "content": PLANNER_SYSTEM_PROMPT},
-                        {"role": "user", "content": prompt},
+                        {"role": "system", "content": UNDERSTANDING_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"User request: {user_request}{platform_context}"},
+                    ],
+                    config={"temperature": 0.3},
+                )
+                understanding = json.loads(response.content)
+                if not isinstance(understanding, dict) or "intent" not in understanding:
+                    understanding = None
+            except Exception as e:
+                logger.warning("编排器 LLM 理解失败", error=str(e))
+
+        if not understanding:
+            understanding = _build_fallback_understanding(user_request, context)
+
+        # Step 2: 规划（纯 LLM，仅基于 understanding）
+        context_data = {
+            "intent": understanding.get("intent", ""),
+            "cleaned_prompt": understanding.get("cleaned_prompt", user_request)[:500],
+            "content_type": understanding.get("content_type", "blog"),
+            "platform": understanding.get("platform"),
+            "platform_name": understanding.get("platform_name", ""),
+        }
+
+        plan_dict = None
+        if self._planner_llm:
+            try:
+                response = await self._planner_llm.ainvoke(
+                    [
+                        {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
+                        {"role": "user", "content": f"""## User Request\n{context_data['cleaned_prompt']}\n\n## Intent Understanding\n{json.dumps(context_data, ensure_ascii=False, indent=2)}\n\nBased on the above understanding, select the most appropriate agents to complete the task."""},
                     ],
                     config={"temperature": self.temperature},
                 )
-                plan = self._parse_plan(llm_result.content, user_request)
-                if len(plan.tasks) == 0:
-                    logger.warning("LLM 计划无任务，使用兜底方案")
-                    return self._build_fallback_plan(user_request)
-                logger.info("LLM 生成了计划: %d 个任务", len(plan.tasks))
-                return plan
+                plan_dict = _parse_plan_from_response(response.content, user_request)
             except Exception as e:
-                logger.warning("编排器中 LLM 分解失败，使用兜底方案", error=str(e))
+                logger.warning("编排器 LLM 规划失败", error=str(e))
 
-        return self._build_fallback_plan(user_request)
+        if not plan_dict:
+            plan_dict = _build_fallback_plan(user_request)
+
+        tasks = []
+        for i, t in enumerate(plan_dict.get("tasks", [])):
+            tasks.append(AgentTask(
+                id=t["id"],
+                agent_type=t.get("agent_type", "WritingAgent"),
+                input=t.get("input", {}),
+                dependencies=t.get("dependencies", []),
+                can_parallel_with=t.get("can_parallel_with", []),
+                retry_on_low_quality=t.get("retry_on_low_quality", False),
+                priority=t.get("priority", "medium"),
+                config={"reasoning": t.get("config", {}).get("reasoning", ""), "priority": i},
+            ))
+        return ExecutionPlan(
+            goal=plan_dict.get("goal", user_request[:200]),
+            tasks=tasks,
+            reasoning=plan_dict.get("reasoning", ""),
+            estimated_steps=len(tasks),
+            plan_method=plan_dict.get("plan_method", "template"),
+        )
 
     def _parse_plan(self, response: str, goal: str) -> ExecutionPlan:
         try:
-            from .nodes import _parse_plan as _pp
-            plan_dict = _pp(response, goal)
+            from .nodes import _parse_plan_from_response as _ppr
+            plan_dict = _ppr(response, goal)
+            if not plan_dict:
+                return self._build_fallback_plan(goal)
             tasks = []
             for i, t in enumerate(plan_dict.get("tasks", [])):
                 tasks.append(AgentTask(

@@ -37,8 +37,9 @@ class AgentGraphState(TypedDict):
     error: Optional[str]
     status: str                   # running / completed / failed / partial
 
-    # === 意图分析（预处理结果） ===
-    intent_analysis: Optional[dict]  # analyze_intent() 的结构化输出
+    # === 意图理解（LLM 分析结果，替代旧的 intent_analysis） ===
+    understanding: Optional[dict]    # understand_intent() 的结构化输出
+    understanding_raw: Optional[str] # LLM 原始响应（调试用）
 
     # === 系统引用（不序列化） ===
     _async_task_id: str

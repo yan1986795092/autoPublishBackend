@@ -1,7 +1,10 @@
 """LangGraph StateGraph 构建器 — 编排全部 Agent 节点
 
 Graph 结构:
-  classify_and_decompose
+  understand_intent
+       │ (direct)
+       ▼
+  plan_tasks
        │ (direct)
        ▼
   schedule_and_execute
@@ -23,7 +26,8 @@ from langgraph.graph import END, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from .nodes import (
-    classify_and_decompose,
+    understand_intent,
+    plan_tasks,
     schedule_and_execute,
     execute_task_batch,
     merge_and_finish,
@@ -37,14 +41,16 @@ def build_agent_graph() -> CompiledStateGraph:
     """构建 Agent 编排 StateGraph（缓存编译结果，避免重复构建）"""
     builder = StateGraph(AgentGraphState)
 
-    builder.add_node("classify_and_decompose", classify_and_decompose)
+    builder.add_node("understand_intent", understand_intent)
+    builder.add_node("plan_tasks", plan_tasks)
     builder.add_node("schedule_and_execute", schedule_and_execute)
     builder.add_node("execute_task_batch", execute_task_batch)
     builder.add_node("merge_and_finish", merge_and_finish)
 
-    builder.set_entry_point("classify_and_decompose")
+    builder.set_entry_point("understand_intent")
 
-    builder.add_edge("classify_and_decompose", "schedule_and_execute")
+    builder.add_edge("understand_intent", "plan_tasks")
+    builder.add_edge("plan_tasks", "schedule_and_execute")
 
     builder.add_conditional_edges(
         "schedule_and_execute",

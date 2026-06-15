@@ -21,7 +21,9 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 
 from .state import AgentGraphState
-from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, validate_plan_structure
+from .agent_utils import (
+    UNDERSTANDING_SYSTEM_PROMPT, PLANNING_SYSTEM_PROMPT,
+)
 from .platform_registry import PLATFORMS, detect_platform, get_names_map
 from .handlers import HANDLER_MAP, handle_fallback
 from .cache import agent_cache
@@ -62,181 +64,26 @@ def _resolve_dep_id(dep: str | int, task_queue: list[dict]) -> str | None:
     return None
 
 
-def _classify_complexity(user_request: str) -> str:
-    """对用户需求进行复杂度分类"""
+def _build_fallback_plan(user_request: str, platform_code: str | None = None) -> dict:
+    """简化兜底：纯关键词匹配，无 intent_analysis 依赖"""
+    goal = user_request[:200]
     text = user_request.lower()
-    complex_keywords = ["图表", "架构图", "流程图", "思维导图", "配图", "封面", "多平台", "报告", "行业分析", "视频", "脚本", "newsletter", "博客", "深度"]
-    medium_keywords = ["搜索", "热点", "热搜", "趋势", "优化", "seo", "推广", "营销"]
 
-    complex_count = sum(1 for kw in complex_keywords if kw in text)
-    medium_count = sum(1 for kw in medium_keywords if kw in text)
-
-    if complex_count >= 2 or (complex_count >= 1 and len(text) > 50):
-        return "complex"
-    elif medium_count >= 1 or len(text) > 80:
-        return "medium"
-    return "simple"
-
-
-def analyze_intent(user_request: str, context: dict | None = None) -> dict:
-    """预处理用户输入：分析意图、检测平台、提取主题、推荐 Agent 组合
-
-    在 ManagerAgent 规划之前运行，不依赖 LLM（纯规则+关键词）。
-    输出结构化意图分析，供 LLM 规划 和 兜底计划 共同使用。
-
-    Returns:
-        dict: {
-            "intent_type": str,        # create / research / analyze / edit / code / translate
-            "platform": str | None,    # 检测到的平台代码
-            "platform_name": str,      # 平台中文名
-            "content_type": str,       # 内容类型
-            "topic": str,              # 提取的主题
-            "suggested_agents": list,  # 推荐的 Agent 组合
-            "language": str,           # zh / en
-            "constraints": {           # 约束条件
-                "tone": str | None,
-                "length": str | None,
-                "style": str | None,
-            }
-        }
-    """
-    text = user_request.strip()
-    lower = text.lower()
-
-    # ── 1. 语言检测 ──
-    has_chinese = bool(re.search(r'[一-鿿]', text))
-    language = "zh" if has_chinese else "en"
-
-    # ── 2. 平台检测（复用现有逻辑） ──
-    platform = detect_platform(text)
-    names_map = get_names_map()
-    platform_name = names_map.get(platform, "") if platform else ""
-
-    # ── 3. 内容类型推导 ──
-    p = PLATFORMS.get(platform) if platform else None
+    detected = platform_code or detect_platform(user_request)
+    p = PLATFORMS.get(detected) if detected else None
     content_type = p.content_type if p else "blog"
 
-    # ── 4. 意图分类 ──
-    # 平台检测优先：检测到平台时 intent 偏向 create
-    if platform:
-        intent_type = "create"
-    elif any(kw in lower for kw in ["搜索", "查一下", "search", "trending", "热点", "热搜", "最新"]):
-        intent_type = "research"
-    elif any(kw in lower for kw in ["分析", "总结", "评估", "analyze", "summarize", "review"]):
-        intent_type = "analyze"
-    elif any(kw in lower for kw in ["修改", "改进", "优化", "rewrite", "improve", "edit"]):
-        intent_type = "edit"
-    elif any(kw in lower for kw in ["代码", "脚本", "程序", "写一个", "code", "program", "function", "script"]):
-        intent_type = "code"
-        content_type = "code"
-    elif any(kw in lower for kw in ["翻译", "translate", "译"]):
-        intent_type = "translate"
-        content_type = "text"
-    else:
-        intent_type = "create"
-
-    # ── 5. 主题提取（取第一段有意义的话） ──
-    # 去掉平台/意图关键词后的第一句作为主题
-    topic = text
-    lines = [l.strip() for l in text.replace('？', '?').replace('！', '!').split('\n') if l.strip()]
-    for line in lines:
-        # 找第一个长句作为主题
-        for sep in ['?', '!', '。', '；', ';', '\n']:
-            if sep in line:
-                line = line.split(sep)[0]
-        if len(line) >= 4:
-            topic = line[:100]
-            break
-
-    # ── 6. Agent 组合推荐 ──
-    if platform:
-        from .platform_profile import get_suggested_agents
-        suggested = list(get_suggested_agents(platform))
-        # 保证写作和审核
-        if "writing" not in suggested:
-            suggested.insert(0, "writing")
-        if "review" not in suggested:
-            suggested.append("review")
-        # 加 fix 做闭环
-        if "fix" not in suggested and "review" in suggested:
-            suggested.append("fix")
-    elif intent_type == "research":
-        suggested = ["search", "writing", "review", "fix"]
-    elif intent_type == "analyze":
-        suggested = ["search", "writing", "review"]
-    elif intent_type == "edit":
-        suggested = ["writing", "review", "fix"]
-    elif intent_type == "code":
+    # 简易关键词 → Agent 映射
+    if any(kw in text for kw in ["代码", "脚本", "程序", "写一个", "python", "java", "javascript", "function"]):
         suggested = ["code", "review"]
-    elif intent_type == "translate":
-        suggested = ["writing", "review"]
+    elif any(kw in text for kw in ["图表", "架构图", "流程图", "mermaid", "diagram"]):
+        suggested = ["writing", "diagram", "review"]
+    elif any(kw in text for kw in ["搜索", "热点", "热搜", "查", "最新", "趋势", "news", "trending"]):
+        suggested = ["search", "writing", "review"]
+    elif any(kw in text for kw in ["分析", "url", "链接", "网站", "网页", "抓取"]):
+        suggested = ["search", "writing", "review"]
     else:
         suggested = ["writing", "review", "fix"]
-
-    # ── 7. 约束提取（简单关键词匹配） ──
-    constraints: dict = {"tone": None, "length": None, "style": None}
-    tone_keywords = {
-        "幽默": "humorous", "轻松": "humorous",
-        "专业": "professional", "严肃": "professional",
-        "友好": "friendly", "温暖": "warm", "亲切": "friendly",
-        "深度": "deep", "技术": "technical",
-    }
-    for kw, val in tone_keywords.items():
-        if kw in text:
-            constraints["tone"] = val
-            break
-    if any(kw in lower for kw in ["短", "精简", "brief", "short"]):
-        constraints["length"] = "short"
-    elif any(kw in lower for kw in ["长", "详细", "深度", "long", "detailed"]):
-        constraints["length"] = "long"
-    else:
-        constraints["length"] = "medium"
-
-    return {
-        "intent_type": intent_type,
-        "platform": platform,
-        "platform_name": platform_name,
-        "content_type": content_type,
-        "topic": topic,
-        "suggested_agents": suggested,
-        "language": language,
-        "constraints": constraints,
-    }
-
-
-def _build_fallback_plan(user_request: str, platform_code: str | None = None,
-                         intent_analysis: dict | None = None) -> dict:
-    """动态兜底：优先用 intent_analysis，其次平台 profile，最后关键词"""
-    goal = user_request[:200]
-
-    p = None  # 平台 profile，可能在 if/else 中赋值，统一初始化防止 UnboundLocalError
-
-    # 优先使用意图分析结果
-    if intent_analysis:
-        suggested = list(intent_analysis.get("suggested_agents", ["writing", "review"]))
-        detected = intent_analysis.get("platform") or platform_code
-        content_type = intent_analysis.get("content_type", "blog")
-    else:
-        detected = platform_code or detect_platform(user_request)
-        p = PLATFORMS.get(detected) if detected else None
-        content_type = p.content_type if p else "blog"
-
-        # 从平台 profile 获取建议的 Agent 组合
-        from .platform_profile import get_suggested_agents
-        suggested = get_suggested_agents(detected) if detected else None
-
-        if not suggested:
-            text = user_request.lower()
-            if any(kw in text for kw in ["代码", "脚本", "程序", "python", "java", "javascript", "function", "app"]):
-                suggested = ["code", "review"]
-            elif any(kw in text for kw in ["图表", "架构图", "流程图", "mermaid", "diagram"]):
-                suggested = ["writing", "diagram", "review"]
-            elif any(kw in text for kw in ["搜索", "热点", "热搜", "查", "最新", "趋势", "news", "trending"]):
-                suggested = ["search", "writing", "review"]
-            elif any(kw in text for kw in ["分析", "url", "链接", "网站", "网页", "抓取"]):
-                suggested = ["search", "writing", "review"]
-            else:
-                suggested = ["writing", "review", "fix"]
 
     tasks = []
     last_id_index = -1
@@ -454,194 +301,261 @@ def _post_process_context(agent_type: str, result: dict, store: Any, state: Agen
         logger.warning("后处理上下文失败", agent_type=agent_type, error=str(e))
 
 
+# ── 最小规则兜底：仅在 LLM 理解完全失败时使用 ──
+
+def _build_fallback_understanding(user_request: str, context: dict) -> dict:
+    """最小规则兜底：LLM 理解失败时，纯关键词检测语言和平台"""
+    text = user_request.strip()
+    has_chinese = bool(re.search(r'[一-鿿]', text))
+
+    from .platform_registry import detect_platform, get_names_map
+    platform = context.get("platform") or detect_platform(text)
+    platform_name = get_names_map().get(platform, "") if platform else ""
+
+    return {
+        "intent": "generate content",
+        "cleaned_prompt": user_request,
+        "safety": True,
+        "safety_reason": "",
+        "platform": platform,
+        "platform_name": platform_name,
+        "content_type": "blog",
+        "conflicts": [],
+        "language": "zh" if has_chinese else "en",
+    }
+
+
 # ──────────────────────────────────────────────
-# 1. classify_and_decompose 节点
+# 1. understand_intent 节点
 # ──────────────────────────────────────────────
 
-async def classify_and_decompose(state: AgentGraphState) -> dict:
-    """复杂度分类 + 任务分解。LLM 动态规划，模板为兜底。"""
+async def understand_intent(state: AgentGraphState) -> dict:
+    """理解 Agent：纯 LLM 意图分析，无规则偏差"""
     tracer = _get_tracer()
     user_request = state.get("user_request", "")
+    context = state.get("context", {})
     trace_id = str(uuid.uuid4())
-    complexity = _classify_complexity(user_request)
 
-    # 可用 Agent 清单（注入进 LLM 提示词，让 ManagerAgent 动态选择）
-    AVAILABLE_AGENTS = """
-可用 Agent 类型（根据任务需要选择合适的组合）：
-
-1. WebSearch — 联网搜索热点、资料、数据。依赖：无。用于写作前收集素材。
-2. URLCrawler — 抓取指定 URL 的内容。依赖：无。用于分析已有文章。
-3. WritingAgent — 内容写作，根据主题和平台要求生成正文。依赖：无或搜索前置。
-4. SEOAgent — SEO 优化，可改写正文使其更符合搜索习惯。依赖：正文前置。
-5. CodeAgent — 代码生成，按需求编写代码。依赖：无。
-6. DiagramAgent — 图表生成（Mermaid 格式）。依赖：无。
-7. ReviewAgent — 内容审核，检查质量、违禁词、事实。依赖：正文前置。
-8. FixAgent — 按审核意见自动修复内容。依赖：正文和审核前置。
-
-常用组合示例：
-- 写作任务：WebSearch → WritingAgent → ReviewAgent → FixAgent
-- 纯搜索：WebSearch
-- 代码任务：CodeAgent
-- 改写优化：WritingAgent → SEOAgent
-"""
+    # 从上下文获取平台标签（前端可选提供）
+    platform_tag = context.get("platform", "")
+    platform_context = ""
+    if platform_tag:
+        from .platform_registry import PLATFORMS as _PLATFORMS
+        meta = _PLATFORMS.get(platform_tag)
+        if meta:
+            platform_context = f"\nPlatform tag from UI: {meta.name} ({platform_tag})"
 
     with tracer.start_as_current_span(
-        "agent.classify",
+        "agent.understand",
         kind="INTERNAL",
         attributes={
-            "agent.node": "classify_and_decompose",
-            "agent.complexity": complexity,
+            "agent.node": "understand_intent",
             "agent.user_request.preview": user_request[:200],
-            "custom.run_id": state.get("trace_task_id", ""),
+            "custom.run_id": trace_id,
         },
     ) as span:
-        span.add_event("complexity_classified", {"complexity": complexity})
+        llm = _get_llm(state, "ManagerAgent")
+        understanding = None
+        understanding_raw = ""
 
-        # ── 预处理：意图分析（纯规则，无 LLM） ──
-        intent_analysis = analyze_intent(user_request, state.get("context"))
-        detected = intent_analysis["platform"]
-        names_map = get_names_map()
-        platform = detected if detected else "generic"
-        platform_name = intent_analysis["platform_name"] or names_map.get(platform, "通用内容")
+        if llm:
+            try:
+                response = await asyncio.wait_for(
+                    llm.ainvoke([
+                        SystemMessage(content=UNDERSTANDING_SYSTEM_PROMPT),
+                        HumanMessage(content=f"User request: {user_request}{platform_context}"),
+                    ]),
+                    timeout=30.0,
+                )
+                understanding_raw = response.content
+                parsed = json.loads(response.content)
+                # Validate required fields
+                if isinstance(parsed, dict) and all(k in parsed for k in ("intent", "cleaned_prompt", "safety")):
+                    understanding = parsed
+                else:
+                    raise ValueError("Missing required fields in understanding response")
+            except Exception as e:
+                logger.warning("LLM 理解失败，使用规则兜底", error=str(e)[:200])
+                span.record_exception(e)
+
+        # LLM 完全失败时：最小规则兜底
+        if not understanding:
+            understanding = _build_fallback_understanding(user_request, context)
 
         updates = {
             "trace_task_id": trace_id,
-            "intent_analysis": intent_analysis,
+            "understanding": understanding,
+            "understanding_raw": understanding_raw,
             "start_time": time.time(),
             "thinking_steps": [],
             "status": "running",
         }
 
-        span.add_event("step_started", {"step": "intent_analysis"})
-        span.set_attribute("agent.intent_type", intent_analysis["intent_type"])
-        span.set_attribute("agent.platform", platform)
-        logger.info("意图分析：%s | 平台：%s | Agent：%s",
-                     intent_analysis["intent_type"], platform_name, intent_analysis["suggested_agents"])
-
         updates.update(_add_thinking_step(
-            state, "ManagerAgent", "意图分析完成",
-            reasoning=f"识别到意图={intent_analysis['intent_type']}，平台={platform_name}，推荐Agent={intent_analysis['suggested_agents']}",
+            state, "UnderstandingAgent", "意图分析完成",
+            reasoning=f"意图={understanding['intent']}，平台={understanding.get('platform_name', '无')}，安全={understanding['safety']}",
             input_summary=user_request[:200],
-            output_summary=f"主题：{intent_analysis['topic'][:60]}",
+            output_summary=f"清理后：{understanding['cleaned_prompt'][:100]}",
         ))
 
-        # ── 主路径：尝试 LLM 分解 ──
+        span.set_attribute("agent.intent", understanding["intent"])
+        span.set_attribute("agent.safety", str(understanding["safety"]))
+        span.set_status("OK")
+
+        return updates
+
+
+# ──────────────────────────────────────────────
+# 2. plan_tasks 节点
+# ──────────────────────────────────────────────
+
+def _parse_plan_from_response(response: str, goal: str, platform: str | None = None) -> dict | None:
+    """从 LLM 响应中提取 JSON 计划（简化版，无严格 Agent 类型验证）"""
+    import json as _json, re as _re
+
+    content = response.strip()
+    code_block_match = _re.search(r"```(?:json)?\s*([\s\S]+?)```", content)
+    if code_block_match:
+        content = code_block_match.group(1)
+
+    try:
+        plan_dict = _json.loads(content)
+    except _json.JSONDecodeError:
+        json_match = _re.search(r"\{[\s\S]*\}", content)
+        if json_match:
+            try:
+                plan_dict = _json.loads(json_match.group(0))
+            except _json.JSONDecodeError:
+                return None
+        else:
+            return None
+
+    if not isinstance(plan_dict, dict) or "tasks" not in plan_dict or not plan_dict["tasks"]:
+        return None
+
+    tasks = []
+    for i, t in enumerate(plan_dict.get("tasks", [])):
+        if not isinstance(t, dict) or "agent_type" not in t:
+            continue
+        tasks.append({
+            "id": str(uuid.uuid4()),
+            "agent_type": t.get("agent_type", "WritingAgent"),
+            "input": t.get("input", {}),
+            "dependencies": t.get("dependencies", []),
+            "can_parallel_with": t.get("can_parallel_with", []),
+            "retry_on_low_quality": t.get("retry_on_low_quality", False),
+            "priority": t.get("priority", "medium"),
+            "config": {"reasoning": t.get("reasoning", ""), "priority": i},
+        })
+
+    if not tasks:
+        return None
+
+    return {
+        "goal": plan_dict.get("goal", goal),
+        "tasks": tasks,
+        "reasoning": plan_dict.get("reasoning", ""),
+        "estimated_steps": len(tasks),
+        "plan_method": "llm",
+    }
+
+
+async def plan_tasks(state: AgentGraphState) -> dict:
+    """规划 Agent：仅根据 understanding 自治分解为子任务，无 suggested_agents 偏见"""
+    tracer = _get_tracer()
+    understanding = state.get("understanding", {})
+    user_request = state.get("user_request", "")
+    trace_id = state.get("trace_task_id", str(uuid.uuid4()))
+    cleaned_prompt = understanding.get("cleaned_prompt", user_request)
+    detected_platform = understanding.get("platform")
+
+    # 预计算计划：跳过 LLM（由 Orchestrator 传入）
+    precomputed = state.get("plan")
+    if precomputed and precomputed.get("tasks"):
+        logger.info("使用预计算计划，跳过 LLM 规划")
+        return {
+            "plan": precomputed,
+            "plan_reasoning": precomputed.get("reasoning", ""),
+            "task_queue": precomputed.get("tasks", []),
+        }
+
+    platform_hint = f"（{understanding.get('platform_name', '')}）" if detected_platform else ""
+
+    with tracer.start_as_current_span(
+        "agent.plan",
+        kind="INTERNAL",
+        attributes={
+            "agent.node": "plan_tasks",
+            "agent.intent": understanding.get("intent", "unknown"),
+            "agent.platform": detected_platform or "none",
+            "custom.run_id": trace_id,
+        },
+    ) as span:
+        context_str = json.dumps({
+            "intent": understanding.get("intent", ""),
+            "cleaned_prompt": cleaned_prompt[:500],
+            "content_type": understanding.get("content_type", "blog"),
+            "platform": detected_platform,
+            "platform_name": understanding.get("platform_name", ""),
+            "language": understanding.get("language", "zh"),
+        }, ensure_ascii=False, indent=2)
+
+        plan = None
         llm = _get_llm(state, "ManagerAgent")
+
         if llm:
             try:
-                context_str = json.dumps(state.get("context", {}), ensure_ascii=False, indent=2) if state.get("context") else "{}"
-                # 结构化意图分析注入 LLM 提示词
-                analysis_str = json.dumps(intent_analysis, ensure_ascii=False, indent=2)
-                # 15 秒超时
                 response = await asyncio.wait_for(
                     llm.ainvoke([
-                        SystemMessage(content=PLANNER_SYSTEM_PROMPT),
-                        HumanMessage(content=f"""## 用户原始请求
-{user_request}
+                        SystemMessage(content=PLANNING_SYSTEM_PROMPT),
+                        HumanMessage(content=f"""## User Request
+{cleaned_prompt}
 
-## 意图分析（预处理结果）
-{analysis_str}
+## Intent Understanding
+{context_str}
 
-## Agent 清单
-{AVAILABLE_AGENTS}
-
-复杂度：{complexity}
-上下文：{context_str}
-
-请根据用户请求和意图分析，分解为子任务列表（JSON格式），选择合适的 Agent 组合。
-注意：intent_analysis.suggested_agents 是推荐组合，你可以根据需要调整。"""),
+Based on the above understanding, select the most appropriate agents to complete the task."""),
                     ]),
                     timeout=60.0,
                 )
-                plan = _parse_plan(response.content, user_request, platform=detected)
+                plan = _parse_plan_from_response(response.content, cleaned_prompt, platform=detected_platform)
 
-                if len(plan.get("tasks", [])) == 0:
+                if not plan or len(plan.get("tasks", [])) == 0:
                     logger.warning("LLM 计划没有任务，使用兜底方案")
-                    plan = _build_fallback_plan(user_request, intent_analysis=intent_analysis)
+                    plan = _build_fallback_plan(cleaned_prompt, detected_platform)
                 else:
                     plan["plan_method"] = "llm"
                     logger.info("LLM 计划已生成：%d 个任务", len(plan.get("tasks", [])))
 
-                updates["plan"] = plan
-                updates["plan_reasoning"] = plan.get("reasoning", "")
-                updates["task_queue"] = plan.get("tasks", [])
-                updates["thinking_steps"].append({
-                    "step_number": len(updates["thinking_steps"]) + 1,
-                    "agent": "ManagerAgent",
-                    "action": "任务拆解完成",
-                    "reasoning": f"{plan.get('plan_method', 'llm')} 规划完成，共 {len(plan.get('tasks', []))} 个任务（平台={platform_name}）",
-                    "input_summary": user_request[:200],
-                    "output_summary": f"执行计划：{plan.get('reasoning', '')[:80]}...",
-                    "tokens_used": 0,
-                    "time_elapsed": 0,
-                    "status": "done",
-                })
-                span.add_event("plan_built", {"task_count": len(plan.get("tasks", [])), "method": plan.get("plan_method", "llm")})
-                span.set_attribute("plan.method", plan.get("plan_method", "llm"))
-                span.set_attribute("agent.task_count", len(plan.get("tasks", [])))
-                span.set_status("OK")
-                return updates
-
             except Exception as e:
-                logger.warning("LLM 分解失败，使用模板兜底", error=str(e)[:200], exc_type=type(e).__name__)
+                logger.warning("LLM 规划失败，使用兜底方案", error=str(e)[:200])
                 span.record_exception(e)
 
-        # 兜底路径：LLM 不可用或分解失败时使用模板
-        plan = _build_fallback_plan(user_request, intent_analysis=intent_analysis)
-        updates["plan"] = plan
-        updates["plan_reasoning"] = plan["reasoning"]
-        updates["task_queue"] = plan["tasks"]
-        updates["thinking_steps"].append({
-            "step_number": len(updates["thinking_steps"]) + 1,
-            "agent": "ManagerAgent",
-            "action": "任务拆解完成（LLM兜底）",
-            "reasoning": f"平台={platform_name}，{len(plan['tasks'])} 个任务",
-            "input_summary": user_request[:200],
-            "output_summary": f"执行计划：{plan['reasoning'][:80]}...",
-            "tokens_used": 0,
-            "time_elapsed": 0,
-            "status": "done",
-        })
-        span.add_event("plan_built", {"task_count": len(plan["tasks"]), "method": "template", "platform": detected})
-        span.set_attribute("plan.method", "template")
-        span.set_attribute("agent.task_count", len(plan["tasks"]))
-        span.set_attribute("agent.platform", detected or "none")
-        span.set_status("OK")
-        return updates
+        if not plan:
+            plan = _build_fallback_plan(cleaned_prompt, detected_platform)
 
-
-def _parse_plan(response: str, goal: str, platform: str | None = None) -> dict:
-    """解析 LLM 返回的计划 JSON"""
-    try:
-        plan_dict = extract_plan_from_llm_response(response)
-        is_valid, error_msg = validate_plan_structure(plan_dict)
-        if not is_valid:
-            raise ValueError(f"无效的计划结构：{error_msg}")
-
-        tasks = []
-        for i, t in enumerate(plan_dict.get("tasks", [])):
-            tasks.append({
-                "id": str(uuid.uuid4()),
-                "agent_type": t.get("agent_type", "WritingAgent"),
-                "input": t.get("input", {}),
-                "dependencies": t.get("dependencies", []),
-                "can_parallel_with": t.get("can_parallel_with", []),
-                "retry_on_low_quality": t.get("retry_on_low_quality", False),
-                "priority": t.get("priority", "medium"),
-                "config": {"reasoning": t.get("reasoning", ""), "priority": i},
-            })
-        result = {
-            "goal": plan_dict.get("goal", goal),
-            "tasks": tasks,
-            "reasoning": plan_dict.get("reasoning", ""),
-            "estimated_steps": len(tasks),
-            "plan_method": "llm",
+        updates = {
+            "plan": plan,
+            "plan_reasoning": plan.get("reasoning", ""),
+            "task_queue": plan.get("tasks", []),
         }
-        if platform:
-            result["platform"] = platform
-        return result
-    except Exception:
-        return _build_fallback_plan(goal)
+
+        updates.update(_add_thinking_step(
+            state, "PlanningAgent", "任务拆解完成",
+            reasoning=f"{plan.get('plan_method', 'fallback')} 规划完成，共 {len(plan.get('tasks', []))} 个任务{platform_hint}",
+            input_summary=cleaned_prompt[:200],
+            output_summary=f"执行计划：{plan.get('reasoning', '')[:80]}",
+        ))
+
+        span.add_event("plan_built", {
+            "task_count": len(plan.get("tasks", [])),
+            "method": plan.get("plan_method", "fallback"),
+        })
+        span.set_attribute("plan.method", plan.get("plan_method", "fallback"))
+        span.set_attribute("agent.task_count", len(plan.get("tasks", [])))
+        span.set_status("OK")
+
+        return updates
 
 
 # ──────────────────────────────────────────────
