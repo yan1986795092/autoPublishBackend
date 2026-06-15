@@ -25,6 +25,7 @@ from .agent_utils import PLANNER_SYSTEM_PROMPT, extract_plan_from_llm_response, 
 from .platform_registry import PLATFORMS, detect_platform, get_names_map
 from .handlers import HANDLER_MAP, handle_fallback
 from .cache import agent_cache
+from .stage_map import get_stage_label, get_stage_icon
 
 from src.core.exceptions import HandlerError, ToolExecutionError
 from src.observability.metrics import record_agent_task, record_agent_run
@@ -892,6 +893,15 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             if mcp_tools:
                 t_input["_mcp_tools"] = mcp_tools
 
+            # Emit stage:started 事件（在缓存检查之前，确保前端 timeline 一致性）
+            await _publish_streaming_event(state, "stage", {
+                "agent": agent_type,
+                "label": get_stage_label(agent_type),
+                "icon": get_stage_icon(agent_type),
+                "status": "started",
+                "timestamp": time.time(),
+            })
+
             # 缓存检查
             cacheable_types = {"SEOAgent", "ReviewAgent", "WebSearch"}
             use_cache = agent_type in cacheable_types and not t_input.get("_skip_cache")
@@ -912,6 +922,13 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                         "time_elapsed": elapsed,
                         "status": "done",
                         "_from_cache": True,
+                    })
+                    # Emit stage:completed for cache hit too
+                    await _publish_streaming_event(state, "stage", {
+                        "agent": agent_type,
+                        "status": "completed",
+                        "duration": elapsed,
+                        "timestamp": time.time(),
                     })
                     return cached
 
@@ -970,6 +987,14 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             result["time_elapsed"] = elapsed
             if "thinking_steps" not in result:
                 result["thinking_steps"] = []
+
+            # Emit stage:completed 事件
+            await _publish_streaming_event(state, "stage", {
+                "agent": agent_type,
+                "status": "completed",
+                "duration": elapsed,
+                "timestamp": time.time(),
+            })
 
             # 任务完成事件
             output_content = result.get("output", {}).get("content", "")

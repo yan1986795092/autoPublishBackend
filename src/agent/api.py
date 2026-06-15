@@ -629,6 +629,11 @@ async def agent_stream(
                             "event": "progress",
                             "data": json.dumps(event.data, ensure_ascii=False),
                         }
+                    elif et == "stage":
+                        yield {
+                            "event": "stage",
+                            "data": json.dumps(event.data, ensure_ascii=False),
+                        }
                     elif et == "llm_chunk":
                         yield {
                             "event": "llm_chunk",

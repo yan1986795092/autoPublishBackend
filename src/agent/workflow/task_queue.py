@@ -316,6 +316,13 @@ class TaskQueue:
             data=reasoning_data,
         ))
 
+    async def publish_stage(self, task_id: str, stage_data: dict) -> None:
+        await self._publish_event(StreamEvent(
+            task_id=task_id,
+            event_type="stage",
+            data=stage_data,
+        ))
+
     def _cleanup_old_tasks(self) -> None:
         cutoff = datetime.utcnow().timestamp() - 3600
         stale = [
