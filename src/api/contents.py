@@ -10,6 +10,8 @@ from src.schemas.content import (
     GenerateRequest,
     UpdateContentRequest,
     BatchGenerateRequest,
+    BatchIdsRequest,
+    CreateContentRequest,
 )
 from src.api.auth import get_current_user
 from src.services.content_service import ContentService
@@ -89,7 +91,7 @@ def list_contents(
     current_user = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
-    """获取内容列表"""
+    """获取内容列表（含全量统计）"""
     service = ContentService(db)
     items, total = service.list_contents(
         user_id=current_user.id,
@@ -100,6 +102,19 @@ def list_contents(
         search=search,
         tag=tag,
     )
+
+    # 全量统计（不受分页影响）
+    from src.models import ContentStatus
+    from sqlalchemy import func as sa_func
+    all_query = db.query(
+        Content.status,
+        sa_func.count(Content.id)
+    ).filter(Content.user_id == current_user.id).group_by(Content.status).all()
+    stats = {"total": 0, "draft": 0, "published": 0, "archived": 0}
+    for s, cnt in all_query:
+        key = s.value if hasattr(s, 'value') else str(s)
+        stats[key] = cnt
+        stats["total"] += cnt
 
     return {
         "success": True,
@@ -124,7 +139,8 @@ def list_contents(
                 "page_size": page_size,
                 "total": total,
                 "total_pages": (total + page_size - 1) // page_size,
-            }
+            },
+            "stats": stats,
         }
     }
 
@@ -166,6 +182,7 @@ def get_content(
                 {
                     "id": v.id,
                     "version_number": v.version_number,
+                    "content_md": v.content_md,
                     "change_summary": v.change_summary,
                     "created_at": v.created_at.isoformat(),
                 }
@@ -249,6 +266,102 @@ def delete_content(
         "data": {
             "id": content.id,
             "deleted_at": content.updated_at.isoformat(),
+        }
+    }
+
+
+@router.post("/batch-delete", response_model=dict)
+def batch_delete_contents(
+    request: BatchIdsRequest,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """批量删除内容（软删除，单事务）"""
+    contents = db.query(Content).filter(
+        Content.id.in_(request.ids),
+        Content.user_id == current_user.id
+    ).all()
+
+    found_ids = {c.id for c in contents}
+    for c in contents:
+        c.status = ContentStatus.ARCHIVED
+    db.commit()
+
+    return {
+        "success": True,
+        "data": {
+            "deleted": list(found_ids),
+            "not_found": [id for id in request.ids if id not in found_ids],
+        }
+    }
+
+
+@router.post("/batch-archive", response_model=dict)
+def batch_archive_contents(
+    request: BatchIdsRequest,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """批量归档内容（单事务）"""
+    contents = db.query(Content).filter(
+        Content.id.in_(request.ids),
+        Content.user_id == current_user.id
+    ).all()
+
+    found_ids = {c.id for c in contents}
+    for c in contents:
+        c.status = ContentStatus.ARCHIVED
+    db.commit()
+
+    return {
+        "success": True,
+        "data": {
+            "archived": list(found_ids),
+            "not_found": [id for id in request.ids if id not in found_ids],
+        }
+    }
+
+
+@router.post("", response_model=dict)
+def create_content(
+    request: CreateContentRequest,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """直接创建内容（非 AI 生成）"""
+    from src.models import ContentVersion
+
+    content = Content(
+        user_id=current_user.id,
+        title=request.title,
+        topic=request.title[:80],
+        platform_code=request.platform_code or "xiaohongshu",
+        content_md=request.content_md,
+        content_html=request.content_md.replace("\n", "<br>"),
+        status=ContentStatus.DRAFT,
+        tags=",".join(request.tags or []),
+    )
+    db.add(content)
+    db.commit()
+    db.refresh(content)
+
+    # 创建第一个版本
+    version = ContentVersion(
+        content_id=content.id,
+        version_number=1,
+        content_md=request.content_md,
+        content_html=request.content_md.replace("\n", "<br>"),
+        change_summary="手动创建",
+    )
+    db.add(version)
+    db.commit()
+
+    return {
+        "success": True,
+        "data": {
+            "id": content.id,
+            "title": content.title,
+            "created_at": content.created_at.isoformat(),
         }
     }
 

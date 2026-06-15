@@ -51,7 +51,7 @@ def create_orchestrator(
 
     # 低成本 Agent → 指定智谱模型（绕过 AutoRouter，Gateway 精确匹配到智谱 adapter）
     for agent_type in [
-        "WritingAgent", "SEOAgent", "ReviewAgent",
+        "WritingAgent", "SEOAgent", "ReviewAgent", "FixAgent",
         "DiagramAgent", "WebSearch",
     ]:
         try:

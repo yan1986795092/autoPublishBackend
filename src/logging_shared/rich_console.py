@@ -65,6 +65,31 @@ class RichConsoleRenderer:
 
     # ── 内部辅助方法 ─────────────────────────────────────
 
+    # 中文标签映射
+    _AGENT_LABELS: dict[str, str] = {
+        "agent_start": "开始",
+        "agent_finish": "完成",
+        "thought": "思考",
+        "tool_call": "工具调用",
+        "tool_result": "工具结果",
+        "error": "错误",
+        "llm_call": "LLM 调用",
+        "plan": "规划",
+    }
+
+    _SYSTEM_LABELS: dict[str, str] = {
+        "http_request": "请求",
+        "http_response": "响应",
+        "http_response_error": "响应错误",
+        "worker_start": "Worker 启动",
+        "worker_stop": "Worker 停止",
+        "task_enqueued": "任务入队",
+        "task_completed": "任务完成",
+        "mcp_starting": "MCP 启动中",
+        "mcp_started": "MCP 已启动",
+        "migration_skip": "迁移跳过",
+    }
+
     @staticmethod
     def _render_level(level: str) -> Text:
         """渲染带颜色的级别前缀：``[INFO]  `` / ``[ERROR] `` 等"""
@@ -168,6 +193,7 @@ class RichConsoleRenderer:
         error_type = self._pop(d, "error_type", "")
         error_message = self._pop(d, "error_message", "")
         level = self._pop(d, "level", "INFO").upper()
+        trace_id = self._pop(d, "trace_id", "")
 
         # ── 确定缩进级别和图标 ──
         if event_type in ("agent_start", "agent_finish"):
@@ -198,8 +224,13 @@ class RichConsoleRenderer:
         t = Text()
         t.append(f"{icon}  ", Style(color="magenta"))
 
-        # 事件类型标签
-        t.append(f"{event_type:15s} ", Style(color="cyan", bold=True))
+        # 事件类型标签（中文）
+        label = self._AGENT_LABELS.get(event_type, event_type)
+        t.append(f"{label:12s} ", Style(color="cyan", bold=True))
+
+        # 消息（输入/输出摘要）
+        if message:
+            t.append(f"{message[:60]}  ", Style(color="white"))
 
         # 代理名称
         if agent_name:
@@ -208,6 +239,10 @@ class RichConsoleRenderer:
         # 运行 ID
         if run_id:
             t.append(f"run={run_id[:8]}  ", Style(color="blue", dim=True))
+
+        # Trace ID
+        if trace_id:
+            t.append(f"[trace:{trace_id[:12]}]  ", Style(color="blue", dim=True))
 
         # 耗时
         if duration_ms:
@@ -267,6 +302,7 @@ class RichConsoleRenderer:
         cost = self._pop(d, "cost", 0)
         agent_type = self._pop(d, "agent_type", "")
         req_id = self._pop(d, "request_id", "")
+        trace_id = self._pop(d, "trace_id", "")
 
         if not total_tokens:
             total_tokens = prompt_tokens + completion_tokens
@@ -297,6 +333,10 @@ class RichConsoleRenderer:
         # 请求 ID
         if req_id and len(str(req_id)) > 6:
             t.append(f"req={req_id[:12]}", Style(dim=True))
+
+        # Trace ID
+        if trace_id:
+            t.append(f"  [trace:{trace_id[:12]}]", Style(color="blue", dim=True))
 
         return t
 
@@ -340,26 +380,56 @@ class RichConsoleRenderer:
         message = self._pop(d, "message", "")
         status = self._pop(d, "status", "")
         detail = self._pop(d, "detail", "")
+        duration_ms = self._pop(d, "duration_ms", 0)
+        trace_id = self._pop(d, "trace_id", "")
 
         t = Text()
         t.append("⚡  ", Style(color="green"))
 
-        # 事件标签
+        # 事件标签（中文）
         if event:
-            t.append(f"{event:20s} ", Style(color="green", bold=True))
+            label = self._SYSTEM_LABELS.get(event, event)
+            t.append(f"{label:14s} ", Style(color="green", bold=True))
 
         # 消息
         if message:
             t.append(f"{message}  ", Style(color="white"))
 
         # 状态
-        if status:
+        if isinstance(status, int):
+            # HTTP 状态码：按范围着色
+            if status >= 500:
+                sc = "red"
+            elif status >= 400:
+                sc = "yellow"
+            elif status >= 300:
+                sc = "cyan"
+            elif status >= 200:
+                sc = "green"
+            else:
+                sc = "white"
+            t.append(f"[{status}]  ", Style(color=sc, bold=True))
+        elif status:
+            # 字符串状态（ok/failed/running 等）
             status_colors = {"ok": "green", "passed": "green",
                              "failed": "red", "error": "red",
                              "running": "cyan", "started": "cyan",
                              "stopped": "yellow"}
-            sc = status_colors.get(status.lower(), "white") if status else "white"
+            sc = status_colors.get(status.lower(), "white")
             t.append(f"[{status}]  ", Style(color=sc, bold=True))
+
+        # 耗时
+        if duration_ms:
+            if duration_ms > 1000:
+                ds = Style(color="red", bold=True)
+            elif duration_ms > 500:
+                ds = Style(color="yellow")
+            else:
+                ds = Style(dim=True)
+            t.append(f"{self._fmt_ms(duration_ms)}", ds)
+
+        if trace_id:
+            t.append(f"  [trace:{trace_id[:12]}]", Style(color="blue", dim=True))
 
         if detail:
             t.append(f"{detail}", Style(dim=True))

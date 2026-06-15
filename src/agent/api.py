@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ValidationError
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, Any
 import asyncio
 import json
 import structlog
@@ -512,45 +512,15 @@ async def agent_stream(
                     skill_context["platform_agent_pipeline"] = profile.get("agent_pipeline", {})
                     skill_context["platform_quality_check"] = profile.get("quality_check", "")
 
-            # 构建计划（轻量：模板匹配 + 字符串拼接，无需 Orchestrator / LLM）
-            from .nodes import _build_fallback_plan as _build_plan_dict
-            from .schemas import ExecutionPlan, AgentTask
-
-            plan_dict = _build_plan_dict(user_prompt, platform_code)
-            tasks = [
-                AgentTask(
-                    id=t["id"],
-                    agent_type=t["agent_type"],
-                    input=t["input"],
-                    dependencies=t.get("dependencies", []),
-                    can_parallel_with=t.get("can_parallel_with", []),
-                    retry_on_low_quality=t.get("retry_on_low_quality", False),
-                    priority=t.get("priority", "medium"),
-                )
-                for t in plan_dict.get("tasks", [])
-            ]
-            plan = ExecutionPlan(
-                goal=plan_dict.get("goal", user_prompt[:200]),
-                tasks=tasks,
-                reasoning=plan_dict.get("reasoning", ""),
-                estimated_steps=len(tasks),
-                plan_method="template",
-            )
+            # 不再预计算计划——让 ManagerAgent LLM 在 Graph 中动态规划
+            # 但仍然 yield 一个轻量占位事件，让前端显示"规划中"
             yield {
                 "event": "plan",
                 "data": json.dumps({
-                    "goal": plan.goal,
-                    "reasoning": plan.reasoning,
-                    "estimated_steps": plan.estimated_steps,
-                    "tasks": [
-                        {
-                            "id": t.id,
-                            "agent_type": t.agent_type,
-                            "input": t.input,
-                            "dependencies": t.dependencies,
-                        }
-                        for t in plan.tasks
-                    ],
+                    "goal": user_prompt[:200],
+                    "reasoning": "ManagerAgent 正在动态规划最佳 Agent 组合...",
+                    "estimated_steps": 0,
+                    "tasks": [],
                 }, ensure_ascii=False),
             }
 
@@ -561,22 +531,8 @@ async def agent_stream(
                 """EventBus 回调：将事件放入队列"""
                 await evt_queue.put(event)
 
-            # 3. 提交异步任务（传递预计算计划 + Skill 上下文）
-            plan_dict = {
-                "goal": plan.goal,
-                "reasoning": plan.reasoning,
-                "estimated_steps": plan.estimated_steps,
-                "tasks": [
-                    {
-                        "id": t.id,
-                        "agent_type": t.agent_type,
-                        "input": t.input,
-                        "dependencies": t.dependencies,
-                        "config": {},
-                    }
-                    for t in plan.tasks
-                ],
-            }
+            # 3. 提交异步任务（不传预计算计划，让 Graph 的 ManagerAgent 动态规划）
+            plan = None
             # 注入 HTTP trace_id 到 skill_context 用于端到端关联
             if http_trace_id:
                 skill_context["trace_id"] = http_trace_id
@@ -584,7 +540,7 @@ async def agent_stream(
             async_task = await task_queue.enqueue(
                 prompt=user_prompt,
                 user_id=current_user.id,
-                plan=plan_dict,
+                plan=plan,
                 skill_context=skill_context if skill_context else None,
             )
             task_id_str = async_task.id
@@ -856,14 +812,72 @@ async def invalidate_cache(
 
 @router.get("/agent/metrics")
 async def agent_metrics():
-    """Agent 系统监控指标"""
+    """Agent 系统监控指标（StatsCollector 实时数据 + DB 持久化累计）"""
     settings = get_settings()
     from src.observability.metrics import stats_collector
+    from src.database import SessionLocal
+    from sqlalchemy import text
 
     active_tasks = sum(
         1 for t in task_queue._tasks.values()
         if t.state.value in ("pending", "running")
     )
+
+    # 实时内存数据
+    mem = stats_collector.get_stats()
+
+    # DB 持久化累计数据
+    db_totals: dict[str, Any] = {
+        "agent_runs_total": 0,
+        "llm_tokens_total": 0,
+        "llm_cost_total": 0,
+        "by_model": [],
+        "by_provider": [],
+        "agents": [],
+    }
+    try:
+        db = SessionLocal()
+        try:
+            row = db.execute(text("""
+                SELECT
+                    COUNT(*) as total_runs,
+                    COALESCE(SUM(total_tokens), 0) as total_tokens,
+                    COALESCE(SUM(total_cost), 0) as total_cost,
+                    SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as success_count
+                FROM agent_tasks
+            """)).one()
+            db_totals["agent_runs_total"] = row.total_runs or 0
+            db_totals["llm_tokens_total"] = row.total_tokens or 0
+            db_totals["llm_cost_total"] = round(row.total_cost or 0, 4)
+
+            # agent_subtasks: 按 agent_type 统计
+            agent_rows = db.execute(text("""
+                SELECT
+                    agent_type,
+                    COUNT(*) as calls,
+                    COALESCE(SUM(tokens_used), 0) as tokens,
+                    COALESCE(AVG(time_elapsed), 0) as avg_time
+                FROM agent_subtasks
+                WHERE agent_type IS NOT NULL AND agent_type != ''
+                GROUP BY agent_type
+                ORDER BY calls DESC
+            """)).fetchall()
+            for r in agent_rows:
+                db_totals["agents"].append({
+                    "name": r.agent_type,
+                    "calls": r.calls,
+                    "tokens": r.tokens,
+                    "avg_time_s": round(r.avg_time, 2),
+                })
+        finally:
+            db.close()
+    except Exception:
+        pass
+
+    zhipu_key = getattr(settings, 'zhipu_api_key', None) or getattr(settings, 'zhipu_api_key', '')
+    qwen_key = getattr(settings, 'qwen_api_key', None) or getattr(settings, 'qwen_api_key', '')
+    openai_key = getattr(settings, 'openai_api_key', None) or getattr(settings, 'openai_api_key', '')
+    deepseek_key = getattr(settings, 'deepseek_api_key', None) or getattr(settings, 'deepseek_api_key', '')
 
     return {
         "success": True,
@@ -885,11 +899,20 @@ async def agent_metrics():
                 "default_llm_provider": settings.default_llm_provider,
                 "worker_max_retries": settings.worker_max_retries,
                 "mcp_enabled": settings.mcp_enabled,
+                "llm_gateway_url": getattr(settings, 'gateway_url', ''),
+                "providers": {
+                    "zhipu": bool(zhipu_key),
+                    "qwen": bool(qwen_key),
+                    "openai": bool(openai_key),
+                    "deepseek": bool(deepseek_key),
+                },
             },
-            # ── Prometheus-backed runtime stats ──
-            "agent_runs": stats_collector.get_stats()["agent_runs"],
-            "llm_calls": stats_collector.get_stats()["llm_calls"],
-            "tool_calls": stats_collector.get_stats()["tool_calls"],
+            # ── 实时运行统计（StatsCollector，当前进程）──
+            "agent_runs": mem["agent_runs"],
+            "llm_calls": mem["llm_calls"],
+            "tool_calls": mem["tool_calls"],
+            # ── 持久化历史累计（DB 全量）──
+            "history": db_totals,
         },
     }
 

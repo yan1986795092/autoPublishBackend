@@ -20,10 +20,11 @@ from .fields import (
 from .config import setup, get_logger
 from .middleware import LoggingMiddleware
 from .rich_console import RichConsoleRenderer
+from .trace_context import TraceContext
 from .unified_writer import UnifiedEsWriter
 
 __all__ = [
-    "setup", "get_logger", "LoggingMiddleware", "RichConsoleRenderer", "UnifiedEsWriter",
+    "setup", "get_logger", "LoggingMiddleware", "RichConsoleRenderer", "TraceContext", "UnifiedEsWriter",
     "AgentEvent", "EventType", "TokenUsage", "calculate_cost_usd",
     "AgentEventEmitter", "get_agent_event_emitter",
     "TRACE_ID", "SPAN_ID", "SERVICE_NAME", "LOG_TIME", "LEVEL", "EVENT",

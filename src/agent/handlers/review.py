@@ -1,6 +1,7 @@
-"""ReviewAgent — 内容质量审核、违禁词检查、事实核查
+"""ReviewAgent — 内容质量审核、违禁词检查、事实核查，可选自动修正
 
 使用 PromptEngine 构建审核 prompt，支持记忆上下文注入和平台特定质量检查。
+当 rewrite=True 时，审核发现问题会自动触发修正并输出 fixed_content。
 """
 
 from langchain_core.messages import SystemMessage, HumanMessage
@@ -13,6 +14,40 @@ from src.logging_shared.config import get_logger
 from ..platform_profile import get_profile
 
 logger = get_logger("agent.review")
+
+
+# 修正指令模版
+_FIX_SYSTEM_PROMPT = """你是一位专业的内容编辑，负责根据审核意见对原文进行精准修改。
+
+修改原则：
+1. 严格按每一条审核意见修改，不要做额外的风格或内容调整
+2. 保持原文的结构、语气和核心信息不变
+3. 只修改审核意见中指出的问题部分
+4. 输出修改后的完整内容（不要只输出修改的部分）
+5. 如果审核意见有冲突，优先采纳更严格的那条"""
+
+_FIX_USER_PROMPT = """请根据以下审核意见修改原文。
+
+## 原文
+{original_content}
+
+## 审核意见
+
+### 违禁词（需替换）
+{banned_words_text}
+
+### 修改建议
+{suggestions_text}
+
+### 事实核查问题
+{factcheck_text}
+
+## 要求
+- 替换所有违禁词为推荐用词
+- 逐条应用修改建议
+- 修正事实性错误
+- 保持原文风格和结构
+- 直接输出修改后的完整内容"""
 
 
 async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -100,6 +135,66 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             if any(kw in line for kw in ["建议", "问题", "修改", "不足"])
         ]
 
+        # ── 自动修正（rewrite=True 且有需要修改的问题时触发） ──
+        fixed_content = ""
+        rewrite_applied = False
+        should_rewrite = task_input.get("_rewrite", True)  # 默认开启
+        has_issues = bool(banned_found) or bool(suggestions) or not passed
+
+        if should_rewrite and has_issues:
+            try:
+                original_for_fix = content or task_input.get("content", "")
+                if original_for_fix:
+                    banned_words_text = "\n".join(
+                        [f"- 「{w.get('word', w)}」→ 建议替换为「{w.get('suggestion', '')}」"
+                         for w in (banned_found or [])]
+                    ) if banned_found else "无"
+
+                    suggestions_text = "\n".join(
+                        [f"- {s}" for s in (suggestions or [])]
+                    ) if suggestions else "无"
+
+                    fc_issues = []
+                    if fc_report and fc_report.get("claims"):
+                        fc_issues = [
+                            c for c in fc_report["claims"]
+                            if c.get("verdict") in ("false", "unsupported")
+                        ]
+                    factcheck_text = "\n".join(
+                        [f"- {c.get('claim', '')}（{c.get('verdict', '')}）" for c in fc_issues]
+                    ) if fc_issues else "无"
+
+                    fix_messages = [
+                        SystemMessage(content=_FIX_SYSTEM_PROMPT),
+                        HumanMessage(content=_FIX_USER_PROMPT.format(
+                            original_content=original_for_fix[:5000],
+                            banned_words_text=banned_words_text,
+                            suggestions_text=suggestions_text,
+                            factcheck_text=factcheck_text,
+                        )),
+                    ]
+                    fix_result = await call_llm(
+                        llm, fix_messages,
+                        agent_type="ReviewAgent",
+                        stream=True,
+                        on_chunk=task_input.get("_on_llm_chunk"),
+                    )
+                    fixed_content = fix_result.content.strip()
+                    rewrite_applied = bool(fixed_content) and fixed_content != original_for_fix[:5000]
+            except Exception as fix_err:
+                logger.warning("ReviewAgent 自动修正失败，跳过修正", error=str(fix_err))
+
+        # 汇总 token（审核 + 修正）
+        total_tokens = llm_result.total_tokens + (fix_result.total_tokens if rewrite_applied else 0)
+        prompt_tokens = llm_result.prompt_tokens + (fix_result.prompt_tokens if rewrite_applied else 0)
+        completion_tokens = llm_result.completion_tokens + (fix_result.completion_tokens if rewrite_applied else 0)
+
+        thinking_summary = f"{'通过 ✓' if passed else '需修改'} · 违禁词 {len(banned_found)} 个"
+        if fc_report:
+            thinking_summary += f" · 事实核查 {fc_report.get('total_claims_checked', 0)} 处"
+        if rewrite_applied:
+            thinking_summary += " · 已自动修正 ✨"
+
         return {
             "status": "completed", "agent_type": "ReviewAgent",
             "output": {
@@ -108,16 +203,19 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                 "factcheck": fc_report,
                 "suggestions": suggestions[:5],
                 "content": quality_text,
+                "fixed_content": fixed_content if rewrite_applied else "",
+                "rewrite_applied": rewrite_applied,
                 "platform": platform,
             },
-            "tokens_used": llm_result.total_tokens,
-            "prompt_tokens": llm_result.prompt_tokens,
-            "completion_tokens": llm_result.completion_tokens,
+            "tokens_used": total_tokens,
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
             "prompt_versions": composed.used_templates,
             "thinking_steps": [{
-                "agent": "ReviewAgent", "action": "审核完成",
+                "agent": "ReviewAgent",
+                "action": "审核完成" + (" + 自动修正" if rewrite_applied else ""),
                 "reasoning": f"审核{content_type}内容质量",
-                "output_summary": f"{'通过 ✓' if passed else '需修改'} · 发现违禁词 {len(banned_found)} 个 · 事实核查 {fc_report['total_claims_checked'] if fc_report else 0} 处",
+                "output_summary": thinking_summary,
                 "status": "done",
             }],
         }

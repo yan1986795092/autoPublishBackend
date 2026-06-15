@@ -124,6 +124,8 @@ class StatsCollector:
         self._agent_run_durations: list[float] = []
 
         self._llm_calls: dict[str, int] = defaultdict(int)
+        self._llm_by_model: dict[str, dict[str, int]] = {}
+        self._llm_by_provider: dict[str, dict[str, int]] = {}
         self._llm_errors: int = 0
         self._llm_prompt_tokens: int = 0
         self._llm_completion_tokens: int = 0
@@ -158,16 +160,37 @@ class StatsCollector:
         completion_tokens: int = 0,
         duration_s: float = 0,
     ) -> None:
-        """记录一次 LLM 调用。"""
+        """记录一次 LLM 调用，同时按模型和供应商聚合。"""
         self._llm_calls["total"] += 1
         if status != "success":
             self._llm_errors += 1
             self._llm_calls["error"] += 1
+
         self._llm_prompt_tokens += prompt_tokens
         self._llm_completion_tokens += completion_tokens
         if duration_s > 0:
             self._llm_durations.append(duration_s)
             self._llm_durations = self._llm_durations[-1000:]
+
+        # 按模型聚合
+        if model:
+            if model not in self._llm_by_model:
+                self._llm_by_model[model] = {"calls": 0, "errors": 0, "prompt_tokens": 0, "completion_tokens": 0}
+            self._llm_by_model[model]["calls"] += 1
+            if status != "success":
+                self._llm_by_model[model]["errors"] += 1
+            self._llm_by_model[model]["prompt_tokens"] += prompt_tokens
+            self._llm_by_model[model]["completion_tokens"] += completion_tokens
+
+        # 按供应商聚合
+        if provider:
+            if provider not in self._llm_by_provider:
+                self._llm_by_provider[provider] = {"calls": 0, "errors": 0, "tokens": 0}
+            self._llm_by_provider[provider]["calls"] += 1
+            if status != "success":
+                self._llm_by_provider[provider]["errors"] += 1
+            self._llm_by_provider[provider]["tokens"] += prompt_tokens + completion_tokens
+
         try:
             llm_requests_total.labels(model=model, provider=provider, status=status).inc()
             if prompt_tokens:
@@ -225,6 +248,8 @@ class StatsCollector:
                 "completion_tokens": self._llm_completion_tokens,
                 "total_tokens": self._llm_prompt_tokens + self._llm_completion_tokens,
                 "p95_duration_ms": _p95(self._llm_durations) * 1000 if self._llm_durations else 0,
+                "by_model": dict(self._llm_by_model),
+                "by_provider": dict(self._llm_by_provider),
             },
             "tool_calls": {
                 name: dict(data) for name, data in sorted(self._tool_calls.items())

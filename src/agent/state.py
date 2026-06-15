@@ -37,6 +37,9 @@ class AgentGraphState(TypedDict):
     error: Optional[str]
     status: str                   # running / completed / failed / partial
 
+    # === 意图分析（预处理结果） ===
+    intent_analysis: Optional[dict]  # analyze_intent() 的结构化输出
+
     # === 系统引用（不序列化） ===
     _async_task_id: str
     _task_queue_ref: Any          # TaskQueue 实例引用

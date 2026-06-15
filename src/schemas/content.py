@@ -110,6 +110,17 @@ class UpdateContentRequest(BaseModel):
     change_summary: Optional[str] = None
 
 
+class BatchIdsRequest(BaseModel):
+    ids: list[str] = Field(..., min_length=1, max_length=100, description="内容 ID 列表")
+
+
+class CreateContentRequest(BaseModel):
+    title: str = Field(..., min_length=1, max_length=255)
+    content_md: str = Field(..., min_length=1)
+    platform_code: Optional[str] = Field(default="xiaohongshu")
+    tags: Optional[list[str]] = Field(default_factory=list)
+
+
 class UpdateContentResponse(BaseModel):
     id: str
     version_number: int

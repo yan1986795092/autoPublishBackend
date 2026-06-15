@@ -98,7 +98,13 @@ class AgentSpan:
             "durationMicros": duration_us,
             "status": self.status,
         }
-        writer.write("traces", span_doc)
+        try:
+            import asyncio
+            loop = asyncio.get_running_loop()
+            if loop.is_running():
+                loop.create_task(writer.write("traces", span_doc))
+        except RuntimeError:
+            pass  # 无事件循环，跳过 ES 写入
 
 
 class AgentTracer:

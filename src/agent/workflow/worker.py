@@ -172,6 +172,7 @@ class AgentWorker:
                         progress=50.0,
                         total_steps=1,
                         completed_steps=0,
+                        total_cost=0.0,
                     )
                     return
 
@@ -214,6 +215,7 @@ class AgentWorker:
             status="failed",
             error=last_error,
             progress=0.0,
+            total_cost=0.0,
         )
 
 

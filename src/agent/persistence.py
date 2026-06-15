@@ -10,6 +10,32 @@ import logging
 logger = logging.getLogger(__name__)
 
 
+# ── 简易成本估算 ─────────────────────────────────────────────────────
+# 模型单价 (元 / 1K tokens)
+_MODEL_COST_RATES: dict[str, float] = {
+    "gpt-4": 0.030,
+    "gpt-4o": 0.010,
+    "gpt-4o-mini": 0.0025,
+    "glm": 0.005,
+    "qwen": 0.004,
+    "deepseek": 0.002,
+    "default": 0.003,
+}
+
+
+def estimate_cost(tokens: int, model: str = "") -> float:
+    """根据 token 数和模型名估算成本（元）"""
+    if tokens <= 0:
+        return 0.0
+    rate = _MODEL_COST_RATES.get("default")
+    model_lower = model.lower()
+    for key, r in _MODEL_COST_RATES.items():
+        if key in model_lower:
+            rate = r
+            break
+    return round(tokens / 1000 * rate, 4)
+
+
 def save_agent_task(
     task_id: str,
     user_id: str,
@@ -21,6 +47,7 @@ def save_agent_task(
     total_steps: int = 1,
     completed_steps: int = 0,
     total_tokens: int = 0,
+    total_cost: float = 0.0,
     agent_events: Optional[dict] = None,
 ) -> None:
     """保存或更新 Agent 任务到数据库（幂等：重复 task_id 时覆盖而非报错）"""
@@ -34,6 +61,7 @@ def save_agent_task(
                 task.progress = progress
                 task.completed_steps = completed_steps
                 task.total_tokens = total_tokens
+                task.total_cost = total_cost
                 task.error_message = error
                 if result:
                     task.result_json = json.dumps(result, ensure_ascii=False)
@@ -52,6 +80,7 @@ def save_agent_task(
                     completed_steps=completed_steps,
                     progress=progress,
                     total_tokens=total_tokens,
+                    total_cost=total_cost,
                     result_json=json.dumps(result, ensure_ascii=False) if result else None,
                     error_message=error,
                     agent_events_json=events_json,

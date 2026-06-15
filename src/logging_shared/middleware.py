@@ -1,10 +1,11 @@
-"""FastAPI 中间件: per-request access-log + trace span。
+"""FastAPI 中间件: 降噪版 access-log + trace span。
 
-每个 HTTP 请求:
-1. 生成/提取 trace_id，绑定到 structlog context
-2. 执行请求
-3. 输出一行 access-log（类似 uvicorn 风格）
-4. 构造 Jaeger 格式 span，通过 UnifiedEsWriter 写入 traces-*
+相较于原版，核心改进：
+1. /metrics、/health、/docs 等路径静默（不输出日志）
+2. OPTIONS 请求静默
+3. 业务路径使用 TraceContext 输出 ⚡ REQUEST / ⚡ RESPONSE 摘要
+4. 4xx warning 级别，5xx error 级别，2xx/3xx info 级别
+5. 内部错误仍然保持 trace span 写入 ES
 """
 
 from __future__ import annotations
@@ -20,9 +21,31 @@ from starlette.types import ASGIApp
 
 from .fields import TRACE_ID
 from .config import get_logger
+from .trace_context import TraceContext
 from .unified_writer import UnifiedEsWriter
 
 TRACE_ID_HEADER = "X-Trace-Id"
+
+# 静默路径 — 不输出 access-log
+SILENT_PATHS = frozenset({
+    "/metrics", "/health", "/favicon.ico",
+    "/docs", "/redoc", "/openapi.json",
+})
+
+# 静默方法
+SILENT_METHODS = frozenset({"OPTIONS"})
+
+
+def _is_silent(method: str, path: str) -> bool:
+    """判断是否应当静默（不输出任何日志）"""
+    if method in SILENT_METHODS:
+        return True
+    if path in SILENT_PATHS:
+        return True
+    # swagger UI 的静态资源
+    if path.startswith(("/docs/", "/redoc/")):
+        return True
+    return False
 
 
 def _get_or_create_trace_id(request: Request) -> str:
@@ -33,13 +56,9 @@ def _get_or_create_trace_id(request: Request) -> str:
 
 
 def _build_trace_span(
-    method: str,
-    path: str,
-    url: str,
-    trace_id: str,
-    span_id: str,
-    status_code: int,
-    elapsed_us: int,
+    method: str, path: str, url: str,
+    trace_id: str, span_id: str,
+    status_code: int, elapsed_us: int,
     service_name: str,
     error_info: str = "",
 ) -> dict:
@@ -69,7 +88,7 @@ def _build_trace_span(
 
 
 class LoggingMiddleware(BaseHTTPMiddleware):
-    """FastAPI 中间件: 单行 access-log + trace span 写入 UnifiedEsWriter。"""
+    """FastAPI 中间件: 降噪版 access-log + trace span。"""
 
     def __init__(self, app: ASGIApp, service_name: str):
         super().__init__(app)
@@ -106,24 +125,74 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
         request.state.trace_id = trace_id
 
+        # ── 静默路径：不输出日志，只设 trace_id ──
+        if _is_silent(method, path):
+            try:
+                response = await call_next(request)
+            except Exception:
+                raise
+            response.headers[TRACE_ID_HEADER] = trace_id
+            return response
+
+        # ── 业务路径：创建 TraceContext 并输出日志 ──
+        trace_ctx = TraceContext(trace_id=trace_id, method=method, path=path)
+        request.state.trace_ctx = trace_ctx
+
+        # 尝试读取请求体摘要（仅 POST/PUT/PATCH）
+        if method in ("POST", "PUT", "PATCH"):
+            try:
+                body = await request.body()
+                text = body.decode("utf-8", errors="replace")[:200]
+                trace_ctx.request_summary = text.replace("\n", " ").strip()
+            except Exception:
+                pass
+
+        # 输出 REQUEST 行 — 把请求体摘要放在 message 字段让 _render_system 显示
+        try:
+            self.logger.info(
+                f"REQUEST  {method} {path}",
+                _type="system",
+                event_name="http_request",
+                message=trace_ctx.request_summary or "",
+                method=method,
+                path=path,
+                trace_id=trace_id,
+            )
+        except UnicodeEncodeError:
+            pass  # Windows GBK 终端无法渲染部分 Unicode 字符，静默忽略
+
         try:
             response = await call_next(request)
             elapsed_ms = round((time.perf_counter_ns() - start_ns) / 1_000_000, 2)
             elapsed_us = int((time.perf_counter_ns() - start_ns) / 1000)
             status_code = response.status_code
 
-            # 单行 access-log（替代 http_request_start + http_request_end）
-            self.logger.info(
-                f"{method} {path} {status_code} {self._fmt_ms(elapsed_ms)}",
-                _type="http",
-                method=method,
-                path=path,
-                status=status_code,
-                duration_ms=elapsed_ms,
-                trace_id=trace_id,
-            )
+            trace_ctx.status_code = status_code
+            trace_ctx.response_summary = _summarize_response(response)
 
-            # 通过 UnifiedEsWriter 写入 Jaeger span
+            # 4xx/5xx 用更高的日志级别
+            log_method = self.logger.info
+            if status_code >= 500:
+                log_method = self.logger.error
+            elif status_code >= 400:
+                log_method = self.logger.warning
+
+            try:
+                log_method(
+                    f"RESPONSE  {trace_ctx.to_response_line()}",
+                    _type="system",
+                    event_name="http_response",
+                    message=trace_ctx.response_summary or "",
+                    method=method,
+                    path=path,
+                    status=status_code,
+                    duration_ms=elapsed_ms,
+                    trace_id=trace_id,
+                )
+            except UnicodeEncodeError:
+                pass
+
+            # ES trace span（始终写入，不受静默影响）
             span = _build_trace_span(
                 method=method, path=path, url=str(request.url),
                 trace_id=trace_id, span_id=span_id,
@@ -140,16 +209,24 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             elapsed_us = int((time.perf_counter_ns() - start_ns) / 1000)
             error_info = f"{type(exc).__name__}: {exc}"
 
-            self.logger.error(
-                f"{method} {path} 500 {self._fmt_ms(elapsed_ms)}",
-                _type="http",
-                method=method,
-                path=path,
-                status=500,
-                duration_ms=elapsed_ms,
-                trace_id=trace_id,
-                error=error_info[:200],
-            )
+            trace_ctx.status_code = 500
+            trace_ctx.error = error_info[:200]
+
+            try:
+                self.logger.error(
+                    f"RESPONSE  {trace_ctx.to_response_line()}",
+                    _type="system",
+                    event_name="http_response_error",
+                    message=trace_ctx.error or "",
+                    method=method,
+                    path=path,
+                    status=500,
+                    duration_ms=elapsed_ms,
+                    trace_id=trace_id,
+                    error=error_info[:200],
+                )
+            except UnicodeEncodeError:
+                pass
 
             span = _build_trace_span(
                 method=method, path=path, url=str(request.url),
@@ -160,3 +237,25 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             await UnifiedEsWriter.get_instance().write("traces", span)
 
             raise
+
+
+def _summarize_response(response: Response) -> str:
+    """从响应中提取摘要文本"""
+    ct = response.headers.get("content-type", "")
+    cl = response.headers.get("content-length", "")
+    parts = []
+    if "text/event-stream" in ct:
+        parts.append("SSE stream")
+    elif "application/json" in ct:
+        parts.append("json")
+    else:
+        parts.append(ct.split(";")[0] if ct else "unknown")
+    if cl:
+        size = int(cl)
+        if size < 1024:
+            parts.append(f"{size}B")
+        elif size < 1024 * 1024:
+            parts.append(f"{size/1024:.0f}KB")
+        else:
+            parts.append(f"{size/1024/1024:.1f}MB")
+    return " ".join(parts)
