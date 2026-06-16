@@ -47,3 +47,8 @@ class AgentGraphState(TypedDict):
     _llm_models: dict             # agent_type -> ChatOpenAI
     _mcp_tools: list              # MCP Server 加载的工具（LangChain BaseTool 列表）
     _streaming_mode: bool
+
+    # === Review-Fix 循环控制 ===
+    _review_fix_cycles: int       # 当前 review-fix 轮次计数（0 开始，上限 _MAX_REVIEW_LOOPS）
+    _loop_created_in_cycle: bool  # 当前批次是否已创建过循环任务（防止单批次指数爆炸）
+    _last_review_passed: bool     # 最新一轮 ReviewAgent 是否通过审核（短路循环）

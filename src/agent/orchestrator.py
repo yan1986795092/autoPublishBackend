@@ -147,6 +147,9 @@ class Orchestrator:
                         "_llm_models": self.chat_models,
                         "_mcp_tools": self.mcp_tools,
                         "_streaming_mode": True,
+                        "_review_fix_cycles": 0,
+                        "_loop_created_in_cycle": False,
+                        "_last_review_passed": False,
                     }
 
                     config = {"recursion_limit": 200}

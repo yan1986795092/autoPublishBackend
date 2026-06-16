@@ -112,25 +112,26 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
             )
         )
 
-    return {
-        "status": "completed",
-        "agent_type": "WebSearch",
-        "output": {
-            "content": "\n".join(content_parts),
+    from ..result import agent_response
+
+    return agent_response(
+        "WebSearch",
+        content="\n".join(content_parts),
+        output_type="text",
+        output_extra={
             "results": results,
             "source": "bocha",
             "query": query,
             "original_query": original_query,
         },
-        "tokens_used": 0,
-        "thinking_steps": [{
+        thinking_steps=[{
             "agent": "WebSearch",
             "action": "搜索完成",
             "reasoning": f"搜索：{original_query}",
             "output_summary": f"博查找到 {len(results)} 条结果",
             "status": "done",
         }],
-    }
+    )
 
 
 async def _search_bocha(
@@ -248,30 +249,34 @@ async def handle_url_crawl(task_input: dict, llm: ChatOpenAI | None = None, mcp_
                 title = url
                 source = "raw"
 
+            from ..result import agent_response
+
             content = f"标题: {title}\n\n来源: {url}\n\n{text}"
-            return {
-                "status": "completed", "agent_type": "URLCrawler",
-                "output": {"content": content, "url": url, "title": title, "source": source},
-                "tokens_used": 0,
-                "thinking_steps": [{
+            return agent_response(
+                "URLCrawler",
+                content=content,
+                output_type="text",
+                output_extra={"url": url, "title": title, "source": source},
+                thinking_steps=[{
                     "agent": "URLCrawler", "action": "抓取",
                     "reasoning": f"抓取: {url}",
                     "output_summary": f"从 {title} 获取 {len(text)} 字符",
                     "status": "done",
                 }],
-            }
+            )
     except httpx.TimeoutException:
-        return {
-            "status": "failed", "agent_type": "URLCrawler",
-            "error": "请求超时",
-            "output": {"content": f"抓取超时：{url}"},
-            "tokens_used": 0, "thinking_steps": [],
-        }
+        from ..result import error_response
+        return error_response(
+            "URLCrawler",
+            error="请求超时",
+            failure_type="timeout",
+            content=f"抓取超时：{url}",
+        )
     except Exception as e:
         logger.warning(f"URLCrawler 执行失败: {e}")
-        return {
-            "status": "failed", "agent_type": "URLCrawler",
-            "error": str(e),
-            "output": {"content": f"抓取失败：{e}"},
-            "tokens_used": 0, "thinking_steps": [],
-        }
+        return error_response(
+            "URLCrawler",
+            error=str(e),
+            failure_type="unknown",
+            content=f"抓取失败：{e}",
+        )

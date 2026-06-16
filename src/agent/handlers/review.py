@@ -7,6 +7,7 @@
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import check_banned_words
+from ..result import agent_response
 from .factcheck import factcheck_report
 from src.prompts import PromptBuilder
 from src.core.exceptions import HandlerError
@@ -66,11 +67,14 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         known_facts = task_input.get("known_facts")
 
         if not content:
-            return {
-                "status": "completed", "agent_type": "ReviewAgent",
-                "output": {"passed": False, "banned_words": [], "factcheck": None, "suggestions": ["无内容可审核"]},
-                "tokens_used": 0, "thinking_steps": [],
-            }
+            return agent_response(
+                "ReviewAgent",
+                output_type="metadata",
+                output_extra={
+                    "passed": False, "banned_words": [],
+                    "factcheck": None, "suggestions": ["无内容可审核"],
+                },
+            )
 
         # ── 加载平台质量检查标准 ──
         platform_quality = task_input.get("_platform_quality_check", "")
@@ -122,6 +126,15 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         # ── 工具感知的 LLM 调用 ──
         from .tool_utils import call_llm
 
+        # ── Review-Fix 循环上下文注入 ──
+        review_round = task_input.get("_review_round", 0)
+        if review_round > 0:
+            lc_messages.append(SystemMessage(content=(
+                f"注意：这是第 {review_round} 轮复审。内容是经过上一轮审核意见修改后的版本。\n"
+                f"请仔细检查修改是否到位。如果内容质量已达标，请明确给出通过结论。\n"
+                f"请在你的回复末尾单独一行输出审核结论：**审核结论：通过** 或 **审核结论：需修改**"
+            )))
+
         llm_result = await call_llm(
             llm, lc_messages,
             agent_type="ReviewAgent",
@@ -129,16 +142,29 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             on_chunk=task_input.get("_on_llm_chunk"),
         )
         quality_text = llm_result.content
-        passed = len(banned_found) == 0 and "需要修改" not in quality_text
+
+        # 判定是否通过：复审依赖显式结论，初审判关键词
+        # 注意初审格式为 **审核结论：** 通过（冒号后有 ** 空格），
+        # 复审格式为 **审核结论：通过**（直接加粗整句），格式不统一不通用
+        if review_round > 0:
+            passed = "审核结论：通过" in quality_text
+        else:
+            passed = len(banned_found) == 0 and "需要修改" not in quality_text
+
+        # 提取改进建议：排除结论行本身，避免将 "审核结论：需要修改" 误当作建议
+        quality_lines = quality_text.split("\n")
         suggestions = [
-            line.strip() for line in quality_text.split("\n")
+            line.strip() for line in quality_lines
             if any(kw in line for kw in ["建议", "问题", "修改", "不足"])
+            and "审核结论" not in line
+            and "改进建议" not in line
         ]
 
-        # ── 自动修正（rewrite=True 且有需要修改的问题时触发） ──
+        # ── 自动修正 ──
+        # 复审时禁用自动修正（由 FixAgent 在循环中处理）
         fixed_content = ""
         rewrite_applied = False
-        should_rewrite = task_input.get("_rewrite", True)  # 默认开启
+        should_rewrite = task_input.get("_rewrite", True) and review_round == 0
         has_issues = bool(banned_found) or bool(suggestions) or not passed
 
         if should_rewrite and has_issues:
@@ -176,8 +202,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                     fix_result = await call_llm(
                         llm, fix_messages,
                         agent_type="ReviewAgent",
-                        stream=True,
-                        on_chunk=task_input.get("_on_llm_chunk"),
+                        stream=False,
                     )
                     fixed_content = fix_result.content.strip()
                     rewrite_applied = bool(fixed_content) and fixed_content != original_for_fix[:5000]
@@ -195,30 +220,31 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         if rewrite_applied:
             thinking_summary += " · 已自动修正 ✨"
 
-        return {
-            "status": "completed", "agent_type": "ReviewAgent",
-            "output": {
+        return agent_response(
+            "ReviewAgent",
+            content=quality_text,
+            output_type="text",
+            tokens_used=total_tokens,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            output_extra={
                 "passed": passed,
                 "banned_words": banned_found,
                 "factcheck": fc_report,
                 "suggestions": suggestions[:5],
-                "content": quality_text,
                 "fixed_content": fixed_content if rewrite_applied else "",
                 "rewrite_applied": rewrite_applied,
                 "platform": platform,
             },
-            "tokens_used": total_tokens,
-            "prompt_tokens": prompt_tokens,
-            "completion_tokens": completion_tokens,
-            "prompt_versions": composed.used_templates,
-            "thinking_steps": [{
+            prompt_versions=composed.used_templates,
+            thinking_steps=[{
                 "agent": "ReviewAgent",
                 "action": "审核完成" + (" + 自动修正" if rewrite_applied else ""),
                 "reasoning": f"审核{content_type}内容质量",
                 "output_summary": thinking_summary,
                 "status": "done",
             }],
-        }
+        )
     except Exception as e:
         logger.error("ReviewAgent 执行失败", error=str(e), exc_info=True)
         raise HandlerError(str(e), handler="ReviewAgent") from e

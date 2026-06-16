@@ -79,13 +79,16 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
                     "execution_time_ms": run_result.execution_time_ms,
                 }
 
-        return {
-            "status": "completed",
-            "agent_type": "CodeAgent",
-            "output": output,
-            "tokens_used": tokens,
-            "prompt_versions": composed.used_templates,
-            "thinking_steps": [{
+        from ..result import agent_response
+
+        return agent_response(
+            "CodeAgent",
+            content=content,
+            output_type="code",
+            tokens_used=tokens,
+            output_extra=output,
+            prompt_versions=composed.used_templates,
+            thinking_steps=[{
                 "agent": "CodeAgent",
                 "action": "代码执行完成" if run_code else "代码生成完成",
                 "reasoning": f"生成 {language} 代码：{topic[:30]}...",
@@ -94,7 +97,7 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
                 "tokens_used": tokens,
                 "status": "done",
             }],
-        }
+        )
     except Exception as e:
         logger.error("CodeAgent 执行失败: %s", e, exc_info=True)
         raise HandlerError(str(e), handler="CodeAgent") from e

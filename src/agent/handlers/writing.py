@@ -148,20 +148,23 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                 logger.warning("extract_output 返回空，使用原始响应", agent="WritingAgent")
 
         platform_display = f"（{platform_name}）" if platform_name else ""
-        return {
-            "status": "completed", "agent_type": "WritingAgent",
-            "output": {"content": content, "type": "text", "content_type": content_type, "platform": platform},
-            "tokens_used": llm_result.total_tokens,
-            "prompt_tokens": llm_result.prompt_tokens,
-            "completion_tokens": llm_result.completion_tokens,
-            "prompt_versions": composed.used_templates,
-            "thinking_steps": [{
+        from ..result import agent_response
+        return agent_response(
+            "WritingAgent",
+            content=content,
+            output_type="text",
+            tokens_used=llm_result.total_tokens,
+            prompt_tokens=llm_result.prompt_tokens,
+            completion_tokens=llm_result.completion_tokens,
+            output_extra={"content_type": content_type, "platform": platform},
+            prompt_versions=composed.used_templates,
+            thinking_steps=[{
                 "agent": "WritingAgent", "action": "写作完成",
                 "reasoning": f"撰写{content_type}内容{platform_display}：{topic[:30]}...",
                 "output_summary": f"生成了约 {len(content)} 字内容",
                 "tokens_used": llm_result.total_tokens, "status": "done",
             }],
-        }
+        )
     except Exception as e:
         logger.error("WritingAgent 执行失败", error=str(e), exc_info=True)
         raise HandlerError(str(e), handler="WritingAgent") from e

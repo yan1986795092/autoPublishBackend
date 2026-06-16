@@ -28,6 +28,7 @@ from .platform_registry import PLATFORMS, detect_platform, get_names_map
 from .handlers import HANDLER_MAP, handle_fallback
 from .cache import agent_cache
 from .stage_map import get_stage_label, get_stage_icon
+from .registry import get as get_card, by_category, CATEGORY_DEPENDENCY_RULES
 
 from src.core.exceptions import HandlerError, ToolExecutionError
 from src.observability.metrics import record_agent_task, record_agent_run
@@ -79,79 +80,64 @@ def _build_fallback_plan(user_request: str, platform_code: str | None = None) ->
     elif any(kw in text for kw in ["图表", "架构图", "流程图", "mermaid", "diagram"]):
         suggested = ["writing", "diagram", "review"]
     elif any(kw in text for kw in ["搜索", "热点", "热搜", "查", "最新", "趋势", "news", "trending"]):
-        suggested = ["search", "writing", "review"]
+        suggested = ["search", "analysis", "writing", "review", "fix"]
     elif any(kw in text for kw in ["分析", "url", "链接", "网站", "网页", "抓取"]):
-        suggested = ["search", "writing", "review"]
+        suggested = ["search", "analysis", "writing", "review"]
     else:
         suggested = ["writing", "review", "fix"]
 
     tasks = []
     last_id_index = -1
 
-    # Agent type 映射表：short_name -> (agent_type, dependencies, priority)
-    AGENT_MAP: dict[str, tuple[str, list[int], str, dict]] = {
-        "writing": ("WritingAgent", [], "high", {"topic": user_request, "content_type": content_type, "platform": detected or ""}),
-        "review": ("ReviewAgent", [], "medium", {"topic": user_request, "content_type": content_type, "platform": detected or ""}),
-        "fix": ("FixAgent", [], "medium", {"topic": user_request, "content_type": content_type, "platform": detected or ""}),
-        "seo": ("SEOAgent", [], "low", {"topic": user_request, "content_type": content_type, "platform": detected or "", "rewrite": True}),
-        "search": ("WebSearch", [], "low", {"query": user_request, "count": 5}),
-        "code": ("CodeAgent", [], "medium", {"task": user_request}),
-        "diagram": ("DiagramAgent", [], "low", {"topic": user_request}),
+    # 兜底计划：按类别从 registry 获取 Agent 类型名（避免硬编码）
+    # short_name = category name, input_template 仍是上下文相关的
+    _CATEGORY_INPUTS: dict[str, tuple[str, dict]] = {
+        "writing": ("high", {"topic": user_request, "content_type": content_type, "platform": detected or ""}),
+        "review": ("medium", {"topic": user_request, "content_type": content_type, "platform": detected or ""}),
+        "fix":    ("medium", {"topic": user_request, "content_type": content_type, "platform": detected or ""}),
+        "search": ("low",    {"query": user_request, "count": 5}),
+        "analysis":("medium", {"topic": user_request, "platform": detected or ""}),
+        "code":   ("medium", {"task": user_request}),
+        "diagram":("low",    {"topic": user_request}),
     }
 
     built: list[dict] = []
     for short_name in suggested:
-        if short_name not in AGENT_MAP:
+        if short_name not in _CATEGORY_INPUTS:
             continue
-        agent_type, deps_idx, priority, input_data = AGENT_MAP[short_name]
-
-        # 解析依赖：列表中的数字表示前一个已构建任务的索引偏移
-        resolved_deps = []
-        for d in deps_idx:
-            if d < len(built):
-                resolved_deps.append(built[d]["id"])
+        cards = by_category(short_name)  # type: ignore[arg-type]
+        if not cards:
+            continue
+        agent_type = cards[0].name
+        priority, input_data = _CATEGORY_INPUTS[short_name]
 
         task = {
             "id": str(uuid.uuid4()), "agent_type": agent_type,
             "input": {**input_data, "platform": detected or ""},
-            "dependencies": resolved_deps,
-            "can_parallel_with": [], "retry_on_low_quality": agent_type in ("WritingAgent", "FixAgent"),
+            "dependencies": [],
+            "can_parallel_with": [],
+            "retry_on_low_quality": agent_type in ("WritingAgent", "FixAgent"),
             "priority": priority,
         }
         built.append(task)
 
-    # 自动构建依赖链：
-    # - WritingAgent 依赖前一个 WebSearch
-    # - review 依赖最后一个 writing 或 fix
-    # - fix 依赖最后一个 review
-    # - seo 依赖最后一个 writing 或 fix
-    search_indices = [i for i, t in enumerate(built) if t["agent_type"] == "WebSearch"]
-    writing_indices = [i for i, t in enumerate(built) if t["agent_type"] in ("WritingAgent", "FixAgent")]
-    review_indices = [i for i, t in enumerate(built) if t["agent_type"] == "ReviewAgent"]
-    fix_indices = [i for i, t in enumerate(built) if t["agent_type"] == "FixAgent"]
+    # 自动构建依赖链：从 registry 的 CATEGORY_DEPENDENCY_RULES 推断
+    _cat_task_ids: dict[str, list[str]] = {}
+    for t in built:
+        card = get_card(t["agent_type"])
+        cat = card.category if card else ""
+        _cat_task_ids.setdefault(cat, []).append(t["id"])
 
-    for i, t in enumerate(built):
-        if t["agent_type"] == "WritingAgent" and search_indices:
-            target_id = built[search_indices[-1]]["id"]
-            if target_id not in t["dependencies"]:
-                t["dependencies"].append(target_id)
-        if t["agent_type"] == "ReviewAgent" and writing_indices:
-            target_id = built[writing_indices[-1]]["id"]
-            if target_id not in t["dependencies"]:
-                t["dependencies"].append(target_id)
-        if t["agent_type"] == "FixAgent" and review_indices:
-            target_id = built[review_indices[-1]]["id"]
-            if target_id not in t["dependencies"]:
-                t["dependencies"].append(target_id)
-        if t["agent_type"] == "SEOAgent" and fix_indices:
-            target_id = built[fix_indices[-1]]["id"]
-            if target_id not in t["dependencies"]:
-                t["dependencies"].append(target_id)
-        elif t["agent_type"] == "SEOAgent" and writing_indices:
-            target_id = built[writing_indices[-1]]["id"]
-            if target_id not in t["dependencies"]:
-                t["dependencies"].append(target_id)
-        # WebSearch 无依赖，直接并行执行
+    for t in built:
+        card = get_card(t["agent_type"])
+        if not card:
+            continue
+        deps = t.setdefault("dependencies", [])
+        dep_cats = CATEGORY_DEPENDENCY_RULES.get(card.category, [])
+        for dep_cat in dep_cats:
+            dep_ids = _cat_task_ids.get(dep_cat, [])
+            if dep_ids and dep_ids[-1] not in deps:
+                deps.append(dep_ids[-1])
 
     agent_names = [t["agent_type"] for t in built]
     platform_hint = f"（{p.name}）" if p else ""
@@ -193,6 +179,8 @@ async def _publish_streaming_event(state: AgentGraphState, event_type: str, data
                 await task_queue.publish_llm_chunk(task_id, data)
             elif event_type == "reasoning":
                 await task_queue.publish_reasoning(task_id, data)
+            elif event_type == "stage":
+                await task_queue.publish_stage(task_id, data)
         except Exception as e:
             logger.warning("发布流式事件失败", event_type=event_type, error=str(e))
 
@@ -313,14 +301,21 @@ def _build_fallback_understanding(user_request: str, context: dict) -> dict:
     platform_name = get_names_map().get(platform, "") if platform else ""
 
     return {
-        "intent": "generate content",
+        "intent": {"coarse": "CREATE", "fine": "generate content"},
+        "slots": {
+            "content_type": "文章",
+            "domain": "其他",
+            "creativity_level": "medium",
+            "length_hint": "medium",
+            "tone": None,
+            "audience": None,
+        },
+        "missing_slots": [],
         "cleaned_prompt": user_request,
         "safety": True,
         "safety_reason": "",
         "platform": platform,
         "platform_name": platform_name,
-        "content_type": "blog",
-        "conflicts": [],
         "language": "zh" if has_chinese else "en",
     }
 
@@ -393,14 +388,47 @@ async def understand_intent(state: AgentGraphState) -> dict:
 
         updates.update(_add_thinking_step(
             state, "UnderstandingAgent", "意图分析完成",
-            reasoning=f"意图={understanding['intent']}，平台={understanding.get('platform_name', '无')}，安全={understanding['safety']}",
+            reasoning=f"意图={understanding['intent']['coarse']} - {understanding['intent']['fine']}，平台={understanding.get('platform_name', '无')}，安全={understanding['safety']}",
             input_summary=user_request[:200],
             output_summary=f"清理后：{understanding['cleaned_prompt'][:100]}",
         ))
 
-        span.set_attribute("agent.intent", understanding["intent"])
+        span.set_attribute("agent.intent", understanding.get("intent", {}).get("coarse", "unknown"))
         span.set_attribute("agent.safety", str(understanding["safety"]))
         span.set_status("OK")
+
+        # Emit stage 事件
+        await _publish_streaming_event(state, "stage", {
+            "agent": "ManagerAgent",
+            "label": "思考分析中",
+            "icon": "🧠",
+            "status": "started",
+            "timestamp": time.time(),
+        })
+
+        # Emit reasoning 事件（简要总结，不发原始 JSON）
+        intent_info = understanding.get("intent", {})
+        slots = understanding.get("slots", {})
+        platform_name = understanding.get("platform_name", "")
+        summary = f"{intent_info.get('coarse', '')}：{intent_info.get('fine', '')}"
+        if platform_name:
+            summary += f"（平台：{platform_name}）"
+        if slots.get("tone"):
+            summary += f"，风格：{slots['tone']}"
+        if slots.get("length_hint"):
+            summary += f"，篇幅：{slots['length_hint']}"
+        await _publish_streaming_event(state, "reasoning", {
+            "agent": "ManagerAgent",
+            "content": summary,
+            "timestamp": time.time(),
+        })
+
+        await _publish_streaming_event(state, "stage", {
+            "agent": "ManagerAgent",
+            "status": "completed",
+            "duration": time.time() - (state.get("start_time", time.time()) or time.time()),
+            "timestamp": time.time(),
+        })
 
         return updates
 
@@ -430,17 +458,29 @@ def _parse_plan_from_response(response: str, goal: str, platform: str | None = N
         else:
             return None
 
-    if not isinstance(plan_dict, dict) or "tasks" not in plan_dict or not plan_dict["tasks"]:
+    # 支持两种格式：{"tasks": [...]} 或直接数组 [{...}, {...}]
+    raw_tasks = []
+    if isinstance(plan_dict, list):
+        raw_tasks = plan_dict
+    elif isinstance(plan_dict, dict):
+        raw_tasks = plan_dict.get("tasks", [])
+    if not raw_tasks:
         return None
 
     tasks = []
-    for i, t in enumerate(plan_dict.get("tasks", [])):
-        if not isinstance(t, dict) or "agent_type" not in t:
+    for i, t in enumerate(raw_tasks):
+        if not isinstance(t, dict):
             continue
+        agent_type = t.get("agent_type") or t.get("agent")
+        if not agent_type:
+            continue
+        task_input = t.get("input") or {}
+        if not task_input and t.get("task"):
+            task_input = {"topic": t["task"], "content_type": "blog"}
         tasks.append({
             "id": str(uuid.uuid4()),
-            "agent_type": t.get("agent_type", "WritingAgent"),
-            "input": t.get("input", {}),
+            "agent_type": agent_type,
+            "input": task_input,
             "dependencies": t.get("dependencies", []),
             "can_parallel_with": t.get("can_parallel_with", []),
             "retry_on_low_quality": t.get("retry_on_low_quality", False),
@@ -452,9 +492,9 @@ def _parse_plan_from_response(response: str, goal: str, platform: str | None = N
         return None
 
     return {
-        "goal": plan_dict.get("goal", goal),
+        "goal": plan_dict.get("goal", goal) if isinstance(plan_dict, dict) else goal,
         "tasks": tasks,
-        "reasoning": plan_dict.get("reasoning", ""),
+        "reasoning": plan_dict.get("reasoning", "") if isinstance(plan_dict, dict) else "",
         "estimated_steps": len(tasks),
         "plan_method": "llm",
     }
@@ -521,7 +561,7 @@ Based on the above understanding, select the most appropriate agents to complete
                 plan = _parse_plan_from_response(response.content, cleaned_prompt, platform=detected_platform)
 
                 if not plan or len(plan.get("tasks", [])) == 0:
-                    logger.warning("LLM 计划没有任务，使用兜底方案")
+                    logger.warning("LLM 计划没有任务，使用兜底方案. LLM响应: %s", response.content[:300] if response.content else "空")
                     plan = _build_fallback_plan(cleaned_prompt, detected_platform)
                 else:
                     plan["plan_method"] = "llm"
@@ -533,6 +573,41 @@ Based on the above understanding, select the most appropriate agents to complete
 
         if not plan:
             plan = _build_fallback_plan(cleaned_prompt, detected_platform)
+
+
+        # 注入理解 Agent 的结构化槽位到每个任务
+        slots = understanding.get("slots", {})
+        if slots:
+            for task in plan.get("tasks", []):
+                task_input = task.get("input", {})
+                for key in ("tone", "audience", "creativity_level", "length_hint", "domain", "content_type"):
+                    val = slots.get(key)
+                    if val and val not in ("null", None) and key not in task_input:
+                        task_input[key] = val
+                if understanding.get("language"):
+                    task_input.setdefault("language", understanding["language"])
+
+        # 自动修正依赖链（防止 LLM 漏设依赖导致并行错误）
+        # 从 registry 的 CATEGORY_DEPENDENCY_RULES 推断
+        tasks = plan.get("tasks", [])
+
+        # 按类别分组 task_id
+        _category_task_ids: dict[str, list[str]] = {}
+        for t in tasks:
+            card = get_card(t.get("agent_type", ""))
+            cat = card.category if card else ""
+            _category_task_ids.setdefault(cat, []).append(t["id"])
+
+        for t in tasks:
+            card = get_card(t.get("agent_type", ""))
+            if not card:
+                continue
+            deps = t.setdefault("dependencies", [])
+            dep_cats = CATEGORY_DEPENDENCY_RULES.get(card.category, [])
+            for dep_cat in dep_cats:
+                dep_ids = _category_task_ids.get(dep_cat, [])
+                if dep_ids and dep_ids[-1] not in deps:
+                    deps.append(dep_ids[-1])
 
         updates = {
             "plan": plan,
@@ -554,6 +629,24 @@ Based on the above understanding, select the most appropriate agents to complete
         span.set_attribute("plan.method", plan.get("plan_method", "fallback"))
         span.set_attribute("agent.task_count", len(plan.get("tasks", [])))
         span.set_status("OK")
+
+        # Emit stage 事件 for PlanningAgent
+        await _publish_streaming_event(state, "stage", {
+            "agent": "PlanningAgent",
+            "label": "任务规划中",
+            "icon": "📋",
+            "status": "started",
+            "timestamp": time.time(),
+        })
+
+        # 不 emit 硬编码 reasoning，thinking_step 已包含规划信息
+
+        await _publish_streaming_event(state, "stage", {
+            "agent": "PlanningAgent",
+            "status": "completed",
+            "duration": time.time() - (state.get("start_time", time.time()) or time.time()),
+            "timestamp": time.time(),
+        })
 
         return updates
 
@@ -615,14 +708,15 @@ async def schedule_and_execute(state: AgentGraphState) -> dict:
                 return {
                     "ready_tasks": [],
                     "failed_task_ids": list(state.get("failed_task_ids", [])) + [t["id"] for t in stuck],
+                    "_loop_created_in_cycle": False,
                 }
             else:
                 span.add_event("waiting_for_dependencies", {"deps_unmet": deps_unmet})
                 span.set_status("OK")
-                return {"ready_tasks": []}
+                return {"ready_tasks": [], "_loop_created_in_cycle": False}
 
         span.set_status("OK")
-        return {"ready_tasks": ready}
+        return {"ready_tasks": ready, "_loop_created_in_cycle": False}
 
 
 # ──────────────────────────────────────────────
@@ -648,6 +742,22 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
             "custom.run_id": run_id,
         },
     ) as batch_span:
+        # ── 如果上一轮审核已通过，跳过本轮待执行的 FixAgent 循环任务 ──
+        # 记录跳过的任务，等 task_results / completed 初始化后补充标记
+        _skipped_tasks: list[dict] = []
+        _is_review_passed = state.get("_last_review_passed", False)
+        if _is_review_passed:
+            filtered = []
+            for t in ready_tasks:
+                if t.get("agent_type") == "FixAgent" and t.get("input", {}).get("_review_round", 0) > 0:
+                    _skipped_tasks.append(t)
+                    logger.info("审核已通过，跳过 FixAgent（第 %d 轮）", t["input"].get("_review_round", 0))
+                else:
+                    filtered.append(t)
+            if _skipped_tasks:
+                ready_tasks = filtered
+                logger.info("本轮过滤掉 %d 个 FixAgent 任务", len(_skipped_tasks))
+
         semaphore = asyncio.Semaphore(concurrency)
 
         async def run_one(task: dict, task_step_number: int) -> tuple[str, dict]:
@@ -709,9 +819,87 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
             if result.get("thinking_steps"):
                 new_steps.extend(result["thinking_steps"])
 
+        # ── 将本轮跳过的 FixAgent 标记为已完成（避免 schedule 死循环） ──
+        for st in _skipped_tasks:
+            sid = st.get("id", "")
+            if sid not in task_results:
+                task_results[sid] = {
+                    "status": "completed", "agent_type": "FixAgent",
+                    "output": {"content": "", "passed": True, "skipped": True},
+                    "thinking_steps": [{
+                        "agent": "FixAgent", "action": "跳过",
+                        "reasoning": "审核已通过，无需再修改",
+                        "output_summary": "跳过",
+                        "status": "done",
+                    }],
+                }
+            if sid not in completed:
+                completed.append(sid)
+
+        # 检查本轮完成的 ReviewAgent 是否通过了审核
+        # 用于短路后续 review-fix 循环，避免质量已达标时继续浪费 Token
+        # 注意：只有 re-review 轮次（_review_round > 0）的通过才算数，
+        # 初审（round 0）的格式可靠性不如复审（LLM 可能遗漏结论行），
+        # 如果让它阻塞循环，FixAgent 完成后就不会追加复审+再润色。
+        _last_review_passed = state.get("_last_review_passed", False)
+        task_queue = state.get("task_queue", [])
+        for task_id, result in task_results.items():
+            if result.get("agent_type") != "ReviewAgent":
+                continue
+            if result.get("status") not in ("completed", "partial"):
+                continue
+            task_def = next((t for t in task_queue if t.get("id") == task_id), None)
+            review_round = task_def.get("input", {}).get("_review_round", 0) if task_def else 0
+            if review_round == 0:
+                continue  # 初审不阻塞循环，由 re-review 决定是否停止
+            output = result.get("output", {})
+            if isinstance(output, dict) and output.get("passed") is True:
+                _last_review_passed = True
+
+        # ── Review-Fix 循环检测（最多 2 轮，每批只允许生成一轮，防止指数爆炸） ──
+        _MAX_REVIEW_LOOPS = 2
+        _review_fix_cycles = state.get("_review_fix_cycles", 0)
+        _loop_already_created = state.get("_loop_created_in_cycle", False)
+
+        loop_new_tasks: list[dict] = []
+        if _review_fix_cycles < _MAX_REVIEW_LOOPS and not _loop_already_created and not _last_review_passed:
+            for tid in list(completed):
+                result = task_results.get(tid, {})
+                if result.get("agent_type") != "FixAgent":
+                    continue
+
+                # 每次润色后自动追加复审+再润色（不依赖旧审核结果）
+                # 防止同一批多个 FixAgent → 生成多个配对 → 指数爆炸
+                fix_task = next((t for t in state.get("task_queue", []) if t.get("id") == tid), None)
+                if not fix_task:
+                    continue
+
+                loop_round = _review_fix_cycles + 1
+                new_review_id = str(uuid.uuid4())
+                new_fix_id = str(uuid.uuid4())
+                topic = fix_task.get("input", {}).get("topic", "")
+
+                loop_new_tasks.append({
+                    "id": new_review_id,
+                    "agent_type": "ReviewAgent",
+                    "input": {"topic": topic, "_skip_cache": True, "_review_round": loop_round},
+                    "dependencies": [tid],
+                    "config": {"priority": 0, "reasoning": f"复审(第{loop_round}轮)"},
+                })
+                loop_new_tasks.append({
+                    "id": new_fix_id,
+                    "agent_type": "FixAgent",
+                    "input": {"topic": topic, "_skip_cache": True, "_review_round": loop_round},
+                    "dependencies": [tid, new_review_id],
+                    "config": {"priority": 0, "reasoning": f"再润色(第{loop_round}轮)"},
+                })
+                logger.info("润色完成，自动追加第 %d 轮复审+再润色", loop_round)
+                break  # 每批只生成一轮，防止指数爆炸
+
         existing = state.get("thinking_steps", [])
         batch_span.add_event("batch_completed", {
             "completed": len(completed), "failed": len(failed),
+            "review_loop_created": len(loop_new_tasks) > 0,
         })
         batch_span.set_status("OK")
 
@@ -722,12 +910,20 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
             duration_s=(time.time() - state.get("start_time", time.time())),
         )
 
-        return {
+        updates = {
             "task_results": task_results,
             "completed_task_ids": completed,
             "failed_task_ids": failed,
             "thinking_steps": existing + new_steps,
+            "_last_review_passed": _last_review_passed,
         }
+        if loop_new_tasks:
+            updated_queue = list(state.get("task_queue", [])) + loop_new_tasks
+            updates["task_queue"] = updated_queue
+            updates["_review_fix_cycles"] = _review_fix_cycles + 1
+            updates["_loop_created_in_cycle"] = True
+
+        return updates
 
 
 # ──────────────────────────────────────────────
@@ -802,22 +998,36 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     if profile:
                         t_input["content_type"] = platform_code
 
+            # 理解槽位注入（tone、audience 等结构化参数）
+            understanding = state.get("understanding", {})
+            slots = understanding.get("slots", {}) if understanding else {}
+            for key in ("tone", "audience", "creativity_level", "length_hint", "domain"):
+                val = slots.get(key) if slots else None
+                if val and val not in ("null", None) and key not in t_input:
+                    t_input[key] = val
+            if understanding and understanding.get("language"):
+                t_input.setdefault("language", understanding["language"])
+
             # MCP 工具
             mcp_tools = state.get("_mcp_tools", [])
             if mcp_tools:
                 t_input["_mcp_tools"] = mcp_tools
 
             # Emit stage:started 事件（在缓存检查之前，确保前端 timeline 一致性）
-            await _publish_streaming_event(state, "stage", {
+            review_round = task_input.get("_review_round", 0)
+            stage_data = {
                 "agent": agent_type,
                 "label": get_stage_label(agent_type),
                 "icon": get_stage_icon(agent_type),
                 "status": "started",
                 "timestamp": time.time(),
-            })
+            }
+            if review_round > 0:
+                stage_data["_review_round"] = review_round
+            await _publish_streaming_event(state, "stage", stage_data)
 
             # 缓存检查
-            cacheable_types = {"SEOAgent", "ReviewAgent", "WebSearch"}
+            cacheable_types = {"ReviewAgent", "WebSearch"}
             use_cache = agent_type in cacheable_types and not t_input.get("_skip_cache")
             if use_cache:
                 cached = await agent_cache.get(agent_type, t_input)
@@ -828,7 +1038,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     await _publish_streaming_event(state, "thinking_step", {
                         "step_number": task_step_number,
                         "agent": agent_type,
-                        "action": task.get("config", {}).get("reasoning", "使用缓存"),
+                        "action": "命中缓存",
                         "reasoning": f"命中缓存，agent={agent_type}",
                         "input_summary": str(t_input)[:100],
                         "output_summary": cached.get("output", {}).get("content", "")[:200],
@@ -860,7 +1070,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             })
 
             # 流式 LLM 回调（安全版：catch 异常防止静默丢失）
-            if streaming_mode and agent_type in {"WritingAgent", "SEOAgent", "ReviewAgent"}:
+            if streaming_mode:
                 async def _safe_publish(event_type: str, data: dict) -> None:
                     try:
                         await _publish_streaming_event(state, event_type, data)
@@ -878,7 +1088,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 t_input["_on_llm_chunk"] = _make_on_llm_chunk(agent_type)
                 t_input["_on_reasoning"] = _make_on_reasoning(agent_type)
 
-            # 执行 handler
+            # 执行 handler（带安全兜底）
             _mcp = mcp_tools if mcp_tools else t_input.get("_mcp_tools")
 
             # Emit agent_start 到控制台
@@ -891,7 +1101,10 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 llm_model=getattr(llm, 'model_name', '') if llm else '',
             ))
 
-            result = await handler(t_input, llm, _mcp)
+            result = await _safe_run_handler(agent_type, handler, t_input, llm, _mcp, task=task, state=state)
+
+            # 归一化为标准信封格式（兼容旧 handler）
+            result = _normalize_agent_result(result, agent_type)
 
             # 清理不可序列化的回调引用
             t_input.pop("_on_llm_chunk", None)
@@ -899,8 +1112,6 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
 
             elapsed = round(time.time() - start_time, 2)
             result["time_elapsed"] = elapsed
-            if "thinking_steps" not in result:
-                result["thinking_steps"] = []
 
             # Emit stage:completed 事件
             await _publish_streaming_event(state, "stage", {
@@ -918,7 +1129,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 "action": "完成",
                 "reasoning": f"Agent {agent_type} 执行完成",
                 "input_summary": str(t_input)[:200],
-                "output_summary": output_content[:300] if output_content else (result.get("error", "") or "完成"),
+                "output_summary": output_content[:300] if output_content else (result.get("error", "") or ""),
                 "tokens_used": result.get("tokens_used", 0),
                 "time_elapsed": elapsed,
                 "status": result.get("status", "completed"),
@@ -949,93 +1160,22 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
 
             return result
 
-        except ToolExecutionError as e:
-            elapsed = round(time.time() - start_time, 2)
-            logger.error(
-                "MCP 工具执行失败",
-                agent_type=agent_type,
-                tool_name=e.tool_name,
-                error=str(e),
-                _type="agent",
-                event_name="tool_execution_error",
-                failure_type="mcp_tool",
-                error_code=e.error_code,
-            )
-            await _publish_streaming_event(state, "thinking_step", {
-                "step_number": task_step_number,
-                "agent": agent_type,
-                "action": "工具调用失败",
-                "reasoning": f"工具 {e.tool_name} 执行失败: {e.message}",
-                "input_summary": str(task_input)[:200],
-                "output_summary": str(e),
-                "tokens_used": 0,
-                "time_elapsed": elapsed,
-                "status": "failed",
-            })
-            return {
-                "status": "failed",
-                "agent_type": agent_type,
-                "failure_type": "mcp_tool",
-                "error_code": e.error_code,
-                "tool_name": e.tool_name,
-                "error": str(e),
-                "error_details": e.details,
-                "time_elapsed": elapsed,
-                "thinking_steps": [{"agent": agent_type, "action": "tool_error", "tool": e.tool_name, "reasoning": e.message, "status": "failed"}],
-            }
-
-        except HandlerError as e:
-            elapsed = round(time.time() - start_time, 2)
-            logger.error(
-                "Handler 执行失败",
-                agent_type=agent_type,
-                handler=e.handler,
-                error=str(e),
-                _type="agent",
-                event_name="handler_error",
-                failure_type="handler",
-                error_code=e.error_code,
-            )
-            await _publish_streaming_event(state, "thinking_step", {
-                "step_number": task_step_number,
-                "agent": agent_type,
-                "action": "handler 失败",
-                "reasoning": str(e),
-                "input_summary": str(task_input)[:200],
-                "output_summary": str(e),
-                "tokens_used": 0,
-                "time_elapsed": elapsed,
-                "status": "failed",
-            })
-            return {
-                "status": "failed",
-                "agent_type": agent_type,
-                "failure_type": "handler",
-                "error_code": e.error_code,
-                "handler": e.handler,
-                "error": str(e),
-                "error_details": e.details,
-                "time_elapsed": elapsed,
-                "thinking_steps": [{"agent": agent_type, "action": "handler_error", "reasoning": str(e), "status": "failed"}],
-            }
-
+        # handler 内的异常已由 _safe_run_handler 兜底，这里的 except
+        # 只兜底归一化/日志/缓存等编排代码的意外错误
         except Exception as e:
             elapsed = round(time.time() - start_time, 2)
-            exc_type = type(e).__name__
             logger.error(
-                "Agent 执行失败（未知异常）",
+                "Agent 编排异常",
                 agent_type=agent_type,
                 error=str(e),
                 exc_info=True,
                 _type="agent",
-                event_name="agent_error",
-                failure_type="unknown",
-                error_type=exc_type,
+                event_name="orchestration_error",
             )
             await _publish_streaming_event(state, "thinking_step", {
                 "step_number": task_step_number,
                 "agent": agent_type,
-                "action": "失败",
+                "action": "编排异常",
                 "reasoning": str(e),
                 "input_summary": str(task_input)[:200],
                 "output_summary": str(e),
@@ -1043,17 +1183,150 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 "time_elapsed": elapsed,
                 "status": "failed",
             })
-            return {
-                "status": "failed",
-                "agent_type": agent_type,
-                "failure_type": "unknown",
-                "error_type": exc_type,
-                "error": str(e),
-                "time_elapsed": elapsed,
-                "thinking_steps": [{"agent": agent_type, "action": "error", "reasoning": str(e), "status": "failed"}],
-            }
+            from .result import error_response
+            return error_response(
+                agent_type,
+                error=f"编排异常: {e}",
+                failure_type="orchestration",
+                error_type=type(e).__name__,
+                time_elapsed=elapsed,
+            )
 
     return await handle_fallback({"agent_type": agent_type, "input": task_input}, llm, None)
+
+
+def _find_review_dep(task: dict, task_queue: list[dict], task_results: dict) -> str | None:
+    """在 FixAgent 的依赖中找 ReviewAgent 的 task_id"""
+    for dep in task.get("dependencies", []):
+        dep_id = _resolve_dep_id(dep, task_queue)
+        if dep_id and dep_id in task_results:
+            if task_results[dep_id].get("agent_type") == "ReviewAgent":
+                return dep_id
+    return None
+
+
+def _normalize_agent_result(result: dict, agent_type: str) -> dict:
+    """将 handler 返回结果归一化为标准信封格式
+
+    允许 handler 逐步迁移到 agent_response()，迁移完成前兼容旧格式。
+    标准格式: {"status","agent_type","output":{"content":str,"type":str}, "error","tokens_used","thinking_steps"}
+    """
+    output = result.get("output")
+
+    # 情况 1: output 是字符串 → 包装为标准格式
+    if isinstance(output, str):
+        result["output"] = {"content": output, "type": "text"}
+
+    # 情况 2: output 是列表 → 提取首个 content
+    elif isinstance(output, (list, tuple)):
+        content = ""
+        for item in output:
+            if isinstance(item, dict):
+                content = item.get("content", item.get("text", ""))
+            elif isinstance(item, str):
+                content = item
+            if content:
+                break
+        result["output"] = {"content": content, "type": "text", "_raw": output}
+
+    # 情况 3: output 是 dict 但没有 content → 添加空 content
+    elif isinstance(output, dict) and "content" not in output:
+        result["output"] = {"content": "", "type": "metadata", **output}
+
+    # 情况 4: 没有 output → 创建默认
+    elif output is None:
+        result["output"] = {"content": "", "type": "text"}
+
+    # 确保必填字段存在
+    result.setdefault("error", None)
+    result.setdefault("tokens_used", 0)
+    result.setdefault("prompt_tokens", 0)
+    result.setdefault("completion_tokens", 0)
+    if "thinking_steps" not in result:
+        result["thinking_steps"] = []
+
+    return result
+
+
+async def _safe_run_handler(
+    agent_type: str,
+    handler,
+    task_input: dict,
+    llm,
+    mcp_tools,
+    *,
+    task: dict,
+    state: AgentGraphState,
+) -> dict:
+    """安全执行 handler，捕获所有异常返回标准错误响应。
+
+    替代 _run_single_agent_task 中三个重复的 except 块。
+    """
+    from .result import error_response
+
+    try:
+        result = await handler(task_input, llm, mcp_tools)
+        return result
+
+    except ToolExecutionError as e:
+        logger.error(
+            "MCP 工具执行失败",
+            agent_type=agent_type, tool_name=e.tool_name,
+            error=str(e), _type="agent", event_name="tool_execution_error",
+        )
+        await _publish_streaming_event(state, "thinking_step", {
+            "step_number": task.get("step", 0),
+            "agent": agent_type,
+            "action": "工具调用失败",
+            "reasoning": f"工具 {e.tool_name} 执行失败: {e.message}",
+            "input_summary": str(task_input)[:200],
+            "output_summary": str(e),
+            "tokens_used": 0, "time_elapsed": 0, "status": "failed",
+        })
+        return error_response(
+            agent_type, error=str(e), failure_type="mcp_tool",
+            tool_name=e.tool_name, error_code=e.error_code,
+            error_details=e.details,
+        )
+
+    except HandlerError as e:
+        logger.error(
+            "Handler 执行失败",
+            agent_type=agent_type, handler=e.handler,
+            error=str(e), _type="agent", event_name="handler_error",
+        )
+        await _publish_streaming_event(state, "thinking_step", {
+            "step_number": task.get("step", 0),
+            "agent": agent_type, "action": "handler 失败",
+            "reasoning": str(e),
+            "input_summary": str(task_input)[:200],
+            "output_summary": str(e),
+            "tokens_used": 0, "time_elapsed": 0, "status": "failed",
+        })
+        return error_response(
+            agent_type, error=str(e), failure_type="handler",
+            error_code=e.error_code, handler=e.handler,
+            error_details=e.details,
+        )
+
+    except Exception as e:
+        logger.error(
+            "Agent handler 异常",
+            agent_type=agent_type, error=str(e), exc_info=True,
+            _type="agent", event_name="agent_handler_error",
+        )
+        await _publish_streaming_event(state, "thinking_step", {
+            "step_number": task.get("step", 0),
+            "agent": agent_type, "action": "异常",
+            "reasoning": str(e),
+            "input_summary": str(task_input)[:200],
+            "output_summary": str(e),
+            "tokens_used": 0, "time_elapsed": 0, "status": "failed",
+        })
+        return error_response(
+            agent_type, error=str(e), failure_type="unknown",
+            error_type=type(e).__name__,
+        )
 
 
 def _truncate_text(text: str, max_chars: int = 2000) -> str:
@@ -1064,15 +1337,16 @@ def _truncate_text(text: str, max_chars: int = 2000) -> str:
 
 
 def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
-    """构建依赖上下文（只传递 content 字段，防止 Context Bleeding）
+    """构建依赖上下文（标准版）
 
+    所有 handler 已统一使用 agent_response() 返回标准信封，
+    output.content 永远存在，不再需要 isinstance 判断。
     每个依赖的内容截断到 2000 字符以内。
     """
     task_queue = state.get("task_queue", [])
     task_results = state.get("task_results", {})
     context = {}
     dep_count = len(task.get("dependencies", []))
-    # 每个依赖的预算 = min(2000, 6000 / dep_count)
     budget_per_dep = max(1000, 6000 // max(dep_count, 1))
 
     for dep in task.get("dependencies", []):
@@ -1082,23 +1356,8 @@ def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
         if dep_id in task_results:
             prev = task_results[dep_id]
             output = prev.get("output", {})
-            if isinstance(output, dict):
-                content = output.get("content", "")
-            elif isinstance(output, str):
-                content = output
-            elif isinstance(output, (list, tuple)):
-                # 列表/元组取第一个元素的 content
-                content = ""
-                for item in output:
-                    if isinstance(item, dict):
-                        content = item.get("content", item.get("text", ""))
-                    elif isinstance(item, str):
-                        content = item
-                    if content:
-                        break
-            else:
-                # 非标准类型：只取前 200 字符的 repr，避免 str() 整个大对象
-                content = repr(output)[:200] if output else ""
+            content = (output.get("content", "") if isinstance(output, dict)
+                       else str(output) if output else "")
             context[dep_id] = {
                 "content": _truncate_text(content, budget_per_dep),
                 "agent": prev.get("agent_type", ""),
@@ -1165,13 +1424,6 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 if output.get("rewrite_applied") and fixed:
                     content_candidates.append(("review_fix", fixed))
 
-            if agent_type == "SEOAgent" and isinstance(output, dict):
-                metadata = output.get("metadata", {})
-                if metadata:
-                    meta_sections["seo"] = metadata
-                seo_content = output.get("content", "")
-                if seo_content and output.get("type") != "metadata":
-                    content_candidates.append(("seo_rewrite", seo_content))
 
             if agent_type == "WritingAgent" and isinstance(output, dict):
                 content = output.get("content", "")
@@ -1182,9 +1434,10 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             elif agent_type == "WritingAgent" and isinstance(output, str) and output:
                 content_candidates.append(("writing", output))
 
-        # 按优先级选择主内容：fix > review_fix > seo_rewrite > writing
-        for priority in ("fix", "review_fix", "seo_rewrite", "writing"):
-            for ptype, content in content_candidates:
+        # 按优先级选择主内容：fix > review_fix > writing
+        # review-fix 循环时取最后一轮（倒序查找）
+        for priority in ("fix", "review_fix", "writing"):
+            for ptype, content in reversed(content_candidates):
                 if ptype == priority:
                     primary_content = content
                     break
@@ -1192,21 +1445,21 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 break
 
         if not primary_content:
-            logger.warning("未找到主内容，退回到拼接方式，但跳过审核 Agent")
+            logger.warning("未找到主内容，退回到拼接方式，但跳过审查和中间 Agent")
+            _SKIP_AGENTS_FALLBACK = {"ReviewAgent", "WebSearch", "URLCrawler", "HotTopicAgent"}
             for task in task_queue:
                 tid = task.get("id", "")
                 result = task_results.get(tid, {})
                 agent_type = result.get("agent_type", task.get("agent_type", ""))
-                # 跳过审核 agent，不进入主正文
-                if agent_type == "ReviewAgent":
-                    if not review_content:
-                        output = result.get("output", {})
-                        review_content = output.get("content", "") if isinstance(output, dict) else ""
-                    # 检查是否有修正版内容
-                    if isinstance(result.get("output"), dict):
-                        fixed = result["output"].get("fixed_content", "")
-                        if result["output"].get("rewrite_applied") and fixed:
-                            full_text_parts.append(fixed)
+                if agent_type in _SKIP_AGENTS_FALLBACK:
+                    if agent_type == "ReviewAgent":
+                        if not review_content:
+                            output = result.get("output", {})
+                            review_content = output.get("content", "") if isinstance(output, dict) else ""
+                        if isinstance(result.get("output"), dict):
+                            fixed = result["output"].get("fixed_content", "")
+                            if result["output"].get("rewrite_applied") and fixed:
+                                full_text_parts.append(fixed)
                     continue
                 output = result.get("output", {})
                 if isinstance(output, dict):
@@ -1219,12 +1472,17 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         else:
             full_text_parts = [primary_content]
 
+        # 输出的 Agent 类型：只有内容产出型 Agent 进入预览
+        _OUTPUT_AGENTS = {"WritingAgent", "ReviewAgent", "FixAgent", "CodeAgent", "DiagramAgent"}
         for task in task_queue:
             tid = task.get("id", "")
             result = task_results.get(tid, {})
+            agent = result.get("agent_type", task.get("agent_type", ""))
+            if agent not in _OUTPUT_AGENTS:
+                continue
             if tid in completed_ids or tid in failed_ids:
                 sections.append({
-                    "agent": result.get("agent_type", task.get("agent_type", "")),
+                    "agent": agent,
                     "task_input": task.get("input", {}),
                     "output": result.get("output", {}),
                     "status": result.get("status", "unknown"),

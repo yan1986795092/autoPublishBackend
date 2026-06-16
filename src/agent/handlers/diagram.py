@@ -52,19 +52,25 @@ async def handle_diagram(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                 code = code.split("```mermaid")[1].split("```")[0].strip()
             elif "```" in code:
                 code = code.split("```")[1].strip()
-            return {
-                "status": "completed", "agent_type": "DiagramAgent",
-                "output": {"content": code, "diagram_type": diagram_type, "code": code, "rendered": True},
-                "tokens_used": estimate_tokens(code),
-                "prompt_versions": composed.used_templates,
-                "thinking_steps": [{"agent": "DiagramAgent", "action": "图表生成完成", "reasoning": f"生成{diagram_type}图：{topic}", "status": "done"}],
-            }
+            from ..result import agent_response
+
+            return agent_response(
+                "DiagramAgent",
+                content=code,
+                output_type="diagram",
+                tokens_used=estimate_tokens(code),
+                output_extra={"diagram_type": diagram_type, "code": code, "rendered": True},
+                prompt_versions=composed.used_templates,
+                thinking_steps=[{"agent": "DiagramAgent", "action": "图表生成完成", "reasoning": f"生成{diagram_type}图：{topic}", "status": "done"}],
+            )
         except Exception as e:
             logger.warning("DiagramAgent LLM 调用失败，回退到模板: %s", e)
 
     code = f"mindmap\n  root(({topic}))\n    核心概念\n      定义\n    关键技术\n      技术A\n    应用场景"
-    return {
-        "status": "completed", "agent_type": "DiagramAgent",
-        "output": {"content": code, "diagram_type": "mindmap", "code": code, "rendered": True},
-        "tokens_used": 0, "thinking_steps": [],
-    }
+    return agent_response(
+        "DiagramAgent",
+        content=code,
+        output_type="diagram",
+        output_extra={"diagram_type": "mindmap", "code": code, "rendered": True},
+        thinking_steps=[],
+    )

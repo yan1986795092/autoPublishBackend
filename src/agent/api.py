@@ -445,6 +445,7 @@ class AgentStreamRequest(BaseModel):
     context: Optional[dict] = None
     skill_id: Optional[str] = None  # 应用指定的 Skill ID
     platform: Optional[str] = None  # 目标平台代码，如 xiaohongshu
+    parameters: Optional[dict] = None  # 前端参数（tone、creativity、audience 等）
 
 
 @router.post("/agent/stream")
@@ -495,6 +496,12 @@ async def agent_stream(
                 template = template.replace("{topic}", user_prompt.split("\n")[0])
                 template = template.replace("{content}", user_prompt)
                 user_prompt = template
+
+            # 前端参数注入
+            if request.parameters:
+                for k, v in request.parameters.items():
+                    if v is not None:
+                        skill_context[k] = v
 
             # 平台检测（轻量：字符串匹配，无需 Orchestrator / LLM）
             if not platform_code:
