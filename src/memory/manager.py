@@ -307,13 +307,14 @@ class MemoryManager:
         if not user_id:
             return ""
 
-        # 1. 语义记忆（向量搜索）
+        # 1. 语义记忆（向量搜索，按 user_id 隔离）
         if self.semantic.available:
             result = self.semantic.retrieve_formatted(
                 query="用户偏好 写作平台 风格 语调 目标读者",
                 namespace="user_conversation",
                 top_k=5,
                 max_chars_per_item=300,
+                metadata_filter={"user_id": user_id},
             )
             if result:
                 return result

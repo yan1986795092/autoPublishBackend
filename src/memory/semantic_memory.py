@@ -94,7 +94,8 @@ class SemanticMemory:
     # ── 检索 ──
 
     def retrieve(self, query: str, namespace: Optional[str] = None,
-                 top_k: int = 5, min_score: float = 0.0) -> list[MemoryItem]:
+                 top_k: int = 5, min_score: float = 0.0,
+                 metadata_filter: Optional[dict] = None) -> list[MemoryItem]:
         """检索语义记忆
 
         Args:
@@ -127,6 +128,13 @@ class SemanticMemory:
                 continue
             if namespace and meta.get("namespace") != namespace:
                 continue
+            # 按元数据过滤（如 user_id 隔离）
+            if metadata_filter:
+                matched = all(
+                    meta.get(k) == v for k, v in metadata_filter.items()
+                )
+                if not matched:
+                    continue
 
             items.append(MemoryItem(
                 text=doc,
@@ -140,13 +148,17 @@ class SemanticMemory:
         return items[:top_k]
 
     def retrieve_formatted(self, query: str, namespace: Optional[str] = None,
-                           top_k: int = 3, max_chars_per_item: int = 400) -> str:
+                           top_k: int = 3, max_chars_per_item: int = 400,
+                           metadata_filter: Optional[dict] = None) -> str:
         """检索并格式化为 prompt 可用的字符串
 
         Returns:
             格式化后的文本段落，空字符串表示无结果
         """
-        items = self.retrieve(query=query, namespace=namespace, top_k=top_k)
+        items = self.retrieve(
+            query=query, namespace=namespace, top_k=top_k,
+            metadata_filter=metadata_filter,
+        )
         if not items:
             return ""
 
