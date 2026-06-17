@@ -34,6 +34,9 @@ redis>=5.0.0
 # pgvector (PostgreSQL 向量检索，替代 ChromaDB)
 pgvector>=0.3.0
 
+# PostgreSQL driver（生产环境）
+psycopg2-binary>=2.9.9
+
 # MCP (Model Context Protocol) — Web Search
 mcp>=1.10.0
 langchain-mcp-adapters>=0.2.0
