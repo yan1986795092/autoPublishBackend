@@ -20,6 +20,7 @@ NAMESPACES = {
     "feedback": "用户修正反馈和审核经验",
     "domain":   "领域专业知识（技术/营销/...）",
     "template": "高复用 Prompt 模板",
+    "user_conversation": "对话中提取的用户偏好",
 }
 
 

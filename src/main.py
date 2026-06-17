@@ -20,6 +20,7 @@ from src.api import auth, contents, publish, platforms, presets, ai_editor, pers
 from src.api.admin import router as admin_router
 from src.api.skills import router as skills_router
 from src.api.chat import router as chat_router
+from src.api.conversation import router as conversation_router
 from src.agent.api import router as agent_router
 from src.agent.workflow.worker import worker
 from src.observability import setup_observability
@@ -266,6 +267,7 @@ app.include_router(personas.router, prefix="/api/v1")
 app.include_router(admin_router)
 app.include_router(skills_router)
 app.include_router(chat_router)
+app.include_router(conversation_router)
 app.include_router(agent_router, prefix="/api/v1")
 
 

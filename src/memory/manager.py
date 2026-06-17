@@ -294,6 +294,98 @@ class MemoryManager:
         logger.info(f"MemoryManager: 巩固完成 — {stats}")
         return stats
 
+    # ═══════════════════════════════════════════
+    # 对话层记忆（新增）
+    # ═══════════════════════════════════════════
+
+    async def get_user_profile(self, user_id: str) -> str:
+        """获取用户画像描述，注入对话 LLM 的 System Prompt
+
+        从语义记忆中检索用户的历史偏好，
+        返回自然语言描述，空字符串表示无数据。
+        """
+        if not user_id:
+            return ""
+
+        # 使用中文查询词，与存储内容语言一致
+        if self.semantic.available:
+            result = self.semantic.retrieve_formatted(
+                query="用户偏好 写作平台 风格 语调 目标读者",
+                namespace="user_conversation",
+                top_k=5,
+                max_chars_per_item=300,
+            )
+            if result:
+                return result
+
+        # 兜底：从 working_memory 中获取
+        working = self.working.get_recent_context(max_chars=500)
+        if working:
+            return f"近期对话上下文：\n{working}"
+        return ""
+
+    async def remember_conversation_preference(
+        self,
+        user_id: str,
+        preferences: dict,
+    ) -> None:
+        """将对话中发现的用户偏好存入语义记忆
+
+        从 trigger 数据中提取用户偏好字段，
+        构建自然语言描述后写入语义记忆。
+        """
+        if not user_id or not preferences:
+            return
+
+        # 提取有值的偏好字段，构建更详细的自然语言描述
+        field_labels = {
+            "topic": "主题",
+            "platform": "平台",
+            "style": "风格",
+            "length": "篇幅",
+            "tone": "语调",
+            "audience": "目标读者",
+        }
+
+        parts = []
+        for key, label in field_labels.items():
+            val = preferences.get(key)
+            if val and isinstance(val, str) and val.strip():
+                parts.append(f"{label}={val}")
+
+        keywords = preferences.get("keywords", [])
+        if keywords and isinstance(keywords, list) and len(keywords) > 0:
+            kw = [k for k in keywords if k]
+            if kw:
+                parts.append(f"关键词={', '.join(kw)}")
+
+        if not parts:
+            return
+
+        # 构建两份描述：简短版（作为 metadata 标签）+ 详细版（作为存储文本）
+        short = "用户偏好: " + ", ".join(parts)
+
+        # 详细版确保超过 50 字符（语义记忆的 skip_small 阈值）
+        detail_lines = ["用户的创作偏好记录："]
+        detail_lines.extend(f"- {p}" for p in parts)
+        detail = "\n".join(detail_lines)
+
+        # 写入语义记忆（用详细版确保长度）
+        self.semantic.store(
+            text=detail,
+            namespace="user_conversation",
+            metadata={
+                "user_id": user_id,
+                "source": "conversation",
+                "summary": short,
+            },
+        )
+
+        logger.info(
+            "MemoryManager: 记录对话偏好 — %s",
+            short,
+        )
+
 
 # ── 模块级单例 ──
 memory_manager = MemoryManager()
