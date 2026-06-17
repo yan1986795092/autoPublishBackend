@@ -52,6 +52,7 @@ class MemoryManager:
         self.semantic = SemanticMemory()
         self.episodic = EpisodicMemory()
         self._session_task_id: Optional[str] = None
+        self._local_preferences: dict[str, list[str]] = {}
 
     # ═══════════════════════════════════════════
     # Agent 执行前：构建上下文
@@ -301,13 +302,12 @@ class MemoryManager:
     async def get_user_profile(self, user_id: str) -> str:
         """获取用户画像描述，注入对话 LLM 的 System Prompt
 
-        从语义记忆中检索用户的历史偏好，
-        返回自然语言描述，空字符串表示无数据。
+        检索优先级：语义记忆（向量）> 本地缓存（进程内存）> 工作记忆（当前会话）
         """
         if not user_id:
             return ""
 
-        # 使用中文查询词，与存储内容语言一致
+        # 1. 语义记忆（向量搜索）
         if self.semantic.available:
             result = self.semantic.retrieve_formatted(
                 query="用户偏好 写作平台 风格 语调 目标读者",
@@ -318,7 +318,14 @@ class MemoryManager:
             if result:
                 return result
 
-        # 兜底：从 working_memory 中获取
+        # 2. 本地缓存（向量搜索不可用时的兜底）
+        cached = self._local_preferences.get(user_id)
+        if cached:
+            lines = ["## 用户历史偏好（本地缓存）"]
+            lines.extend(f"- {p}" for p in cached[-5:])  # 最近 5 条
+            return "\n".join(lines)
+
+        # 3. 工作记忆（当前会话上下文）
         working = self.working.get_recent_context(max_chars=500)
         if working:
             return f"近期对话上下文：\n{working}"
@@ -362,24 +369,30 @@ class MemoryManager:
         if not parts:
             return
 
-        # 构建两份描述：简短版（作为 metadata 标签）+ 详细版（作为存储文本）
         short = "用户偏好: " + ", ".join(parts)
 
-        # 详细版确保超过 50 字符（语义记忆的 skip_small 阈值）
-        detail_lines = ["用户的创作偏好记录："]
-        detail_lines.extend(f"- {p}" for p in parts)
-        detail = "\n".join(detail_lines)
+        # 1. 写入语义记忆（向量搜索可用时）
+        if self.semantic.available:
+            detail_lines = ["用户的创作偏好记录："]
+            detail_lines.extend(f"- {p}" for p in parts)
+            detail = "\n".join(detail_lines)
+            self.semantic.store(
+                text=detail,
+                namespace="user_conversation",
+                metadata={
+                    "user_id": user_id,
+                    "source": "conversation",
+                    "summary": short,
+                },
+            )
 
-        # 写入语义记忆（用详细版确保长度）
-        self.semantic.store(
-            text=detail,
-            namespace="user_conversation",
-            metadata={
-                "user_id": user_id,
-                "source": "conversation",
-                "summary": short,
-            },
-        )
+        # 2. 始终写入本地缓存（向量搜索不可用时的兜底）
+        if user_id not in self._local_preferences:
+            self._local_preferences[user_id] = []
+        self._local_preferences[user_id].append(short)
+        # 只保留最近 20 条
+        if len(self._local_preferences[user_id]) > 20:
+            self._local_preferences[user_id] = self._local_preferences[user_id][-20:]
 
         logger.info(
             "MemoryManager: 记录对话偏好 — %s",

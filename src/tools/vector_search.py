@@ -1,26 +1,30 @@
 """VectorSearch 工具 — 语义相似内容检索（基于 pgvector）
 
-直接在 PostgreSQL 中存储和检索向量，无需额外向量数据库。
-依赖 PostgreSQL 的 pgvector 扩展 + langchain 的 OpenAIEmbeddings。
+支持多个 embedding 提供商，自动检测可用的 API key。
+维度根据提供商自动适配。
 """
 
 from __future__ import annotations
 import json
 import logging
-import os
 from typing import Any, Optional
 
 from sqlalchemy import text
 
 from src.database import SessionLocal
+from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-_EMBEDDING_DIM = 1536  # OpenAI text-embedding-ada-002
+# 固定使用 Zhipu embedding-2 模型（1024 维）
+# 用户已配置 zhipu_api_key，且保持一致维度便于存储和检索
+_EMBEDDING_DIM = 1024
+_EMBEDDING_MODEL = "embedding-2"
+_EMBEDDING_PROVIDER = "zhipu"
 
 
 class VectorSearchTool:
-    """语义向量搜索工具，使用 PostgreSQL + pgvector + OpenAI Embeddings"""
+    """语义向量搜索工具，使用 PostgreSQL + pgvector + Zhipu Embedding"""
 
     name = "vector_search"
     description = "使用语义相似度在知识库中搜索相似内容"
@@ -42,20 +46,39 @@ class VectorSearchTool:
             return False
 
     def _ensure_embeddings(self):
+        """使用 Zhipu embedding-2 模型初始化"""
         if self._embeddings is not None:
             return
-        api_key = os.getenv("OPENAI_API_KEY")
-        if api_key:
-            try:
-                from langchain_openai import OpenAIEmbeddings
-                self._embeddings = OpenAIEmbeddings(openai_api_key=api_key)
-            except Exception as e:
-                logger.warning("嵌入模型初始化失败：%s", e)
-        else:
-            logger.warning("未配置 OPENAI_API_KEY，向量搜索不可用")
+
+        settings = get_settings()
+        api_key = settings.zhipu_api_key
+        if not api_key:
+            logger.warning(
+                "未配置 zhipu_api_key，向量搜索不可用。"
+                "请在 .env 中设置 ZHIPU_API_KEY"
+            )
+            return
+
+        try:
+            from langchain_openai import OpenAIEmbeddings
+
+            self._embeddings = OpenAIEmbeddings(
+                model=_EMBEDDING_MODEL,
+                openai_api_key=api_key,
+                openai_api_base=settings.zhipu_base_url,
+            )
+            logger.info(
+                "VectorSearch: 使用 Zhipu Embedding（模型=%s, 维度=%d）",
+                _EMBEDDING_MODEL, _EMBEDDING_DIM,
+            )
+        except Exception as e:
+            logger.warning("Zhipu Embedding 初始化失败: %s", e)
+
+    @property
+    def embedding_dim(self) -> int:
+        return _EMBEDDING_DIM
 
     def _to_pgvector_str(self, embedding: list[float]) -> str:
-        """将 embedding 列表格式化为 pgvector 可用的字符串"""
         return "[" + ",".join(str(x) for x in embedding) + "]"
 
     # ── 写入 ──────────────────────────────────────────────
@@ -66,16 +89,6 @@ class VectorSearchTool:
         metadatas: Optional[list[dict]] = None,
         ids: Optional[list[str]] = None,
     ) -> bool:
-        """向向量库添加文档
-
-        Args:
-            texts: 文档文本列表
-            metadatas: 可选元数据列表
-            ids: 可选 ID 列表（仅用于兼容旧接口，pgvector 使用 SERIAL 自增）
-
-        Returns:
-            是否成功写入
-        """
         self._ensure_embeddings()
         if not self._embeddings or not texts:
             return False
@@ -121,15 +134,6 @@ class VectorSearchTool:
     # ── 检索 ──────────────────────────────────────────────
 
     def search(self, query: str, top_k: int = 5) -> dict:
-        """搜索相似内容
-
-        Args:
-            query: 查询文本
-            top_k: 返回条数
-
-        Returns:
-            {"query": str, "matches": [...], "total": int}
-        """
         self._ensure_embeddings()
         if not self._embeddings:
             return {"query": query, "matches": [], "total": 0, "fallback": "embedding_unavailable"}
@@ -182,7 +186,6 @@ class VectorSearchTool:
     # ── 管理 ──────────────────────────────────────────────
 
     def count(self, namespace: Optional[str] = None) -> int:
-        """统计条目数"""
         db = SessionLocal()
         try:
             if namespace:
@@ -200,7 +203,6 @@ class VectorSearchTool:
             db.close()
 
     def clear(self, namespace: Optional[str] = None) -> None:
-        """清空数据"""
         db = SessionLocal()
         try:
             if namespace:

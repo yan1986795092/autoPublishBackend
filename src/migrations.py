@@ -5,8 +5,11 @@
 """
 
 from __future__ import annotations
+import logging
 
 from sqlalchemy import inspect, text
+
+logger = logging.getLogger(__name__)
 
 from src.core.migrations import migration_manager
 
@@ -68,7 +71,7 @@ def create_vector_search_extension(engine) -> None:
                     id SERIAL PRIMARY KEY,
                     text TEXT NOT NULL,
                     metadata JSONB DEFAULT '{}'::jsonb,
-                    embedding vector(1536),
+                    embedding vector(1024),
                     namespace VARCHAR(50) DEFAULT 'general',
                     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
                 )
@@ -84,3 +87,25 @@ def create_vector_search_extension(engine) -> None:
                 ON vector_search (namespace)
             """))
             conn.commit()
+
+
+@migration_manager.register(
+    "fix_vector_search_dim",
+    "修正 vector_search 表 embedding 列为 1024 维（适配 Zhipu embedding-2）",
+)
+def fix_vector_search_dim(engine) -> None:
+    """如果 vector_search 表的 embedding 列不是 1024 维，修改为 1024"""
+    from sqlalchemy import inspect, text
+    inspector = inspect(engine)
+    if "vector_search" not in inspector.get_table_names():
+        return
+    columns = {c["name"]: c for c in inspector.get_columns("vector_search")}
+    col = columns.get("embedding", {})
+    col_type = str(col.get("type", ""))
+    if "1024" not in col_type:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE vector_search ALTER COLUMN embedding TYPE vector(1024)"))
+            conn.commit()
+            logger.info("vector_search 列改为 vector(1024)")
+    else:
+        logger.info("vector_search 已是 1024 维，跳过")
