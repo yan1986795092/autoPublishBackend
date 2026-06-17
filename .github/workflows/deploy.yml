@@ -6,39 +6,27 @@ on:
 
 jobs:
   deploy:
-    runs-on: ubuntu-latest
+    runs-on: self-hosted
     steps:
-      - name: Deploy to LAS Server
-        env:
-          SSH_HOST: ${{ secrets.SSH_HOST }}
-          SSH_PORT: ${{ secrets.SSH_PORT }}
-          SSH_USER: ${{ secrets.SSH_USER }}
-          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+      - name: Run deployment
+        working-directory: /opt/autopublish
         run: |
-          mkdir -p ~/.ssh
-          echo "$SSH_KEY" > ~/.ssh/deploy_key
-          chmod 600 ~/.ssh/deploy_key
-          ssh-keyscan -p $SSH_PORT $SSH_HOST >> ~/.ssh/known_hosts 2>/dev/null
-
           echo "=== Deploy started: $(date) ==="
-          ssh -p $SSH_PORT -i ~/.ssh/deploy_key $SSH_USER@$SSH_HOST << 'SSHEOF'
-            set -e
-            echo "Connected to server"
+          set -e
 
-            # Pull all repos
-            for repo in frontend backend llm-gateway; do
-              echo "[$repo] Pulling latest..."
-              cd /opt/autopublish/$repo
-              git fetch origin
-              git reset --hard origin/master
-            done
+          # Pull all repos
+          for repo in frontend backend llm-gateway; do
+            echo "[$repo] Pulling latest..."
+            cd /opt/autopublish/$repo
+            git fetch origin
+            git reset --hard origin/master
+          done
 
-            # Rebuild and restart
-            cd /opt/autopublish
-            docker-compose -f deploy/docker-compose.yml up -d --build backend nginx llm-gateway
+          # Rebuild and restart
+          cd /opt/autopublish
+          docker-compose -f deploy/docker-compose.yml up -d --build backend nginx llm-gateway
 
-            # Cleanup old images
-            docker image prune -f
+          # Cleanup old images
+          docker image prune -f
 
-            echo "=== Deploy completed: $(date) ==="
-SSHEOF
+          echo "=== Deploy completed: $(date) ==="
