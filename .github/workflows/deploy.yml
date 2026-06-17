@@ -22,9 +22,11 @@ jobs:
             git reset --hard origin/master
           done
 
-          # Rebuild and restart
+          # Rebuild and restart (no-cache for backend to ensure deps are fresh)
           cd /opt/autopublish
-          docker-compose -f deploy/docker-compose.yml up -d --build backend nginx llm-gateway
+          docker-compose -f deploy/docker-compose.yml build --no-cache backend
+          docker-compose -f deploy/docker-compose.yml build nginx llm-gateway
+          docker-compose -f deploy/docker-compose.yml up -d backend nginx llm-gateway
 
           # Cleanup old images
           docker image prune -f
