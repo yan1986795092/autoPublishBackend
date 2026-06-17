@@ -3,29 +3,27 @@ name: Auto Deploy
 on:
   push:
     branches: [ master ]
-    paths:
-      - 'src/**'
-      - 'requirements.txt'
-      - 'Dockerfile'
-      - '.github/workflows/deploy.yml'
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Deploy to LAS Server
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.SSH_HOST }}
-          port: ${{ secrets.SSH_PORT }}
-          username: ${{ secrets.SSH_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            echo "=== Deploy started: $(date) ==="
-            cd /opt/autopublish
+        env:
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          ssh-keyscan -p $SSH_PORT $SSH_HOST >> ~/.ssh/known_hosts 2>/dev/null
+
+          echo "=== Deploy started: $(date) ==="
+          ssh -p $SSH_PORT -i ~/.ssh/deploy_key $SSH_USER@$SSH_HOST << 'SSHEOF'
+            set -e
+            echo "Connected to server"
 
             # Pull all repos
             for repo in frontend backend llm-gateway; do
@@ -43,3 +41,4 @@ jobs:
             docker image prune -f
 
             echo "=== Deploy completed: $(date) ==="
+SSHEOF
