@@ -14,6 +14,10 @@ jobs:
           echo "=== Deploy started: $(date) ==="
           set -e
 
+          # Save production env (don't lose API keys)
+          cp /opt/autopublish/backend/.env.production /tmp/.env.production.bak 2>/dev/null || true
+          cp /opt/autopublish/llm-gateway/.env.production /tmp/.env.gateway.bak 2>/dev/null || true
+
           # Pull all repos
           for repo in frontend backend llm-gateway; do
             echo "[$repo] Pulling latest..."
@@ -22,10 +26,13 @@ jobs:
             git reset --hard origin/master
           done
 
-          # Rebuild and restart (no-cache for backend to ensure deps are fresh)
+          # Restore production env
+          cp /tmp/.env.production.bak /opt/autopublish/backend/.env.production 2>/dev/null || true
+          cp /tmp/.env.gateway.bak /opt/autopublish/llm-gateway/.env.production 2>/dev/null || true
+
+          # Normal build (no --no-cache, use Docker cache for speed)
           cd /opt/autopublish
-          docker-compose -f deploy/docker-compose.yml build --no-cache backend
-          docker-compose -f deploy/docker-compose.yml build nginx llm-gateway
+          docker-compose -f deploy/docker-compose.yml build backend nginx llm-gateway
           docker-compose -f deploy/docker-compose.yml up -d backend nginx llm-gateway
 
           # Cleanup old images
