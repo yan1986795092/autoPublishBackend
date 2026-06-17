@@ -4,6 +4,7 @@
 当 rewrite=True 时，审核发现问题会自动触发修正并输出 fixed_content。
 """
 
+import re
 from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import check_banned_words
@@ -143,22 +144,41 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         )
         quality_text = llm_result.content
 
-        # 判定是否通过：复审依赖显式结论，初审判关键词
-        # 注意初审格式为 **审核结论：** 通过（冒号后有 ** 空格），
-        # 复审格式为 **审核结论：通过**（直接加粗整句），格式不统一不通用
-        if review_round > 0:
-            passed = "审核结论：通过" in quality_text
-        else:
-            passed = len(banned_found) == 0 and "需要修改" not in quality_text
+        # 从输出中提取总分（格式：总分：**XX**/100 或 总分：XX/100）
+        score_match = re.search(r"总分[：:][\s\*]*(\d{1,3})[\s\*]*/\s*100", quality_text)
+        score = int(score_match.group(1)) if score_match else 0
+        # 从输出中提取各维度分（兼容 **XX/25**、XX/25、**XX**/25 等格式）
+        dims = re.findall(r"[：:][\s\*]*(\d{1,2})\s*/\s*25", quality_text)
+        min_dim = min(int(d) for d in dims) if len(dims) >= 4 else 0
 
-        # 提取改进建议：排除结论行本身，避免将 "审核结论：需要修改" 误当作建议
-        quality_lines = quality_text.split("\n")
-        suggestions = [
-            line.strip() for line in quality_lines
-            if any(kw in line for kw in ["建议", "问题", "修改", "不足"])
-            and "审核结论" not in line
-            and "改进建议" not in line
-        ]
+        # 判定标准：总分≥90 且 每项≥16 才算通过
+        passed = score >= 90 and min_dim >= 16
+
+        # 提取改进建议（只取 "**改进建议：**" 之后的内容，避免评分区文字干扰）
+        suggestions = []
+        in_suggestion_section = False
+        for line in quality_text.split("\n"):
+            if "**改进建议：**" in line:
+                in_suggestion_section = True
+                continue
+            if in_suggestion_section:
+                stripped = line.strip().lstrip("- ")
+                if stripped and stripped != "无":
+                    suggestions.append(stripped)
+
+        # 重新构建展示内容：去掉评分明细，只留结论、问题、建议
+        display_lines = []
+        in_score_section = False
+        for line in quality_text.split("\n"):
+            if "**各维度评分" in line:
+                in_score_section = True
+                continue
+            if "**审核结论：**" in line and in_score_section:
+                in_score_section = False
+            if in_score_section:
+                continue
+            display_lines.append(line)
+        display_text = "\n".join(display_lines).strip()
 
         # ── 自动修正 ──
         # 复审时禁用自动修正（由 FixAgent 在循环中处理）
@@ -214,7 +234,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         prompt_tokens = llm_result.prompt_tokens + (fix_result.prompt_tokens if rewrite_applied else 0)
         completion_tokens = llm_result.completion_tokens + (fix_result.completion_tokens if rewrite_applied else 0)
 
-        thinking_summary = f"{'通过 ✓' if passed else '需修改'} · 违禁词 {len(banned_found)} 个"
+        thinking_summary = f"总分 {score}" + (f" ✓" if passed else " ✗") + f" · 违禁词 {len(banned_found)} 个"
         if fc_report:
             thinking_summary += f" · 事实核查 {fc_report.get('total_claims_checked', 0)} 处"
         if rewrite_applied:
@@ -222,16 +242,19 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
 
         return agent_response(
             "ReviewAgent",
-            content=quality_text,
+            content=display_text,
             output_type="text",
             tokens_used=total_tokens,
             prompt_tokens=prompt_tokens,
             completion_tokens=completion_tokens,
             output_extra={
                 "passed": passed,
+                "score": score,
+                "min_dim": min_dim,
                 "banned_words": banned_found,
                 "factcheck": fc_report,
                 "suggestions": suggestions[:5],
+                "clean_content": display_text,
                 "fixed_content": fixed_content if rewrite_applied else "",
                 "rewrite_applied": rewrite_applied,
                 "platform": platform,

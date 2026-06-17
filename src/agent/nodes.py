@@ -742,21 +742,8 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
             "custom.run_id": run_id,
         },
     ) as batch_span:
-        # ── 如果上一轮审核已通过，跳过本轮待执行的 FixAgent 循环任务 ──
-        # 记录跳过的任务，等 task_results / completed 初始化后补充标记
+        # FixAgent 循环：最多 _MAX_REVIEW_LOOPS 轮，不提前跳过（让 FixAgent 跑满次数尽力优化）
         _skipped_tasks: list[dict] = []
-        _is_review_passed = state.get("_last_review_passed", False)
-        if _is_review_passed:
-            filtered = []
-            for t in ready_tasks:
-                if t.get("agent_type") == "FixAgent" and t.get("input", {}).get("_review_round", 0) > 0:
-                    _skipped_tasks.append(t)
-                    logger.info("审核已通过，跳过 FixAgent（第 %d 轮）", t["input"].get("_review_round", 0))
-                else:
-                    filtered.append(t)
-            if _skipped_tasks:
-                ready_tasks = filtered
-                logger.info("本轮过滤掉 %d 个 FixAgent 任务", len(_skipped_tasks))
 
         semaphore = asyncio.Semaphore(concurrency)
 
@@ -835,6 +822,17 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
                 }
             if sid not in completed:
                 completed.append(sid)
+            # 发送 stage:completed 事件通知前端更新（否则前端 FixAgent 一直卡在"优化中"）
+            review_round = st.get("input", {}).get("_review_round", 0)
+            fix_completed = {
+                "agent": "FixAgent",
+                "status": "completed",
+                "duration": 0,
+                "timestamp": time.time(),
+            }
+            if review_round > 0:
+                fix_completed["_review_round"] = review_round
+            await _publish_streaming_event(state, "stage", fix_completed)
 
         # 检查本轮完成的 ReviewAgent 是否通过了审核
         # 用于短路后续 review-fix 循环，避免质量已达标时继续浪费 Token
@@ -843,7 +841,8 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
         # 如果让它阻塞循环，FixAgent 完成后就不会追加复审+再润色。
         _last_review_passed = state.get("_last_review_passed", False)
         task_queue = state.get("task_queue", [])
-        for task_id, result in task_results.items():
+        _skip_fixagent_ids: list[str] = []
+        for task_id, result in list(task_results.items()):
             if result.get("agent_type") != "ReviewAgent":
                 continue
             if result.get("status") not in ("completed", "partial"):
@@ -855,6 +854,28 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
             output = result.get("output", {})
             if isinstance(output, dict) and output.get("passed") is True:
                 _last_review_passed = True
+                # 收集要跳过的 FixAgent，稍后统一处理（避免迭代时修改 task_results）
+                for t in task_queue:
+                    if t.get("agent_type") == "FixAgent" and task_id in t.get("dependencies", []):
+                        _skip_fixagent_ids.append(t["id"])
+
+        for skip_id in _skip_fixagent_ids:
+            if skip_id not in task_results:
+                task_results[skip_id] = {
+                    "status": "skipped", "agent_type": "FixAgent",
+                    "output": {"content": "", "passed": True, "skipped": True},
+                }
+            if skip_id not in completed:
+                completed.append(skip_id)
+            # 同时找对应的 review_round 通知前端
+            t = next((t for t in task_queue if t.get("id") == skip_id), None)
+            await _publish_streaming_event(state, "stage", {
+                "agent": "FixAgent",
+                "status": "completed",
+                "duration": 0,
+                "timestamp": time.time(),
+                "_review_round": t.get("input", {}).get("_review_round", 0) if t else 0,
+            })
 
         # ── Review-Fix 循环检测（最多 2 轮，每批只允许生成一轮，防止指数爆炸） ──
         _MAX_REVIEW_LOOPS = 2
@@ -863,16 +884,16 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
 
         loop_new_tasks: list[dict] = []
         if _review_fix_cycles < _MAX_REVIEW_LOOPS and not _loop_already_created and not _last_review_passed:
-            for tid in list(completed):
+            # 找本轮刚完成的最新 FixAgent（按 task_queue 顺序取最后一个）
+            fix_candidates = [
+                tid for tid in completed
+                if task_results.get(tid, {}).get("agent_type") == "FixAgent"
+                and any(t.get("id") == tid for t in state.get("task_queue", []))
+            ]
+            if fix_candidates:
+                tid = fix_candidates[-1]  # 取最后一个（最新完成的）
                 result = task_results.get(tid, {})
-                if result.get("agent_type") != "FixAgent":
-                    continue
-
-                # 每次润色后自动追加复审+再润色（不依赖旧审核结果）
-                # 防止同一批多个 FixAgent → 生成多个配对 → 指数爆炸
                 fix_task = next((t for t in state.get("task_queue", []) if t.get("id") == tid), None)
-                if not fix_task:
-                    continue
 
                 loop_round = _review_fix_cycles + 1
                 new_review_id = str(uuid.uuid4())
@@ -894,7 +915,6 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
                     "config": {"priority": 0, "reasoning": f"再润色(第{loop_round}轮)"},
                 })
                 logger.info("润色完成，自动追加第 %d 轮复审+再润色", loop_round)
-                break  # 每批只生成一轮，防止指数爆炸
 
         existing = state.get("thinking_steps", [])
         batch_span.add_event("batch_completed", {
@@ -1048,12 +1068,15 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                         "_from_cache": True,
                     })
                     # Emit stage:completed for cache hit too
-                    await _publish_streaming_event(state, "stage", {
+                    cache_completed = {
                         "agent": agent_type,
                         "status": "completed",
                         "duration": elapsed,
                         "timestamp": time.time(),
-                    })
+                    }
+                    if review_round > 0:
+                        cache_completed["_review_round"] = review_round
+                    await _publish_streaming_event(state, "stage", cache_completed)
                     return cached
 
             # 任务开始：发布 thinking_step
@@ -1077,16 +1100,22 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     except Exception as e:
                         logger.warning("流式事件发布失败", event_type=event_type, error=str(e))
 
-                def _make_on_llm_chunk(agent: str):
+                def _make_on_llm_chunk(agent: str, rr: int = 0):
                     async def _on_llm_chunk(chunk: str) -> None:
-                        await _safe_publish("llm_chunk", {"agent": agent, "content": chunk, "timestamp": time.time()})
+                        data = {"agent": agent, "content": chunk, "timestamp": time.time()}
+                        if rr > 0:
+                            data["_review_round"] = rr
+                        await _safe_publish("llm_chunk", data)
                     return _on_llm_chunk
-                def _make_on_reasoning(agent: str):
+                def _make_on_reasoning(agent: str, rr: int = 0):
                     async def _on_reasoning(text: str) -> None:
-                        await _safe_publish("reasoning", {"agent": agent, "content": text, "timestamp": time.time()})
+                        data = {"agent": agent, "content": text, "timestamp": time.time()}
+                        if rr > 0:
+                            data["_review_round"] = rr
+                        await _safe_publish("reasoning", data)
                     return _on_reasoning
-                t_input["_on_llm_chunk"] = _make_on_llm_chunk(agent_type)
-                t_input["_on_reasoning"] = _make_on_reasoning(agent_type)
+                t_input["_on_llm_chunk"] = _make_on_llm_chunk(agent_type, review_round)
+                t_input["_on_reasoning"] = _make_on_reasoning(agent_type, review_round)
 
             # 执行 handler（带安全兜底）
             _mcp = mcp_tools if mcp_tools else t_input.get("_mcp_tools")
@@ -1114,12 +1143,16 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             result["time_elapsed"] = elapsed
 
             # Emit stage:completed 事件
-            await _publish_streaming_event(state, "stage", {
+            review_round = task_input.get("_review_round", 0)
+            stage_completed = {
                 "agent": agent_type,
                 "status": "completed",
                 "duration": elapsed,
                 "timestamp": time.time(),
-            })
+            }
+            if review_round > 0:
+                stage_completed["_review_round"] = review_round
+            await _publish_streaming_event(state, "stage", stage_completed)
 
             # 任务完成事件
             output_content = result.get("output", {}).get("content", "")
@@ -1401,6 +1434,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         }
 
         primary_content = ""
+        writing_draft = ""
         review_content = ""
         meta_sections = {}
 
@@ -1430,8 +1464,10 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 content_type = output.get("content_type", "")
                 output_type = output.get("type", "")
                 if content and (content_type in _CONTENT_TYPES or output_type == "text"):
+                    writing_draft = content
                     content_candidates.append(("writing", content))
             elif agent_type == "WritingAgent" and isinstance(output, str) and output:
+                writing_draft = output
                 content_candidates.append(("writing", output))
 
         # 按优先级选择主内容：fix > review_fix > writing
@@ -1510,14 +1546,23 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             '', raw_full_text
         ).strip()
 
+        # 提取标题：取正文第一行作为标题（去掉 Markdown 标记）
+        _title = ""
+        _first_line = primary_content.lstrip('\n').split('\n')[0].strip()
+        _clean_line = re.sub(r'[#*`_\[\]()【】（）『』「」《》<>｜‖/\\]', '', _first_line).strip()
+        if 2 <= len(_clean_line) <= 60:
+            _title = _clean_line
+
         return {
             "final_output": {
                 "goal": plan.get("goal", ""),
                 "plan_reasoning": plan.get("reasoning", ""),
                 "platform": plan.get("platform", ""),
+                "title": _title,
                 "sections": sections,
                 "full_text": clean_text,
                 "review_content": review_content,
+                "draft_content": writing_draft or None,
             },
             "status": status,
         }

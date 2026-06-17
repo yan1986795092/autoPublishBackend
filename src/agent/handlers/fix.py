@@ -67,8 +67,9 @@ async def handle_fix(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None =
                 }],
             )
 
-        # 没有审核意见时直接返回原文
+        # 没有审核意见时直接返回原文（仅限明确无审核场景，避免 dep_context 缺陷导致意外跳过）
         if not review_content:
+            logger.warning("FixAgent 未找到审核意见，保留原文", task_input_keys=list(task_input.keys()))
             return agent_response(
                 "FixAgent",
                 content=writing_content,
