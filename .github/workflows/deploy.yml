@@ -1,0 +1,45 @@
+name: Auto Deploy
+
+on:
+  push:
+    branches: [ master ]
+    paths:
+      - 'src/**'
+      - 'requirements.txt'
+      - 'Dockerfile'
+      - '.github/workflows/deploy.yml'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Deploy to LAS Server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.SSH_HOST }}
+          port: ${{ secrets.SSH_PORT }}
+          username: ${{ secrets.SSH_USER }}
+          key: ${{ secrets.SSH_PRIVATE_KEY }}
+          script: |
+            echo "=== Deploy started: $(date) ==="
+            cd /opt/autopublish
+
+            # Pull all repos
+            for repo in frontend backend llm-gateway; do
+              echo "[$repo] Pulling latest..."
+              cd /opt/autopublish/$repo
+              git fetch origin
+              git reset --hard origin/master
+            done
+
+            # Rebuild and restart
+            cd /opt/autopublish
+            docker-compose -f deploy/docker-compose.yml up -d --build backend nginx llm-gateway
+
+            # Cleanup old images
+            docker image prune -f
+
+            echo "=== Deploy completed: $(date) ==="
