@@ -135,6 +135,8 @@ class RichConsoleRenderer:
         trace_id = self._pop(d, "trace_id", "")
         user_id = self._pop(d, "user_id", "")
         error = self._pop(d, "error", "")
+        detail = self._pop(d, "detail", "")
+        message = self._pop(d, "message", "")
 
         t = Text()
         t.append("🌐  ", Style(color="cyan"))
@@ -175,6 +177,10 @@ class RichConsoleRenderer:
             t.append(f"user={user_id}  ", Style(color="green", dim=True))
         if error:
             t.append(f" ERR:{error[:120]}", Style(color="red", bold=True))
+        elif detail:
+            t.append(f" {detail[:120]}", Style(color="yellow", bold=True))
+        elif message:
+            t.append(f" {message[:120]}", Style(color="yellow", bold=True))
 
         return t
 

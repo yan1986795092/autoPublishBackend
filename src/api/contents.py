@@ -5,7 +5,7 @@ from typing import Optional
 import json
 
 from src.database import get_db
-from src.models import Content, ContentVersion, ContentStatus, PublishRecord
+from src.models import Content, ContentVersion, ContentStatus, PublishRecord, PublishStatus
 from src.schemas.content import (
     GenerateRequest,
     UpdateContentRequest,
@@ -145,6 +145,99 @@ def list_contents(
     }
 
 
+@router.get("/calendar", response_model=dict)
+def get_content_calendar(
+    year: int | None = None,
+    month: int | None = None,
+    current_user = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """获取发布排期日历数据——按天分组的发布记录"""
+    from datetime import datetime
+    import json
+
+    now = datetime.utcnow()
+    if not year:
+        year = now.year
+    if not month:
+        month = now.month
+
+    # 查当月有 publish_records 的所有内容
+    contents_with_records = db.query(Content).filter(
+        Content.user_id == current_user.id,
+        Content.publish_records.any(),
+    ).all()
+    content_ids = {c.id for c in contents_with_records}
+
+    if not content_ids:
+        return {"success": True, "data": {"calendar": {}, "year": year, "month": month}}
+
+    # 取当月所有 publish_records（基于 published_at 或 created_at 过滤）
+    start_date = f"{year}-{month:02d}-01"
+    if month == 12:
+        end_date = f"{year + 1}-01-01"
+    else:
+        end_date = f"{year}-{month+1:02d}-01"
+
+    publish_records = db.query(PublishRecord).options(
+        selectinload(PublishRecord.content)
+    ).filter(
+        PublishRecord.content_id.in_(content_ids),
+    ).all()
+
+    # 按日期分组
+    calendar: dict[str, list[dict]] = {}
+
+    for r in publish_records:
+        if r.content is None:
+            continue
+
+        # 确定该条记录展示在哪天
+        item_date = None
+        item_type = r.status.value  # "pending" / "success" / "failed"
+
+        if r.status == PublishStatus.PENDING and r.response_data:
+            # 有定时排期 → 按排期日期展示
+            try:
+                data = json.loads(r.response_data)
+                scheduled = data.get("scheduled_at", "")
+                if scheduled:
+                    item_date = scheduled[:10]
+            except Exception:
+                pass
+        elif r.status == PublishStatus.SUCCESS and r.published_at:
+            # 已发布 → 按实际发布时间展示
+            item_date = r.published_at.strftime("%Y-%m-%d")
+        elif r.status == PublishStatus.FAILED:
+            # 失败 → 按 published_at（如果有的话）或 created_at 展示
+            if r.published_at:
+                item_date = r.published_at.strftime("%Y-%m-%d")
+            else:
+                item_date = r.created_at.strftime("%Y-%m-%d") if r.created_at else None
+
+        if not item_date or not item_date.startswith(f"{year}-{month:02d}"):
+            continue
+
+        if item_date not in calendar:
+            calendar[item_date] = []
+
+        calendar[item_date].append({
+            "id": r.id,
+            "content_id": r.content_id,
+            "title": r.content.title or r.content.topic or "未命名",
+            "type": item_type,
+            "platform_code": r.platform_code,
+            "content_status": r.content.status.value if r.content.status else "draft",
+        })
+
+    # 每天内部按状态排序：failed > pending > success
+    _TYPE_ORDER = {"failed": 0, "pending": 1, "success": 2}
+    for date_key in calendar:
+        calendar[date_key].sort(key=lambda x: _TYPE_ORDER.get(x["type"], 9))
+
+    return {"success": True, "data": {"calendar": calendar, "year": year, "month": month}}
+
+
 @router.get("/{content_id}", response_model=dict)
 def get_content(
     content_id: str,
@@ -158,6 +251,12 @@ def get_content(
     ).first()
 
     if not content:
+        logger.warning(
+            "内容不存在",
+            content_id=content_id,
+            _type="api",
+            event_name="content_not_found",
+        )
         raise HTTPException(status_code=404, detail="内容不存在")
 
     versions = db.query(ContentVersion).filter(
@@ -396,87 +495,6 @@ def autosave_content(
     }
 
 
-@router.get("/calendar", response_model=dict)
-def get_content_calendar(
-    year: int | None = None,
-    month: int | None = None,
-    current_user = Depends(get_current_user),
-    db: Session = Depends(get_db)
-):
-    """获取内容日历数据（按天分组的计划内容）"""
-    from datetime import datetime, date
-    import json
-
-    now = datetime.utcnow()
-    if not year:
-        year = now.year
-    if not month:
-        month = now.month
-
-    # 当月所有内容（使用 SQL 级 WHERE 避免全表扫描 + selectinload 避免 N+1）
-    start_date = f"{year}-{month:02d}-01"
-    if month == 12:
-        end_date = f"{year + 1}-01-01"
-    else:
-        end_date = f"{year}-{month+1:02d}-01"
-
-    contents = db.query(Content).filter(
-        Content.user_id == current_user.id,
-        Content.created_at >= start_date,
-        Content.created_at < end_date,
-    ).all()
-
-    # 当月所有发布记录（带上 eager loading 避免 r.content.title N+1）
-    publish_records = db.query(PublishRecord).options(
-        selectinload(PublishRecord.content)
-    ).join(Content).filter(
-        Content.user_id == current_user.id,
-        PublishRecord.created_at >= start_date,
-        PublishRecord.created_at < end_date,
-    ).all()
-
-    # 按日期分组
-    calendar: dict[str, list[dict]] = {}
-
-    for c in contents:
-        d = c.created_at.strftime("%Y-%m-%d") if c.created_at else ""
-        if d and d.startswith(f"{year}-{month:02d}"):
-            if d not in calendar:
-                calendar[d] = []
-            calendar[d].append({
-                "id": c.id,
-                "title": c.title or c.topic or "未命名",
-                "type": "created",
-                "platform_code": c.platform_code,
-                "status": c.status.value,
-            })
-
-    for r in publish_records:
-        if r.response_data:
-            try:
-                data = json.loads(r.response_data)
-                scheduled = data.get("scheduled_at", "")
-                if scheduled:
-                    d = scheduled[:10]
-                    if d.startswith(f"{year}-{month:02d}"):
-                        if d not in calendar:
-                            calendar[d] = []
-                        calendar[d].append({
-                            "id": r.content_id,
-                            "title": r.content.title or r.content.topic or "未命名",
-                            "type": "scheduled",
-                            "platform_code": r.platform_code,
-                            "status": r.status.value,
-                        })
-            except Exception as e:
-                logger.warning(
-                    "日历排期数据解析失败",
-                    error=str(e),
-                    _type="api",
-                    event_name="calendar_parse_error",
-                )
-
-    return {"success": True, "data": {"calendar": calendar, "year": year, "month": month}}
 
 
 @router.post("/{content_id}/check-banned-words", response_model=dict)
