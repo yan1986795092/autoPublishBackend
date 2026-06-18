@@ -58,7 +58,7 @@ SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话�
 你：（经过几轮对话收集信息后）
 好的，信息够了，开始帮你创作！
 [GENERATE]
-{...action=create...}
+{{...action=create...}}
 [/GENERATE]
 
 错误示例（**不准这样做**）：
