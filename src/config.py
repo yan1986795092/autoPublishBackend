@@ -1,5 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
-from pydantic import Field, AliasChoices
+from pydantic import Field, AliasChoices, field_validator
 from functools import lru_cache
 from pathlib import Path
 from typing import Optional
@@ -136,6 +136,21 @@ class Settings(BaseSettings):
         "SEOAgent": 2500,
         "ReviewAgent": 3000,
     }
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def normalize_debug(cls, value):
+        if isinstance(value, bool) or value is None:
+            return value
+        if isinstance(value, (int, float)):
+            return bool(value)
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"1", "true", "yes", "y", "on", "debug", "dev", "development", "local"}:
+                return True
+            if normalized in {"0", "false", "no", "n", "off", "release", "prod", "production"}:
+                return False
+        return value
 
     model_config = SettingsConfigDict(
         env_file=str(_env_file_path()),

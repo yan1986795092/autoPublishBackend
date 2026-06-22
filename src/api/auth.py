@@ -12,36 +12,30 @@ settings = get_settings()
 router = APIRouter(prefix="/auth", tags=["认证"])
 
 
+def _build_auth_http_exception(detail: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail=detail,
+        headers={"WWW-Authenticate": "Bearer"},
+    )
+
+
 def get_current_user(
     authorization: Optional[str] = Header(None, description="Bearer Token"),
     db: Session = Depends(get_db)
 ) -> User:
     """获取当前认证用户"""
     if not authorization or not authorization.startswith("Bearer "):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="未提供认证信息",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _build_auth_http_exception("未提供认证信息")
     token = authorization[7:]
     payload = decode_token(token)
     if not payload:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Token 无效或已过期",
-            headers={"WWW-Authenticate": "Bearer"},
-        )
+        raise _build_auth_http_exception("Token 无效或已过期")
     if payload.get("type") != "access":
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="无效的 Token 类型",
-        )
+        raise _build_auth_http_exception("无效的 Token 类型")
     user = db.query(User).filter(User.id == payload.get("sub")).first()
     if not user:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="用户不存在",
-        )
+        raise _build_auth_http_exception("用户不存在")
     return user
 
 

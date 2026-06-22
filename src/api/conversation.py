@@ -19,6 +19,7 @@ from src.api.auth import get_current_user
 from src.models import User, ChatConversation, ChatMessageRecord
 from src.conversation import ConversationEngine
 from src.memory.manager import memory_manager
+from src.core.request_guards import ensure_conversation_owner
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +64,11 @@ async def conversation_chat(
         db.commit()
         db.refresh(conv)
         conversation_id = conv.id
+    else:
+        conv = ensure_conversation_owner(
+            db.query(ChatConversation).filter(ChatConversation.id == conversation_id).first(),
+            current_user,
+        )
 
     # 保存用户消息
     user_msg = ChatMessageRecord(
@@ -76,9 +82,7 @@ async def conversation_chat(
 
     # 更新对话时间
     from datetime import datetime
-    conv = db.query(ChatConversation).filter(ChatConversation.id == conversation_id).first()
-    if conv:
-        conv.updated_at = datetime.utcnow()
+    conv.updated_at = datetime.utcnow()
 
     db.commit()
 

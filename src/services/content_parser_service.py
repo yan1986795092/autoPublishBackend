@@ -2,19 +2,26 @@ import re
 from urllib.parse import urlparse
 import httpx
 
+from src.core.request_guards import validate_public_http_url
+
 
 class ContentParserService:
     """URL 内容提取服务（MVP）"""
 
     async def parse_url(self, url: str) -> dict:
         """从 URL 提取标题、正文和图片"""
-        parsed = urlparse(url)
+        try:
+            safe_url = validate_public_http_url(url)
+        except Exception as exc:
+            return {"success": False, "error": getattr(exc, "detail", str(exc))}
+
+        parsed = urlparse(safe_url)
         if not parsed.scheme or not parsed.netloc:
             return {"success": False, "error": "无效的 URL 格式"}
 
         try:
             async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
-                resp = await client.get(url, headers={
+                resp = await client.get(safe_url, headers={
                     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
                                   "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
                 })
@@ -66,7 +73,7 @@ class ContentParserService:
                 "description": description,
                 "content": body_text,
                 "images": valid_images,
-                "url": url,
+                "url": safe_url,
                 "domain": parsed.netloc,
             }
         }

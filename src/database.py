@@ -1,37 +1,46 @@
+from typing import Generator
+import time
+
+import structlog
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
-from sqlalchemy.orm import sessionmaker, Session
+from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import QueuePool
-from typing import Generator
-import structlog
-import time
+
 from src.config import get_settings
 
 logger = structlog.get_logger("db")
 
 settings = get_settings()
 
-# PostgreSQL 生产环境连接池
-# 本地开发与生产统一使用 PostgreSQL，配置保持一致
-engine = create_engine(
-    settings.database_url,
-    poolclass=QueuePool,
-    pool_size=10,
-    max_overflow=10,
-    pool_pre_ping=True,
-    pool_recycle=3600,
-    pool_use_lifo=True,
-    echo=False,
-)
+_ENGINE_KWARGS = {
+    "pool_pre_ping": True,
+    "echo": False,
+}
+
+if settings.database_url.startswith("sqlite"):
+    engine = create_engine(
+        settings.database_url,
+        connect_args={"check_same_thread": False},
+        **_ENGINE_KWARGS,
+    )
+else:
+    engine = create_engine(
+        settings.database_url,
+        poolclass=QueuePool,
+        pool_size=10,
+        max_overflow=10,
+        pool_recycle=3600,
+        pool_use_lifo=True,
+        **_ENGINE_KWARGS,
+    )
 
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
-# ── SQLAlchemy 查询日志 ──────────────────────────────────────────
-
 def _should_log_db() -> bool:
-    """检查数据库日志是否启用（由环境变量控制）。"""
     import os
+
     return os.getenv("ENABLE_DB_LOG", "false").lower() in ("true", "1", "yes")
 
 
@@ -46,13 +55,13 @@ def _before_cursor_execute(conn, cursor, statement, parameters, context, execute
 def _after_cursor_execute(conn, cursor, statement, parameters, context, executemany):
     if not _should_log_db():
         return
+
     start_times = conn.info.get("_db_query_start", {})
     start = start_times.pop(id(cursor), None)
     if start is None:
         return
-    duration_ms = (time.perf_counter() - start) * 1000
 
-    # 清理 SQL：合并空白字符，截断至 200 字符
+    duration_ms = (time.perf_counter() - start) * 1000
     sql = " ".join(statement.split())
     if len(sql) > 200:
         sql = sql[:197] + "..."
@@ -70,8 +79,8 @@ def _after_cursor_execute(conn, cursor, statement, parameters, context, executem
 
 
 def setup_db_logging(enabled: bool = False) -> None:
-    """在运行时启用或禁用 SQLAlchemy 查询日志记录。"""
     import os
+
     os.environ["ENABLE_DB_LOG"] = "true" if enabled else "false"
 
 

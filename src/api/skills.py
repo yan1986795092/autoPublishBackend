@@ -14,6 +14,7 @@ from src.database import get_db
 from src.api.auth import get_current_user
 from src.models import User, Skill, SkillCategory, SkillSource
 from src.skills.builtins import BUILTIN_SKILLS, get_builtin_skill
+from src.core.request_guards import validate_public_http_url
 
 logger = logging.getLogger(__name__)
 
@@ -449,9 +450,10 @@ async def import_skill_from_url(
     db: Session = Depends(get_db),
 ):
     """从 URL 导入 Skill（支持 raw GitHub/Gist URL）"""
+    safe_url = validate_public_http_url(request.url)
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
-            response = await client.get(request.url)
+            response = await client.get(safe_url)
             response.raise_for_status()
             content = response.text
     except httpx.HTTPStatusError as e:
@@ -459,7 +461,7 @@ async def import_skill_from_url(
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"请求失败: {str(e)}")
 
-    parsed = parse_skill(content, source_url=request.url)
+    parsed = parse_skill(content, source_url=safe_url)
     if not parsed:
         raise HTTPException(
             status_code=400,
@@ -482,7 +484,7 @@ async def import_skill_from_url(
         content_types_json=json.dumps(parsed.get("content_types", [])) if parsed.get("content_types") else None,
         config_schema_json=json.dumps(parsed["config_schema"]) if parsed.get("config_schema") else None,
         tags=",".join(parsed.get("tags", [])),
-        author=parsed.get("author") or _extract_author_from_url(request.url),
+        author=parsed.get("author") or _extract_author_from_url(safe_url),
         version=parsed.get("version"),
     )
     db.add(skill)
@@ -592,6 +594,23 @@ def load_skill_full(skill_id: str, db: Session) -> dict | None:
 
     skill = db.query(Skill).filter(
         Skill.id == skill_id,
+        Skill.is_enabled == True,
+    ).first()
+    if skill:
+        return skill.to_dict()
+
+    return None
+
+
+def load_skill_full_for_user(skill_id: str, db: Session, user_id: str) -> dict | None:
+    """按用户范围加载 Skill 完整数据，避免跨用户套用私有 Skill。"""
+    builtin = get_builtin_skill(skill_id)
+    if builtin:
+        return builtin
+
+    skill = db.query(Skill).filter(
+        Skill.id == skill_id,
+        Skill.user_id == user_id,
         Skill.is_enabled == True,
     ).first()
     if skill:

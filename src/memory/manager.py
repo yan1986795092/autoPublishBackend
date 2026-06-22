@@ -307,13 +307,9 @@ class MemoryManager:
         if not user_id or not preferences:
             return
 
-        # ── 兜底 trigger 拦截 ──
-        if preferences.get("_fallback"):
-            logger.info(
-                "MemoryManager: 跳过兜底 trigger 记忆（避免污染） topic=%r",
-                preferences.get("topic", "")[:50],
-            )
-            return
+        # ── 兜底 trigger：仍然写入 topic（用于"重做"复用主题），
+        # 但跳过 platform/style 等粗略字段（避免污染用户偏好画像）
+        _is_fallback = preferences.get("_fallback", False)
 
         # ── topic 清洗：去掉 ## 思考/## 正文 等元描述 ──
         raw_topic = (preferences.get("topic") or "").strip()
@@ -338,8 +334,15 @@ class MemoryManager:
             "audience": "目标读者",
         }
 
+        # 兜底时只写 topic；正常 trigger 写全部字段
+        if _is_fallback:
+            _keys_to_write = ("topic",)
+        else:
+            _keys_to_write = tuple(field_labels.keys())
+
         parts = []
-        for key, label in field_labels.items():
+        for key in _keys_to_write:
+            label = field_labels[key]
             val = preferences.get(key)
             if val and isinstance(val, str) and val.strip():
                 parts.append(f"{label}={val}")

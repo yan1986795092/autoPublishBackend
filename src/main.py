@@ -5,6 +5,7 @@ from fastapi.responses import JSONResponse
 from contextlib import asynccontextmanager
 from datetime import datetime
 import asyncio
+import os
 
 from src.core.exceptions import (
     GenerateError, ServiceError, AgentError, HandlerError, ToolExecutionError,
@@ -35,6 +36,7 @@ logger = structlog.get_logger(__name__)
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     settings = get_settings()
+    is_test_env = bool(os.getenv("PYTEST_CURRENT_TEST"))
     # 统一日志配置（读取 settings.log_level, settings.log_json_format）
     setup_logging(
         log_level=settings.log_level,
@@ -56,33 +58,31 @@ async def lifespan(app: FastAPI):
     # 开发环境启用 DB 查询日志（默认关，可通过 ENABLE_DB_LOG=true 开启）
     setup_db_logging(enabled=bool(getattr(settings, "log_level", "INFO") == "DEBUG"))
 
-    # 启动 UnifiedEsWriter（管理 traces/events/logs 三个索引）
-    try:
-        writer = UnifiedEsWriter.get_instance()
-        await writer.start()
-    except Exception as exc:
-        logger.warning("UnifiedEsWriter 启动失败（非致命）: %s", exc,
-                       _type="system", event_name="es_writer_start", message=f"ES Writer 启动失败: {exc}", status="error")
+    if not is_test_env:
+        try:
+            writer = UnifiedEsWriter.get_instance()
+            await writer.start()
+        except Exception as exc:
+            logger.warning("UnifiedEsWriter 启动失败（非致命）: %s", exc,
+                           _type="system", event_name="es_writer_start", message=f"ES Writer 启动失败: {exc}", status="error")
 
-    # 启动数据库 + 迁移 + Worker
     loop = asyncio.get_running_loop()
     await loop.run_in_executor(None, lambda: Base.metadata.create_all(bind=engine))
-    await loop.run_in_executor(None, lambda: migration_manager.run_all(engine))
-
-    # Worker 内部管理生命周期
-    await worker.start()
-    logger.info("Agent Worker 已启动", _type="system", event_name="worker_start", message="Agent Worker 已启动", status="started")
+    if not is_test_env:
+        await loop.run_in_executor(None, lambda: migration_manager.run_all(engine))
+        await worker.start()
+        logger.info("Agent Worker 已启动", _type="system", event_name="worker_start", message="Agent Worker 已启动", status="started")
     yield
 
-    # 关闭 UnifiedEsWriter
-    try:
-        writer = UnifiedEsWriter.get_instance()
-        await writer.stop()
-    except Exception as exc:
-        logger.warning("UnifiedEsWriter 停止错误: %s", exc,
-                       _type="system", event_name="es_writer_stop", message=f"ES Writer 停止错误: {exc}", status="error")
+    if not is_test_env:
+        try:
+            writer = UnifiedEsWriter.get_instance()
+            await writer.stop()
+        except Exception as exc:
+            logger.warning("UnifiedEsWriter 停止错误: %s", exc,
+                           _type="system", event_name="es_writer_stop", message=f"ES Writer 停止错误: {exc}", status="error")
 
-    await worker.stop()
+        await worker.stop()
 
 
 app = FastAPI(

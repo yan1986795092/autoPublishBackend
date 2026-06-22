@@ -21,6 +21,16 @@ class BatchPublishRequest(BaseModel):
     publish_mode: str = "draft"
     schedule_time: str | None = None
 
+
+def _parse_schedule_time(schedule_time: str) -> datetime:
+    normalized = schedule_time.strip()
+    if normalized.endswith("Z"):
+        normalized = normalized[:-1] + "+00:00"
+    parsed = datetime.fromisoformat(normalized)
+    if parsed.tzinfo is not None:
+        return parsed.astimezone().replace(tzinfo=None)
+    return parsed
+
 router = APIRouter(prefix="/publish", tags=["发布"])
 
 
@@ -42,7 +52,7 @@ def publish_content(
     # 定时发布场景
     if request.schedule_time:
         try:
-            scheduled_at = datetime.fromisoformat(request.schedule_time)
+            scheduled_at = _parse_schedule_time(request.schedule_time)
             if scheduled_at > datetime.utcnow():
                 record = PublishRecord(
                     content_id=content.id,
@@ -230,7 +240,7 @@ def batch_publish(
     # 定时发布场景
     if request.schedule_time:
         try:
-            scheduled_at = datetime.fromisoformat(request.schedule_time)
+            scheduled_at = _parse_schedule_time(request.schedule_time)
             if scheduled_at > datetime.utcnow():
                 for platform_code in request.platforms:
                     record = PublishRecord(

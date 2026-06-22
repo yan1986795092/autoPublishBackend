@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request
+from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect, Request, status
 from fastapi.responses import HTMLResponse
 from pydantic import BaseModel, ValidationError
 from typing import Optional, AsyncGenerator, Any
@@ -21,10 +21,12 @@ from .workflow.task_queue import task_queue, event_bus, StreamEvent
 from .workflow.worker import worker
 from .cache import agent_cache, llm_cache
 from src.api.auth import get_current_user
+from src.core.security import decode_token
 from src.models import User
 from src.tools.vector_search import vector_search
 from src.tools.langchain import CrawlerTool
 from src.config import get_settings
+from src.core.request_guards import ensure_task_owner, validate_public_http_url
 
 router = APIRouter(tags=["agent"])
 
@@ -77,11 +79,11 @@ async def run_agent(
 
         # Skill 注入（与 /stream 端点保持一致）
         if request.skill_id:
-            from src.api.skills import load_skill_full
+            from src.api.skills import load_skill_full_for_user
             from src.database import SessionLocal
             db = SessionLocal()
             try:
-                skill_data = load_skill_full(request.skill_id, db)
+                skill_data = load_skill_full_for_user(request.skill_id, db, current_user.id)
                 if skill_data:
                     context.update({
                         "skill_id": request.skill_id,
@@ -145,11 +147,11 @@ async def preview_plan(
 
         # Skill 注入
         if request.skill_id:
-            from src.api.skills import load_skill_full
+            from src.api.skills import load_skill_full_for_user
             from src.database import SessionLocal
             db = SessionLocal()
             try:
-                skill_data = load_skill_full(request.skill_id, db)
+                skill_data = load_skill_full_for_user(request.skill_id, db, current_user.id)
                 if skill_data:
                     context.update({
                         "skill_id": request.skill_id,
@@ -357,11 +359,11 @@ async def submit_agent_task(
     """提交异步 Agent 任务（适合长时间执行）"""
     skill_context: dict = {}
     if request.skill_id:
-        from src.api.skills import load_skill_full
+        from src.api.skills import load_skill_full_for_user
         from src.database import SessionLocal
         db = SessionLocal()
         try:
-            skill_data = load_skill_full(request.skill_id, db)
+            skill_data = load_skill_full_for_user(request.skill_id, db, current_user.id)
             if skill_data:
                 skill_context = {
                     "skill_id": request.skill_id,
@@ -398,9 +400,7 @@ async def get_agent_task_status(
     current_user: User = Depends(get_current_user),
 ):
     """查询异步任务状态"""
-    task = task_queue.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="未找到任务")
+    task = ensure_task_owner(task_queue.get_task(task_id), current_user)
     return AgentAsyncStatusResponse(
         success=True,
         data=task.to_dict(),
@@ -429,9 +429,7 @@ async def cancel_agent_task(
     current_user: User = Depends(get_current_user),
 ):
     """取消异步任务"""
-    task = task_queue.get_task(task_id)
-    if not task:
-        raise HTTPException(status_code=404, detail="未找到任务")
+    ensure_task_owner(task_queue.get_task(task_id), current_user)
     success = task_queue.cancel_task(task_id)
     return {
         "success": success,
@@ -472,11 +470,11 @@ async def agent_stream(
             # 0. 加载 Skill（如果指定了 skill_id）
             skill_context: dict = {}
             if request.skill_id:
-                from src.api.skills import load_skill_full
+                from src.api.skills import load_skill_full_for_user
                 from src.database import SessionLocal
                 db = SessionLocal()
                 try:
-                    skill_data = load_skill_full(request.skill_id, db)
+                    skill_data = load_skill_full_for_user(request.skill_id, db, current_user.id)
                     if skill_data:
                         skill_context = {
                             "skill_id": request.skill_id,
@@ -729,9 +727,10 @@ async def crawl_url(
     适用于长文阅读、竞品分析等场景。
     """
     try:
+        safe_url = validate_public_http_url(request.url)
         from .handlers.web_search import handle_url_crawl
         crawl_result = await handle_url_crawl({
-            "url": request.url,
+            "url": safe_url,
             "max_length": request.max_length,
         }, llm=None)
 
@@ -744,7 +743,7 @@ async def crawl_url(
         orchestrator = _create_orchestrator()
         content_text = crawl_result.get("output", {}).get("content", "")
         result = await orchestrator.run(
-            user_request=f"分析以下从 {request.url} 抓取的内容，提取核心观点和关键信息：\n\n{content_text[:8000]}",
+            user_request=f"分析以下从 {safe_url} 抓取的内容，提取核心观点和关键信息：\n\n{content_text[:8000]}",
             context={"force_template": "simple"},
             timeout=120.0,
         )
@@ -752,6 +751,8 @@ async def crawl_url(
             success=result.status.value in ("completed", "partial"),
             data={"crawl": crawl_result, "analysis": result.to_dict()},
         )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error("crawl_url 失败", exc_info=True,
                      _type="system", event_name="crawl_error", message=f"crawl_url 失败: {e}", status="error")
@@ -766,7 +767,7 @@ async def list_dlq_tasks(
     current_user: User = Depends(get_current_user),
 ):
     """查看死信队列中的失败任务列表"""
-    tasks = task_queue.get_dlq_tasks()
+    tasks = [task for task in task_queue.get_dlq_tasks() if task.user_id == current_user.id]
     return AgentRunResponse(
         success=True,
         data={
@@ -782,7 +783,8 @@ async def retry_dlq_task(
     current_user: User = Depends(get_current_user),
 ):
     """从死信队列中重试指定任务"""
-    task = task_queue.retry_from_dlq(task_id)
+    ensure_task_owner(task_queue._dead_letter_queue.get(task_id), current_user)
+    task = await task_queue.retry_from_dlq(task_id)
     if not task:
         raise HTTPException(status_code=404, detail="任务未在死信队列中找到")
     return AgentRunResponse(
@@ -806,12 +808,18 @@ async def search_vector_db(
     current_user: User = Depends(get_current_user),
 ):
     """在向量知识库中搜索相似内容"""
+    namespace = f"user:{current_user.id}"
     if request.texts:
         vector_search.add_documents(
             texts=request.texts,
-            metadatas=[{"user_id": current_user.id}] * len(request.texts),
+            metadatas=[{"user_id": current_user.id, "namespace": namespace}] * len(request.texts),
         )
-    result = vector_search.search(query=request.query, top_k=request.top_k)
+    result = vector_search.search(
+        query=request.query,
+        top_k=request.top_k,
+        namespace=namespace,
+        metadata_filter={"user_id": current_user.id},
+    )
     return AgentRunResponse(success=True, data=result)
 
 
@@ -836,15 +844,16 @@ async def invalidate_cache(
     current_user: User = Depends(get_current_user),
 ):
     """清空 Agent 缓存"""
-    from .cache import agent_cache, llm_cache
-    agent_cache.invalidate(agent_type)
-    if not agent_type:
-        llm_cache.invalidate()
-    return AgentRunResponse(success=True, data={"message": "缓存已清空"})
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail="当前版本已禁用全局缓存失效接口",
+    )
 
 
 @router.get("/agent/metrics")
-async def agent_metrics():
+async def agent_metrics(
+    current_user: User = Depends(get_current_user),
+):
     """Agent 系统监控指标（StatsCollector 实时数据 + DB 持久化累计）"""
     settings = get_settings()
     from src.observability.metrics import stats_collector
@@ -853,11 +862,31 @@ async def agent_metrics():
 
     active_tasks = sum(
         1 for t in task_queue._tasks.values()
-        if t.state.value in ("pending", "running")
+        if t.user_id == current_user.id and t.state.value in ("pending", "running")
     )
 
-    # 实时内存数据
-    mem = stats_collector.get_stats()
+    # 实时内存数据当前是进程级全局计数，避免向普通用户暴露跨用户活动。
+    mem = {
+        "agent_runs": {
+            "total": 0,
+            "success": 0,
+            "failed": 0,
+            "timeout": 0,
+            "success_rate": 0,
+            "p95_duration_ms": 0,
+        },
+        "llm_calls": {
+            "total": 0,
+            "errors": 0,
+            "prompt_tokens": 0,
+            "completion_tokens": 0,
+            "total_tokens": 0,
+            "p95_duration_ms": 0,
+            "by_model": {},
+            "by_provider": {},
+        },
+        "tool_calls": {},
+    }
 
     # DB 持久化累计数据
     db_totals: dict[str, Any] = {
@@ -878,7 +907,8 @@ async def agent_metrics():
                     COALESCE(SUM(total_cost), 0) as total_cost,
                     SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) as success_count
                 FROM agent_tasks
-            """)).one()
+                WHERE user_id = :user_id
+            """), {"user_id": current_user.id}).one()
             db_totals["agent_runs_total"] = row.total_runs or 0
             db_totals["llm_tokens_total"] = row.total_tokens or 0
             db_totals["llm_cost_total"] = round(row.total_cost or 0, 4)
@@ -886,15 +916,17 @@ async def agent_metrics():
             # agent_subtasks: 按 agent_type 统计
             agent_rows = db.execute(text("""
                 SELECT
-                    agent_type,
+                    s.agent_type,
                     COUNT(*) as calls,
-                    COALESCE(SUM(tokens_used), 0) as tokens,
-                    COALESCE(AVG(time_elapsed), 0) as avg_time
-                FROM agent_subtasks
-                WHERE agent_type IS NOT NULL AND agent_type != ''
-                GROUP BY agent_type
+                    COALESCE(SUM(s.tokens_used), 0) as tokens,
+                    COALESCE(AVG(s.time_elapsed), 0) as avg_time
+                FROM agent_subtasks s
+                JOIN agent_tasks t ON t.id = s.task_id
+                WHERE t.user_id = :user_id
+                  AND s.agent_type IS NOT NULL AND s.agent_type != ''
+                GROUP BY s.agent_type
                 ORDER BY calls DESC
-            """)).fetchall()
+            """), {"user_id": current_user.id}).fetchall()
             for r in agent_rows:
                 db_totals["agents"].append({
                     "name": r.agent_type,
@@ -921,7 +953,7 @@ async def agent_metrics():
             },
             "tasks": {
                 "active": active_tasks,
-                "dlq_size": len(task_queue._dead_letter_queue),
+                "dlq_size": sum(1 for t in task_queue._dead_letter_queue.values() if t.user_id == current_user.id),
             },
             "worker": {
                 "running": worker._running,
@@ -932,7 +964,7 @@ async def agent_metrics():
                 "default_llm_provider": settings.default_llm_provider,
                 "worker_max_retries": settings.worker_max_retries,
                 "mcp_enabled": settings.mcp_enabled,
-                "llm_gateway_url": getattr(settings, 'gateway_url', ''),
+                "llm_gateway_url": getattr(settings, 'llm_gateway_url', ''),
                 "providers": {
                     "zhipu": bool(zhipu_key),
                     "qwen": bool(qwen_key),
@@ -954,7 +986,34 @@ async def agent_metrics():
 
 @router.websocket("/agent/ws/{task_id}")
 async def agent_websocket(websocket: WebSocket, task_id: str):
-    """WebSocket 端点：实时推送 Agent 任务进度 + 用户决策请求"""
+    """WebSocket ??????????????????"""
+    token = websocket.query_params.get("token")
+    if not token:
+        await websocket.close(code=1008)
+        return
+
+    payload = decode_token(token)
+    if not payload or payload.get("type") != "access":
+        await websocket.close(code=1008)
+        return
+
+    from src.database import SessionLocal
+
+    db = SessionLocal()
+    try:
+        current_user = db.query(User).filter(User.id == payload.get("sub")).first()
+    finally:
+        db.close()
+
+    if not current_user:
+        await websocket.close(code=1008)
+        return
+
+    task = task_queue.get_task(task_id)
+    if task is None or task.user_id != current_user.id:
+        await websocket.close(code=1008)
+        return
+
     await websocket.accept()
     try:
         while True:
@@ -962,14 +1021,13 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
             if task is None:
                 await websocket.send_json({
                     "type": "error",
-                    "message": "未找到任务",
+                    "message": "?????",
                 })
                 break
 
-            task_dict = task.to_dict()
             await websocket.send_json({
                 "type": "progress",
-                "data": task_dict,
+                "data": task.to_dict(),
             })
 
             if task.state.value in ("completed", "failed", "cancelled"):
@@ -980,14 +1038,13 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
                     })
                 break
 
-            # 等待下一次更新（轮询）
             await asyncio.sleep(1.0)
 
     except WebSocketDisconnect:
-        pass  # 正常断开，无需处理
+        pass
     except Exception as e:
         logger.error(
-            "WebSocket 处理器异常",
+            "WebSocket ?????",
             exc_info=True,
             task_id=task_id,
             _type="websocket",
@@ -996,9 +1053,9 @@ async def agent_websocket(websocket: WebSocket, task_id: str):
         try:
             await websocket.send_json({"type": "error", "message": str(e)})
         except Exception:
-            logger.warning("清理时发送 WebSocket 错误消息失败", exc_info=True)
+            logger.warning("????? WebSocket ??????", exc_info=True)
     finally:
         try:
             await websocket.close()
         except Exception:
-            logger.warning("清理时关闭 WebSocket 失败", exc_info=True)
+            logger.warning("????? WebSocket ??", exc_info=True)

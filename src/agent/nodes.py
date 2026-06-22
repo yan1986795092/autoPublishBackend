@@ -1310,9 +1310,12 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 or state.get("context", {}).get("conversation_id")
                 or "default"
             )
+            user_id = state.get("context", {}).get("user_id", "")
             t_input["_task_id"] = task.get("id") or task_id or agent_type
             t_input["_session_id"] = task_session_id
             t_input["session_id"] = task_session_id
+            if user_id:
+                t_input["user_id"] = user_id
 
             # 上下文注入
             dep_context = _build_dependency_context(task, state)

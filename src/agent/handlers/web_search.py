@@ -8,6 +8,7 @@ import httpx
 from langchain_openai import ChatOpenAI
 
 from src.config import get_settings
+from src.core.request_guards import validate_public_http_url
 
 logger = logging.getLogger(__name__)
 
@@ -223,6 +224,18 @@ async def handle_url_crawl(task_input: dict, llm: ChatOpenAI | None = None, mcp_
             "output": {"content": ""},
             "tokens_used": 0, "thinking_steps": [],
         }
+
+    try:
+        url = validate_public_http_url(url)
+    except Exception as exc:
+        from ..result import error_response
+
+        return error_response(
+            "URLCrawler",
+            error=getattr(exc, "detail", str(exc)),
+            failure_type="invalid_input",
+            content=f"URL 校验失败: {url}",
+        )
 
     try:
         async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:

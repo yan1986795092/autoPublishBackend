@@ -1,8 +1,4 @@
-"""VectorSearch 工具 — 语义相似内容检索（基于 pgvector）
-
-支持多个 embedding 提供商，自动检测可用的 API key。
-维度根据提供商自动适配。
-"""
+"""VectorSearch 工具 — 语义相似内容检索（基于 pgvector）"""
 
 from __future__ import annotations
 import json
@@ -132,7 +128,13 @@ class VectorSearchTool:
 
     # ── 检索 ──────────────────────────────────────────────
 
-    def search(self, query: str, top_k: int = 5) -> dict:
+    def search(
+        self,
+        query: str,
+        top_k: int = 5,
+        namespace: Optional[str] = None,
+        metadata_filter: Optional[dict[str, str]] = None,
+    ) -> dict:
         self._ensure_embeddings()
         if not self._embeddings:
             return {"query": query, "matches": [], "total": 0, "fallback": "embedding_unavailable"}
@@ -145,15 +147,27 @@ class VectorSearchTool:
 
             db = SessionLocal()
             try:
+                where_clauses: list[str] = []
+                params: dict[str, Any] = {"limit": top_k}
+                if namespace:
+                    where_clauses.append("namespace = :namespace")
+                    params["namespace"] = namespace
+                if metadata_filter:
+                    for idx, (key, value) in enumerate(metadata_filter.items()):
+                        param_name = f"meta_{idx}"
+                        where_clauses.append(f"metadata ->> '{key}' = :{param_name}")
+                        params[param_name] = str(value)
+                where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
                 rows = db.execute(
                     text(
                         "SELECT id, text, metadata, namespace, "
                         f"  (embedding <=> '{embedding_str}'::vector) AS distance "
                         f"FROM vector_search "
+                        f"{where_sql} "
                         f"ORDER BY embedding <=> '{embedding_str}'::vector "
                         f"LIMIT :limit"
                     ),
-                    {"limit": top_k},
+                    params,
                 ).fetchall()
 
                 matches = []

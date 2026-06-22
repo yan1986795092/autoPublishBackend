@@ -340,6 +340,23 @@ class ConversationEngine:
         )
         _wants_generation = any(kw in _user_msg_lower for kw in _gen_keywords)
 
+        # ── 关键防御：LLM 已主动追问 = 规则 A 正常执行，不要被兜底覆盖 ──
+        # 当用户消息里有生成关键词，但 LLM 正确表达了"信息不足、需要追问"
+        # （如"请告诉我主题和平台"），应尊重 LLM 的判断，不再兜底触发 pipeline。
+        # 兜底分支只用于：LLM 没追问、也没触发标记的异常情况（如模型卡住 / 返回空）。
+        if (
+            _wants_generation
+            and not TriggerExtractor.has_marker(full_text)
+            and not TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=False)
+            and TriggerExtractor.looks_like_followup_question(full_text)
+        ):
+            logger.info(
+                "对话 LLM 已主动追问（信息不足），尊重其判断，不触发 pipeline "
+                "(msg_len=%s, user_msg=%r, llm_preview=%r)",
+                len(full_text), _user_msg[:50], full_text[:80],
+            )
+            return
+
         if _wants_generation and not TriggerExtractor.has_marker(full_text):
             logger.info("LLM 未输出 [GENERATE] 但用户要求生成，自动触发 pipeline (msg_len=%s, user_msg=%s)",
                         len(full_text), _user_msg[:50])
