@@ -198,8 +198,17 @@ class RichConsoleRenderer:
         llm_model = self._pop(d, "llm_model", "")
         error_type = self._pop(d, "error_type", "")
         error_message = self._pop(d, "error_message", "")
+        error = self._pop(d, "error", "")  # 通用 error 字段（orchestrator 异常用）
+        agent_type = self._pop(d, "agent_type", "")  # 编排异常 log 没传 agent_name
+        event_name = self._pop(d, "event_name", "")  # 兜底显示用
         level = self._pop(d, "level", "INFO").upper()
         trace_id = self._pop(d, "trace_id", "")
+
+        # 兜底：编排异常 logger 经常没传 agent_name / message，但有 agent_type / event_name
+        if not message and event_name:
+            message = f"[{event_name}]"
+        if not agent_name and agent_type:
+            agent_name = agent_type
 
         # ── 确定缩进级别和图标 ──
         if event_type in ("agent_start", "agent_finish"):
@@ -236,7 +245,7 @@ class RichConsoleRenderer:
 
         # 消息（输入/输出摘要）
         if message:
-            t.append(f"{message[:60]}  ", Style(color="white"))
+            t.append(f"{message}  ", Style(color="white"))
 
         # 代理名称
         if agent_name:
@@ -280,20 +289,21 @@ class RichConsoleRenderer:
             if cost:
                 t.append(f"${float(cost):.4f} ", Style(color="yellow", dim=True))
 
-        # 思考过程预览（前 100 字符）
+        # 思考过程
         if thought:
-            preview = thought[:120].replace("\n", " ")
-            t.append(f"\n{indent}  💭 {preview}", Style(color="grey50", italic=True))
+            t.append(f"\n{indent}  💭 {thought}", Style(color="grey50", italic=True))
 
         # 工具名称
         if tool_name:
             tool_detail = self._pop(d, "tool_detail", "")
             if tool_detail:
-                t.append(f" {tool_detail[:80]}", Style(color="yellow", dim=True))
+                t.append(f" {tool_detail}", Style(color="yellow", dim=True))
 
         # 错误
         if error_type:
             t.append(f" {error_type}: {error_message[:100]}", Style(color="red", bold=True))
+        elif error:
+            t.append(f" ERR: {error[:200]}", Style(color="red", bold=True))
 
         return t
 

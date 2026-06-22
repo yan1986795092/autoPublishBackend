@@ -44,25 +44,56 @@ class GenerateTrigger:
 
     def to_prompt(self) -> str:
         """转换为传给 Agent Pipeline 的 prompt"""
-        parts = [self.topic] if self.topic else []
-        meta_parts = []
-        if self.platform:
-            meta_parts.append(f"[平台: {self.platform}]")
-        if self.style:
-            meta_parts.append(f"[风格: {self.style}]")
-        if self.length:
-            meta_parts.append(f"[篇幅: {self.length}]")
-        if self.tone:
-            meta_parts.append(f"[语调: {self.tone}]")
-        if self.audience:
-            meta_parts.append(f"[受众: {self.audience}]")
-        if self.keywords:
-            meta_parts.append(f"[关键词: {', '.join(self.keywords)}]")
+        return PipelineRequest.from_trigger(self).to_prompt_text()
+
+
+@dataclass
+class PipelineRequest:
+    """对话 → Agent Pipeline 的显式契约（替代裸 _prompt 字符串）
+
+    字段直接对应 Agent 任务 input，避免数据在传输过程中被丢字段。
+    """
+    action: str
+    topic: str
+    platform: str = ""
+    style: str = ""
+    length: str = ""
+    tone: str = ""
+    audience: str = ""
+    keywords: list[str] = field(default_factory=list)
+    revision_focus: str = ""
+
+    @classmethod
+    def from_trigger(cls, trigger: "GenerateTrigger") -> "PipelineRequest":
+        return cls(
+            action=trigger.action,
+            topic=trigger.topic,
+            platform=trigger.platform,
+            style=trigger.style,
+            length=trigger.length,
+            tone=trigger.tone,
+            audience=trigger.audience,
+            keywords=list(trigger.keywords),
+            revision_focus=trigger.revision_focus,
+        )
+
+    def to_prompt_text(self) -> str:
+        """生成给 Agent 的 prompt 文本（topic 在前，元信息在后）"""
+        parts = []
+        if self.topic:
+            parts.append(self.topic.strip())
+        meta = []
+        if self.platform:    meta.append(f"[平台: {self.platform}]")
+        if self.style:       meta.append(f"[风格: {self.style}]")
+        if self.length:      meta.append(f"[篇幅: {self.length}]")
+        if self.tone:        meta.append(f"[语调: {self.tone}]")
+        if self.audience:    meta.append(f"[受众: {self.audience}]")
+        if self.keywords:    meta.append(f"[关键词: {', '.join(self.keywords)}]")
         if self.revision_focus:
-            meta_parts.append(f"[修改重点: {self.revision_focus}]")
-        if meta_parts:
-            parts.append("\n" + " ".join(meta_parts))
-        return " ".join(parts) if parts else self.topic
+            meta.append(f"[修改重点: {self.revision_focus}]")
+        if meta:
+            parts.append(" ".join(meta))
+        return "\n".join(parts)
 
 
 @dataclass

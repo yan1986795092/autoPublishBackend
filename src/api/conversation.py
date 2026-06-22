@@ -100,9 +100,6 @@ async def conversation_chat(
                 for msg in history_records
             ]
 
-            # 2. 加载用户偏好记忆
-            user_profile = await memory_manager.get_user_profile(current_user.id)
-
             # 3. 构建对话上下文
             from src.conversation.schemas import ConversationContext
             ctx = ConversationContext(
@@ -110,7 +107,7 @@ async def conversation_chat(
                 conversation_id=conversation_id,
                 user_id=current_user.id,
                 history=history,
-                user_profile=user_profile,
+                user_profile="",
             )
 
             # 4. 调用对话引擎
@@ -121,12 +118,11 @@ async def conversation_chat(
             async for event in engine.chat(ctx):
                 if event["type"] == "text":
                     accumulated_text += event["content"]
-                    yield {
-                        "event": "text",
-                        "data": json.dumps({"content": event["content"]}, ensure_ascii=False),
-                    }
+                    # 先不 yield text 事件——如果后面有 trigger，text 会被 text_cleanup 替换
+                    # 等循环结束后再决定 yield 什么
                 elif event["type"] == "text_cleanup":
                     accumulated_text = event["content"]
+                    # text_cleanup 只在有 trigger 时发生，此时 yield 清理后的文本
                     yield {
                         "event": "text_cleanup",
                         "data": json.dumps({"content": event["content"]}, ensure_ascii=False),
@@ -134,6 +130,13 @@ async def conversation_chat(
                 elif event["type"] == "trigger":
                     trigger_data = event["data"]
                     # 不在这里 yield trigger，等文本流结束后再 yield
+
+            # 4.5 没有 trigger → 把缓冲的 text 事件发给前端
+            if not trigger_data and accumulated_text:
+                yield {
+                    "event": "text_cleanup",
+                    "data": json.dumps({"content": accumulated_text}, ensure_ascii=False),
+                }
 
             # 5. 保存对话 LLM 的回复
             if accumulated_text:
@@ -155,10 +158,11 @@ async def conversation_chat(
                 }, ensure_ascii=False)
                 db.commit()
 
-                # 记住用户偏好
+                # 记住用户偏好（按 conversation_id 隔离）
                 await memory_manager.remember_conversation_preference(
                     user_id=current_user.id,
                     preferences=trigger_data,
+                    conversation_id=conversation_id,
                 )
 
                 # 返回 trigger 事件给前端

@@ -109,12 +109,11 @@ class VectorSearchTool:
                     db.execute(
                         text(
                             "INSERT INTO vector_search (text, metadata, embedding, namespace) "
-                            "VALUES (:text, :metadata::jsonb, :embedding::vector, :namespace)"
+                            f"VALUES (:text, CAST(:metadata AS jsonb), '{embedding_str}'::vector, :namespace)"
                         ),
                         {
                             "text": doc_text,
                             "metadata": meta_json,
-                            "embedding": embedding_str,
                             "namespace": namespace,
                         },
                     )
@@ -149,12 +148,12 @@ class VectorSearchTool:
                 rows = db.execute(
                     text(
                         "SELECT id, text, metadata, namespace, "
-                        "  (embedding <=> :query_vec::vector) AS distance "
-                        "FROM vector_search "
-                        "ORDER BY embedding <=> :query_vec2::vector "
-                        "LIMIT :limit"
+                        f"  (embedding <=> '{embedding_str}'::vector) AS distance "
+                        f"FROM vector_search "
+                        f"ORDER BY embedding <=> '{embedding_str}'::vector "
+                        f"LIMIT :limit"
                     ),
-                    {"query_vec": embedding_str, "query_vec2": embedding_str, "limit": top_k},
+                    {"limit": top_k},
                 ).fetchall()
 
                 matches = []

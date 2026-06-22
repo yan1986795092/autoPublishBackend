@@ -15,6 +15,49 @@ from src.mcp.client import get_mcp_client, shutdown_mcp_client
 logger = structlog.get_logger(__name__)
 
 
+# ── 重试降级策略 ──
+# 第 1 次重试: 保持原样（兼容老路径）
+# 第 2 次重试: 追加 system reminder 禁止元描述
+# 第 3 次重试: 切到 deepseek-chat（更强指令遵循）
+_RETRY_STRATEGY = [
+    # (prompt_suffix, model_override, extra_wait_s)
+    ("", None, 0),
+    (
+        "\n\n[系统提示] 注意：禁止输出 '## 思考'、'## 正文'、'## 标题' 等元描述，直接输出纯正文。",
+        None,
+        0,
+    ),
+    (
+        "\n\n[系统提示] 请直接输出正文，不要解释、不要框架、不要 Markdown 元描述。",
+        "deepseek-chat",
+        1,
+    ),
+]
+
+
+def _apply_retry_strategy(skill_context: Optional[dict], attempt: int) -> tuple[Optional[dict], Optional[str]]:
+    """根据重试级别调整 prompt / model
+
+    Returns:
+        (modified_skill_context, model_override)
+    """
+    if attempt >= len(_RETRY_STRATEGY):
+        return skill_context, None
+    prompt_suffix, model_override, _ = _RETRY_STRATEGY[attempt]
+    if not prompt_suffix and not model_override:
+        return skill_context, None
+
+    new_ctx = dict(skill_context or {})
+    if prompt_suffix:
+        # 追加到 topic（ManagerAgent 会把它传给 WritingAgent）
+        original_topic = new_ctx.get("topic", "")
+        if original_topic:
+            new_ctx["topic"] = original_topic + prompt_suffix
+        else:
+            new_ctx["topic"] = prompt_suffix
+    return new_ctx, model_override
+
+
 class AgentWorker:
     """Worker: 从队列中取出任务，执行 Agent 编排"""
 
@@ -131,6 +174,23 @@ class AgentWorker:
                     context["precomputed_plan"] = async_task.plan
                 if async_task.skill_context:
                     context.update(async_task.skill_context)
+                # ── 重试降级：加固 prompt / 切模型 ──
+                ctx_with_strategy, model_override = _apply_retry_strategy(
+                    async_task.skill_context, attempt
+                )
+                if model_override:
+                    context["model_override"] = model_override
+                    logger.info(
+                        "重试降级切模型",
+                        task_id=async_task.id,
+                        attempt=attempt + 1,
+                        model=model_override,
+                        _type="worker",
+                    )
+                if ctx_with_strategy and ctx_with_strategy is not async_task.skill_context:
+                    # 用加固后的 topic 覆盖 context.topic
+                    if "topic" in ctx_with_strategy:
+                        context["topic"] = ctx_with_strategy["topic"]
                 result = await orchestrator.run(
                     user_request=async_task.prompt,
                     context=context,

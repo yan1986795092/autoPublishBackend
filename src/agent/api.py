@@ -34,6 +34,7 @@ class AgentRunRequest(BaseModel):
     context: Optional[dict] = None
     skill_id: Optional[str] = None  # 应用指定的 Skill ID
     platform: Optional[str] = None  # 目标平台代码，如 xiaohongshu
+    trigger: Optional[dict] = None  # 对话引擎的 trigger dict（透传给 skill_context）
 
 
 class AgentRunResponse(BaseModel):
@@ -46,6 +47,7 @@ class AgentAsyncSubmitRequest(BaseModel):
     prompt: str
     skill_id: Optional[str] = None
     platform: Optional[str] = None  # 目标平台代码
+    trigger: Optional[dict] = None  # 对话引擎的 trigger dict
 
 
 class AgentAsyncStatusResponse(BaseModel):
@@ -446,6 +448,7 @@ class AgentStreamRequest(BaseModel):
     skill_id: Optional[str] = None  # 应用指定的 Skill ID
     platform: Optional[str] = None  # 目标平台代码，如 xiaohongshu
     parameters: Optional[dict] = None  # 前端参数（tone、creativity、audience 等）
+    trigger: Optional[dict] = None  # 对话引擎的 trigger dict（透传给 skill_context）
 
 
 @router.post("/agent/stream")
@@ -502,6 +505,24 @@ async def agent_stream(
                 for k, v in request.parameters.items():
                     if v is not None:
                         skill_context[k] = v
+
+            # ── 对话 trigger 注入（来自 /api/v1/conversation/chat）──
+            # 把 trigger dict 合并到 skill_context，让 Agent 任务拼装时拿到 platform/style/length 等
+            if request.trigger and isinstance(request.trigger, dict):
+                for k in ("platform", "style", "length", "tone", "audience",
+                          "keywords", "revision_focus", "action", "topic"):
+                    v = request.trigger.get(k)
+                    if v not in (None, "", [], {}):
+                        skill_context[k] = v
+                # user_prompt 优先用 trigger.topic（清洗后），没有则用 request.prompt
+                trigger_topic = (request.trigger.get("topic") or "").strip()
+                if trigger_topic and 3 <= len(trigger_topic) <= 500:
+                    user_prompt = trigger_topic
+                elif request.trigger.get("_prompt"):
+                    user_prompt = request.trigger["_prompt"]
+                # 兜底标记透传，WritingAgent 节点可识别
+                if request.trigger.get("_fallback"):
+                    skill_context["_trigger_fallback"] = True
 
             # 平台检测（轻量：字符串匹配，无需 Orchestrator / LLM）
             if not platform_code:

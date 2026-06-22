@@ -12,6 +12,8 @@ from src.agent.nodes import (
     execute_task_batch,
     merge_and_finish,
     should_continue_or_finish,
+    _build_fallback_plan,
+    _normalize_plan_for_context,
 )
 
 # ── Mock helpers ──
@@ -203,6 +205,43 @@ class TestClassifyAndDecompose:
         )
         result = await classify_and_decompose(state)
         assert "task_queue" in result
+
+    def test_normalize_revise_plan_removes_writing_agent(self):
+        plan = {
+            "goal": "revise content",
+            "tasks": [
+                _make_task("WritingAgent", deps=[], topic="draft"),
+                _make_task("ReviewAgent", deps=[0], topic="review"),
+                _make_task("FixAgent", deps=[0, 1], topic="fix"),
+            ],
+        }
+        context = {
+            "action": "revise",
+            "topic": "润色这篇文章",
+            "revision_focus": "开头更吸引人，压缩第二段",
+            "content": "这是一段已有正文。",
+        }
+
+        normalized = _normalize_plan_for_context(plan, context, "润色这篇文章")
+        agent_types = [task["agent_type"] for task in normalized["tasks"]]
+
+        assert "WritingAgent" not in agent_types
+        assert agent_types[0] == "ReviewAgent"
+        assert agent_types[-1] == "FixAgent"
+        assert normalized["tasks"][0]["input"]["content"] == "这是一段已有正文。"
+        assert normalized["tasks"][-1]["input"]["feedback"] == "开头更吸引人，压缩第二段"
+
+    def test_fallback_search_plan_has_full_pipeline(self):
+        plan = _build_fallback_plan("搜索 2026 AI 热点趋势，并分析后写成文章")
+        agent_types = [task["agent_type"] for task in plan["tasks"]]
+
+        assert agent_types[:5] == [
+            "WebSearch",
+            "HotTopicAgent",
+            "WritingAgent",
+            "ReviewAgent",
+            "FixAgent",
+        ]
 
 
 # ── Test: should_continue_or_finish ──

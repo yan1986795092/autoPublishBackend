@@ -150,6 +150,8 @@ class Orchestrator:
                         "_review_fix_cycles": 0,
                         "_loop_created_in_cycle": False,
                         "_last_review_passed": False,
+                        "_shared_results": {},
+                        "_review_feedback_for_fix": "",
                     }
 
                     config = {"recursion_limit": 200}

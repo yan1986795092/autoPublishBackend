@@ -34,26 +34,36 @@ async def handle_fix(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None =
     from ..result import agent_response
 
     try:
-        # 从依赖上下文中获取 WritingAgent 的内容
+        # 内容来源优先级（从高到低）：
+        #   1. task_input 注入字段（由 nodes._run_single_agent_task 注入，最可靠）
+        #   2. dep_context 依赖上下文（可能有同批次 race condition）
+        #   3. task_input topic 兜底
         original_content = task_input.get("content", "")
+        feedback_content = task_input.get("feedback", "")
         dep_context = task_input.get("_context", {})
 
-        # 找 WritingAgent 和 ReviewAgent 的输出
-        # 注意：在 review-fix 循环中（第 2+ 轮），写作内容来自上一轮 FixAgent 的输出
+        # 从依赖上下文中提取所需内容（作为注入字段的辅助补充）
+        # writing_content 优先级：FixAgent（已修改版） > WritingAgent（初稿）
+        # review_content 来自 ReviewAgent
         writing_content = ""
         review_content = ""
-
         for cid, cdata in dep_context.items():
             agent = cdata.get("agent", "")
             content = cdata.get("content", "")
-            if agent in ("WritingAgent", "FixAgent") and content:
-                writing_content = content  # FixAgent 循环中，后一轮覆盖前一轮（最新的已修改版本）
-            elif agent == "ReviewAgent" and content:
+            if not content:
+                continue
+            if agent in ("FixAgent", "WritingAgent"):
+                # 优先取 FixAgent 结果（已修改），没有则取 WritingAgent 初稿
+                if not writing_content or agent == "FixAgent":
+                    writing_content = content
+            elif agent == "ReviewAgent":
                 review_content = content
 
-        # fallback: 直接从 task_input
-        if not writing_content:
-            writing_content = original_content or task_input.get("topic", "")
+        # 合并内容：注入字段 > dep_context > 兜底
+        # 注意：注入字段由 nodes.py 的 FixAgent 注入段负责填充，
+        #         它全量扫描 task_results + _shared_results，比 dep_context 更可靠
+        review_content = feedback_content or review_content or ""
+        writing_content = original_content or writing_content or task_input.get("topic", "")
 
         if not writing_content:
             return agent_response(
@@ -115,6 +125,16 @@ async def handle_fix(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None =
 如果某条意见不适用或修改会损害原文质量，可以跳过。
 直接输出修改后的完整内容，不要加「以下是修改后的内容」等前缀。"""
 
+        prompt += """
+
+Additional requirements:
+- Return only the fully revised final article.
+- Do not append new content after the original draft.
+- Do not continue writing from the end of the draft.
+- Do not output explanations, comparisons, notes, or prefixes.
+- Rewrite inside the original structure and replace the relevant parts directly.
+"""
+
         lc_messages = [
             SystemMessage(content=FIX_SYSTEM_PROMPT),
             HumanMessage(content=prompt),
@@ -149,5 +169,5 @@ async def handle_fix(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None =
         )
 
     except Exception as e:
-        logger.error("FixAgent 执行失败", error=str(e), exc_info=True)
+        logger.error("FixAgent 执行失败", exception=str(e), exc_info=True)
         raise HandlerError(str(e), handler="FixAgent") from e

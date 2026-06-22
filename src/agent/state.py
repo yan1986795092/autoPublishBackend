@@ -1,54 +1,62 @@
-"""AgentGraphState — LangGraph StateGraph 的状态定义"""
+"""AgentGraphState definitions for the LangGraph workflow."""
+
 from __future__ import annotations
+
 from typing import Any, Optional
 from typing_extensions import TypedDict
 
 
 class AgentGraphState(TypedDict):
-    # === 输入 ===
+    # Input
     user_request: str
     context: dict
 
-    # === Skill 上下文 ===
-    skill_system_prompt: str       # Skill 的 system prompt 指令
-    skill_name: str               # Skill 名称
+    # Skill context
+    skill_system_prompt: str
+    skill_name: str
 
-    # === 计划 ===
-    plan: Optional[dict]          # ExecutionPlan 的 dict 形式
+    # Planning
+    plan: Optional[dict]
     plan_reasoning: str
 
-    # === 执行状态 ===
-    task_queue: list[dict]        # 待执行的子任务列表（有序）
-    completed_task_ids: list[str] # 已完成的任务 ID
-    failed_task_ids: list[str]    # 失败的任务 ID
-    task_results: dict            # task_id -> AgentResult dict
+    # Execution state
+    task_queue: list[dict]
+    completed_task_ids: list[str]
+    failed_task_ids: list[str]
+    task_results: dict
 
-    # === 当前批次 ===
-    ready_tasks: list[dict]       # 依赖已就绪、可执行的任务
-    concurrency_limit: int        # 最大并行数
+    # Current batch
+    ready_tasks: list[dict]
+    concurrency_limit: int
 
-    # === 可观测性 ===
+    # Observability
     thinking_steps: list[dict]
     trace_task_id: str
     start_time: float
 
-    # === 输出 ===
+    # Final output
     final_output: Optional[dict]
     error: Optional[str]
-    status: str                   # running / completed / failed / partial
+    status: str
 
-    # === 意图理解（LLM 分析结果，替代旧的 intent_analysis） ===
-    understanding: Optional[dict]    # understand_intent() 的结构化输出
-    understanding_raw: Optional[str] # LLM 原始响应（调试用）
+    # Intent understanding
+    understanding: Optional[dict]
+    understanding_raw: Optional[str]
 
-    # === 系统引用（不序列化） ===
+    # Runtime-only references
     _async_task_id: str
-    _task_queue_ref: Any          # TaskQueue 实例引用
-    _llm_models: dict             # agent_type -> ChatOpenAI
-    _mcp_tools: list              # MCP Server 加载的工具（LangChain BaseTool 列表）
+    _task_queue_ref: Any
+    _llm_models: dict
+    _mcp_tools: list
     _streaming_mode: bool
 
-    # === Review-Fix 循环控制 ===
-    _review_fix_cycles: int       # 当前 review-fix 轮次计数（0 开始，上限 _MAX_REVIEW_LOOPS）
-    _loop_created_in_cycle: bool  # 当前批次是否已创建过循环任务（防止单批次指数爆炸）
-    _last_review_passed: bool     # 最新一轮 ReviewAgent 是否通过审核（短路循环）
+    # Review / fix loop control
+    _review_fix_cycles: int
+    _loop_created_in_cycle: bool
+    _last_review_passed: bool
+
+    # Shared batch results
+    _shared_results: dict
+
+    # Latest review feedback for FixAgent
+    _review_feedback_for_fix: str

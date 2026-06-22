@@ -15,7 +15,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
-from langchain_core.messages import BaseMessage
+from langchain_core.messages import BaseMessage, SystemMessage, HumanMessage, AIMessage, ToolMessage
 from langchain_openai import ChatOpenAI
 
 from src.logging_shared.config import get_logger
@@ -103,6 +103,25 @@ def _extract_token_usage_from_stream_chunks(
     return 0, 0
 
 
+def _log_llm_messages(messages: list[BaseMessage], agent_type: str, model_name: str) -> None:
+    """格式化打印 LLM messages，带角色标签"""
+    parts = [f"\n{'='*60}", f"  LLM 输入 [{agent_type}] [{model_name}]", f"{'='*60}"]
+    for msg in messages:
+        role = "SYSTEM" if isinstance(msg, SystemMessage) else \
+               "USER" if isinstance(msg, HumanMessage) else \
+               "ASSISTANT" if isinstance(msg, AIMessage) else \
+               "TOOL" if isinstance(msg, ToolMessage) else \
+               type(msg).__name__.upper()
+        content = msg.content or ""
+        parts.append(f"\n──[{role}]──\n{content}")
+    parts.append(f"\n{'='*60}")
+    try:
+        logger.info("📋 LLM Prompt", _type="system", event_name="llm_prompt",
+                     message="".join(parts), agent_type=agent_type, model=model_name)
+    except UnicodeEncodeError:
+        pass
+
+
 async def call_llm(
     llm: ChatOpenAI,
     messages: list[BaseMessage],
@@ -123,6 +142,9 @@ async def call_llm(
     Returns:
         LLMResult: 包含 content / prompt_tokens / completion_tokens
     """
+    # ── 记录 LLM 收到的完整 messages（带角色标签） ──
+    _log_llm_messages(messages, agent_type, getattr(llm, "model_name", getattr(llm, "model", "unknown")))
+
     if stream:
         start = time.perf_counter()
         result = await _stream_only(llm, messages, on_chunk)

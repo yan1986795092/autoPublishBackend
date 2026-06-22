@@ -127,5 +127,5 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | 
         )
 
     except Exception as e:
-        logger.error("HotTopicAgent 执行失败", error=str(e), exc_info=True)
+        logger.error("HotTopicAgent 执行失败", exception=str(e), exc_info=True)
         raise HandlerError(str(e), handler="HotTopicAgent") from e

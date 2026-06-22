@@ -1,11 +1,12 @@
 """Agent 任务持久化服务：将内存中的任务记录写入 SQLAlchemy 模型"""
 from __future__ import annotations
 import json
+import re
 from typing import Optional
 from datetime import datetime
 
 from src.database import SessionLocal
-from src.models import AgentTask as AgentTaskModel, SubTask as SubTaskModel, ThinkingTraceRecord, ToolCall as ToolCallModel
+from src.models import AgentTask as AgentTaskModel, SubTask as SubTaskModel, ThinkingTraceRecord, ToolCall as ToolCallModel, Content, ContentStatus, ContentVersion
 import logging
 logger = logging.getLogger(__name__)
 
@@ -36,6 +37,101 @@ def estimate_cost(tokens: int, model: str = "") -> float:
     return round(tokens / 1000 * rate, 4)
 
 
+# ── 简易标题提取（与前端保持一致的规则） ───────────────────────────────
+_TITLE_STRIP_RE = re.compile(r'[#*`_\[\]()【】（）『』「」《》<>｜‖/\\\\]')
+
+
+def _extract_title(full_text: str, fallback: str = "") -> str:
+    """从正文首行提取标题：去掉 Markdown 标记，长度在 2-60 之间"""
+    if not full_text:
+        return fallback
+    first_line = full_text.lstrip("\n").split("\n")[0].strip()
+    cleaned = _TITLE_STRIP_RE.sub("", first_line).strip()
+    if 2 <= len(cleaned) <= 60:
+        return cleaned
+    return fallback
+
+
+def save_content_from_agent_result(
+    user_id: str,
+    full_text: str,
+    title: str = "",
+    topic: str = "",
+    platform_code: str = "",
+    tags: Optional[list[str]] = None,
+    source_task_id: str = "",
+) -> Optional[str]:
+    """将 Agent 生成的最终正文持久化到 contents 表 + 创建 v1 版本快照。
+
+    失败时只 warn 不抛错，Content 创建失败不应影响 Agent 主流程。
+    返回创建的 Content.id，失败返回 None。
+    """
+    if not user_id or not full_text or not full_text.strip():
+        logger.warning("跳过 Content 创建：缺少 user_id 或 full_text")
+        return None
+
+    # 标题：调用方传入的 > 从正文首行提取
+    final_title = (title or "").strip() or _extract_title(full_text) or (topic[:60] if topic else "未命名草稿")
+
+    # 平台：调用方传入 > 默认 xiaohongshu（与前端 runStreaming 行为一致）
+    final_platform = (platform_code or "").strip() or "xiaohongshu"
+
+    # tags: Content.tags 是逗号分隔字符串，长度上限 500
+    tags_csv = ""
+    if tags:
+        cleaned = [str(t).strip() for t in tags if t and str(t).strip()]
+        if cleaned:
+            tags_csv = ",".join(cleaned)[:500]
+
+    # content_html: 简单换行转 <br>（与 contents.py 现有逻辑一致）
+    content_html = full_text.replace("\n", "<br>")
+
+    with SessionLocal() as db:
+        try:
+            content = Content(
+                user_id=user_id,
+                title=final_title,
+                topic=(topic or "")[:500],
+                platform_code=final_platform,
+                content_md=full_text,
+                content_html=content_html,
+                status=ContentStatus.DRAFT,
+                tags=tags_csv,
+            )
+            db.add(content)
+            db.flush()  # 获取 content.id
+
+            # 创建 v1 版本快照（保持与 contents.py 手动创建路径一致）
+            if content.id:
+                version = ContentVersion(
+                    content_id=content.id,
+                    version_number=1,
+                    content_md=full_text,
+                    content_html=content_html,
+                    change_summary="Agent 首次生成",
+                )
+                db.add(version)
+
+            db.commit()
+            logger.info(
+                "Content 创建成功",
+                content_id=content.id,
+                title=final_title[:50],
+                platform=final_platform,
+                source_task_id=source_task_id,
+            )
+            return content.id
+        except Exception as e:
+            db.rollback()
+            logger.error(
+                "Content 创建失败",
+                error=str(e),
+                user_id=user_id,
+                source_task_id=source_task_id,
+            )
+            return None
+
+
 def save_agent_task(
     task_id: str,
     user_id: str,
@@ -49,6 +145,7 @@ def save_agent_task(
     total_tokens: int = 0,
     total_cost: float = 0.0,
     agent_events: Optional[dict] = None,
+    conversation_id: str = "",
 ) -> None:
     """保存或更新 Agent 任务到数据库（幂等：重复 task_id 时覆盖而非报错）"""
     with SessionLocal() as db:
@@ -73,6 +170,7 @@ def save_agent_task(
                 task = AgentTaskModel(
                     id=task_id,
                     user_id=user_id,
+                    conversation_id=conversation_id or None,
                     status=status,
                     prompt=prompt,
                     input_summary=prompt[:200],

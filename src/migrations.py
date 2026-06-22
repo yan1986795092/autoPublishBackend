@@ -109,3 +109,26 @@ def fix_vector_search_dim(engine) -> None:
             logger.info("vector_search 列改为 vector(1024)")
     else:
         logger.info("vector_search 已是 1024 维，跳过")
+
+
+@migration_manager.register(
+    "add_agent_tasks_conversation_id",
+    "向 agent_tasks 表添加 conversation_id 列",
+)
+def add_agent_tasks_conversation_id(engine) -> None:
+    inspector = inspect(engine)
+    if "agent_tasks" not in inspector.get_table_names():
+        return
+    columns = [c["name"] for c in inspector.get_columns("agent_tasks")]
+    if "conversation_id" not in columns:
+        with engine.connect() as conn:
+            conn.execute(
+                text("ALTER TABLE agent_tasks ADD COLUMN conversation_id VARCHAR(36)")
+            )
+            conn.execute(
+                text("CREATE INDEX IF NOT EXISTS ix_agent_tasks_conv ON agent_tasks(conversation_id)")
+            )
+            conn.commit()
+            logger.info("Added conversation_id to agent_tasks")
+    else:
+        logger.info("agent_tasks already has conversation_id, skipped")

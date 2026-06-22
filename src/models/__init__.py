@@ -225,6 +225,7 @@ class AgentTask(Base):
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
+    conversation_id = Column(String(36), nullable=True, index=True)
     task_type = Column(String(50), default="content_generation")
     status = Column(String(20), default="pending")
     prompt = Column(Text, nullable=False)

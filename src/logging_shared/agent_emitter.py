@@ -87,17 +87,13 @@ class AgentEventEmitter:
         return event_dict
 
     def _emit_console(self, event_dict: dict[str, Any]) -> None:
-        """输出到控制台 — 增强版 (Rich 结构化日志)
+        """输出到控制台 — 直接输出完整内容，不截断
 
-        规则:
-        - thought / tool_input / tool_output 只输出摘要（不打印完整内容）
-        - 生产环境 (env=production): 只打印 WARNING/ERROR
-        - 开发环境: 通过 _type="agent" 路由到 RichConsoleRenderer 渲染
+        生产环境只输出 WARNING/ERROR
         """
         level = str(event_dict.get("level", "INFO")).upper()
         event_type = event_dict.get("event_type", "")
 
-        # 生产环境：只输出 WARNING+
         if self._env == "production" and level not in ("WARNING", "ERROR"):
             return
 
@@ -106,7 +102,6 @@ class AgentEventEmitter:
             self._logger.warning("agent %s: %s", event_type, msg)
             return
 
-        # 构建基础事件字典
         console_event: dict[str, Any] = {
             "_type": "agent",
             "event_type": event_type,
@@ -122,46 +117,32 @@ class AgentEventEmitter:
             "level": level,
         }
 
-        # 根据事件类型携带摘要信息
-        if event_type in ("agent_start", "plan"):
-            msg = event_dict.get("message", "")
-            if msg:
-                console_event["message"] = msg[:200]
-
-        elif event_type == "thought":
+        # 直接输出完整内容，不截断
+        if event_type == "thought":
             thought = event_dict.get("thought", "")
             if thought:
-                console_event["thought"] = thought[:200]
+                console_event["thought"] = thought
 
         elif event_type == "tool_call":
             tool_name = event_dict.get("tool_name", "")
             tool_input = event_dict.get("tool_input")
-            if isinstance(tool_input, dict):
-                # 取前 2 个参数值的摘要作为 message（显示实际传入内容）
-                value_previews = []
-                for k, v in list(tool_input.items())[:2]:
-                    v_str = str(v)[:80]
-                    value_previews.append(f"{k}={v_str}")
-                console_event["message"] = "; ".join(value_previews)[:150]
-                params = list(tool_input.keys())[:5]
-                console_event["tool_detail"] = f"params={params}"
-            elif isinstance(tool_input, str):
-                console_event["message"] = tool_input[:150]
-                console_event["tool_detail"] = tool_input[:100]
+            if tool_input is not None:
+                console_event["message"] = str(tool_input)
 
         elif event_type == "tool_result":
             output = event_dict.get("tool_output", "")
             if output:
-                console_event["message"] = output[:150]
+                console_event["message"] = output
 
-        elif event_type == "agent_finish":
-            msg = event_dict.get("message", "") or "完成"
-            console_event["message"] = msg[:200]
+        elif event_type in ("agent_start", "plan", "agent_finish"):
+            msg = event_dict.get("message", "") or event_type
+            if msg:
+                console_event["message"] = msg
 
         try:
             self._logger.info(event_type, **console_event)
         except UnicodeEncodeError:
-            pass  # Windows GBK 终端无法渲染部分 Unicode 字符，静默忽略
+            pass
 
 
 _emitter_singleton: AgentEventEmitter | None = None

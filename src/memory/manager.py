@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 import logging
+import re
 from typing import Optional
 
 from .working_memory import WorkingMemory
@@ -52,6 +53,7 @@ class MemoryManager:
         self.semantic = SemanticMemory()
         self.episodic = EpisodicMemory()
         self._session_task_id: Optional[str] = None
+        # 本地偏好缓存: key = "user_id:conversation_id"
         self._local_preferences: dict[str, list[str]] = {}
 
     # ═══════════════════════════════════════════
@@ -63,73 +65,28 @@ class MemoryManager:
         agent_type: str,
         task_input: dict,
         user_id: str = "",
+        conversation_id: str = "",
         max_tokens: int = 2000,
     ) -> str:
         """为 Agent 构建增强 Prompt 上下文
 
-        聚合三类记忆，按重要性排序后裁剪到 token budget。
-        返回空字符串表示无可用记忆。
-
-        三类记忆的权重：
-          语义记忆（最相关）> 情景记忆（历史经验）> 工作记忆（当前对话）
+        委托给 ContextBuilder，统一上下文构建逻辑。
         """
         if agent_type not in AGENT_MEMORY_ENABLED:
             return ""
 
-        parts: list[tuple[str, str, int]] = []  # (标签, 内容, 优先级)
-
-        # 1. 语义记忆 — 向量检索
         query = self._build_search_query(agent_type, task_input)
-        if query and self.semantic.available:
-            ns = AGENT_NAMESPACE_MAP.get(agent_type)
-            semantic_content = self.semantic.retrieve_formatted(
-                query=query, namespace=ns, top_k=3,
-            )
-            if semantic_content:
-                parts.append(("semantic", semantic_content, 1))
-
-        # 2. 情景记忆 — 历史经验（Manager/Review 这类决策型 Agent 更需要）
-        if agent_type in ("ReviewAgent", "ManagerAgent", "SEOAgent"):
-            episodic_content = self.episodic.retrieve_formatted(
-                agent_type=agent_type, query=query or str(task_input),
-            )
-            if episodic_content:
-                parts.append(("episodic", episodic_content, 2))
-
-        # 3. 用户偏好
-        if user_id:
-            user_content = self.episodic.retrieve_user_formatted(user_id)
-            if user_content:
-                parts.append(("user", user_content, 3))
-
-        # 4. 工作记忆 — 当前对话上下文（权重最低）
-        working_content = self.working.get_recent_context(max_chars=800)
-        if working_content:
-            parts.append(("working", working_content, 4))
-
-        if not parts:
-            return ""
-
-        # 按优先级排序，优先级数字越小越重要
-        parts.sort(key=lambda x: x[2])
-
-        # Token Budget 裁剪（粗略按字符估算）
-        result_parts = []
-        total_chars = 0
-        for _, content, _ in parts:
-            if total_chars + len(content) > max_tokens * 4:  # 1 token ≈ 4 字符
-                break
-            result_parts.append(content)
-            total_chars += len(content)
-
-        context = "\n\n".join(result_parts)
-        if context:
-            logger.info(
-                "MemoryManager: 为 %s 注入记忆上下文 (%d 字符, 来源: %s)",
-                agent_type, total_chars,
-                ", ".join(p[0] for p in parts),
-            )
-
+        history = task_input.get("_history", [])
+        from src.memory.context_builder import ContextBuilder
+        builder = ContextBuilder(self)
+        context = await builder.build(
+            agent_type=agent_type,
+            user_id=user_id,
+            query=query,
+            history=history,
+            conversation_id=conversation_id,
+            max_tokens=max_tokens,
+        )
         return context
 
     def _build_search_query(self, agent_type: str, task_input: dict) -> str:
@@ -160,6 +117,7 @@ class MemoryManager:
         task_input: dict,
         result: dict,
         user_id: str = "",
+        conversation_id: str = "",
     ) -> None:
         """Agent 执行完成后，选择性写入记忆
 
@@ -184,17 +142,20 @@ class MemoryManager:
 
         content = stripped
 
-        # 1. 写入语义记忆
+        # 1. 写入语义记忆（按 conversation_id 隔离）
         namespace = AGENT_NAMESPACE_MAP.get(agent_type, "general")
+        meta: dict[str, str] = {
+            "agent_type": agent_type,
+            "user_id": user_id,
+            "source": "agent_output",
+            "task_type": task_input.get("content_type", ""),
+        }
+        if conversation_id:
+            meta["conversation_id"] = conversation_id
         self.semantic.store(
             text=content,
             namespace=namespace,
-            metadata={
-                "agent_type": agent_type,
-                "user_id": user_id,
-                "source": "agent_output",
-                "task_type": task_input.get("content_type", ""),
-            },
+            metadata=meta,
         )
 
         # 2. 写入情景记忆
@@ -336,16 +297,38 @@ class MemoryManager:
         self,
         user_id: str,
         preferences: dict,
+        conversation_id: str = "",
     ) -> None:
         """将对话中发现的用户偏好存入语义记忆
 
-        从 trigger 数据中提取用户偏好字段，
-        构建自然语言描述后写入语义记忆。
+        偏好按 conversation_id 隔离，每个窗口独立保存。
+        **兜底 trigger**（_fallback=True）不写入记忆，避免污染。
         """
         if not user_id or not preferences:
             return
 
-        # 提取有值的偏好字段，构建更详细的自然语言描述
+        # ── 兜底 trigger 拦截 ──
+        if preferences.get("_fallback"):
+            logger.info(
+                "MemoryManager: 跳过兜底 trigger 记忆（避免污染） topic=%r",
+                preferences.get("topic", "")[:50],
+            )
+            return
+
+        # ── topic 清洗：去掉 ## 思考/## 正文 等元描述 ──
+        raw_topic = (preferences.get("topic") or "").strip()
+        _meta_re = re.compile(r'(?m)^#{1,3}\s*(思考|正文|标题|引言|结论)\s*[:：]?\s*')
+        cleaned_topic = _meta_re.sub('', raw_topic).strip()
+        cleaned_topic = re.sub(r'\s+', ' ', cleaned_topic)
+        if not cleaned_topic or len(cleaned_topic) < 3 or len(cleaned_topic) > 200:
+            logger.info(
+                "MemoryManager: topic 不合法，跳过整个 trigger 记忆 raw_topic=%r cleaned=%r",
+                raw_topic[:50], cleaned_topic[:50],
+            )
+            return
+        # 写回清洗后的 topic
+        preferences = {**preferences, "topic": cleaned_topic}
+
         field_labels = {
             "topic": "主题",
             "platform": "平台",
@@ -377,28 +360,60 @@ class MemoryManager:
             detail_lines = ["用户的创作偏好记录："]
             detail_lines.extend(f"- {p}" for p in parts)
             detail = "\n".join(detail_lines)
+            meta = {
+                "user_id": user_id,
+                "source": "conversation",
+                "summary": short,
+            }
+            if conversation_id:
+                meta["conversation_id"] = conversation_id
             self.semantic.store(
                 text=detail,
                 namespace="user_conversation",
-                metadata={
-                    "user_id": user_id,
-                    "source": "conversation",
-                    "summary": short,
-                },
+                metadata=meta,
             )
 
-        # 2. 始终写入本地缓存（向量搜索不可用时的兜底）
-        if user_id not in self._local_preferences:
-            self._local_preferences[user_id] = []
-        self._local_preferences[user_id].append(short)
-        # 只保留最近 20 条
-        if len(self._local_preferences[user_id]) > 20:
-            self._local_preferences[user_id] = self._local_preferences[user_id][-20:]
+        # 2. 始终写入本地缓存（按 conversation_id 隔离）
+        cache_key = f"{user_id}:{conversation_id}" if conversation_id else user_id
+        if cache_key not in self._local_preferences:
+            self._local_preferences[cache_key] = []
+        self._local_preferences[cache_key].append(short)
+        if len(self._local_preferences[cache_key]) > 20:
+            self._local_preferences[cache_key] = self._local_preferences[cache_key][-20:]
 
         logger.info(
             "MemoryManager: 记录对话偏好 — %s",
             short,
         )
+
+
+    def get_last_conversation_topic(
+        self,
+        user_id: str,
+        conversation_id: str = "",
+    ) -> str:
+        """从本地缓存读取最近一次对话偏好的 topic。
+
+        用于"重新生成"等重做场景：复用上次主题，不让兜底 topic 提取
+        从 history 随便取一条 user 消息（可能是 [内容生成] 占位）。
+        """
+        if not user_id:
+            return ""
+        cache_key = f"{user_id}:{conversation_id}" if conversation_id else user_id
+        cached = self._local_preferences.get(cache_key, [])
+        if not cached:
+            return ""
+        # 倒序找最新一条含 topic= 的偏好
+        for entry in reversed(cached):
+            if not isinstance(entry, str):
+                continue
+            for part in entry.split(","):
+                part = part.strip()
+                if part.startswith("主题="):
+                    topic = part[len("主题="):].strip()
+                    if topic and topic != "null":
+                        return topic
+        return ""
 
 
 # ── 模块级单例 ──

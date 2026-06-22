@@ -2,10 +2,12 @@
 from __future__ import annotations
 import json
 import logging
+from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
+from sqlalchemy import func
 
 from src.database import get_db
 from src.api.auth import get_current_user
@@ -80,6 +82,10 @@ async def list_conversations(
     q: Optional[str] = None,
 ):
     """获取用户的对话列表（支持标题搜索）"""
+    # 防御性 limit 上限，避免一次性拖回过多数据
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+
     query = db.query(ChatConversation).filter(
         ChatConversation.user_id == current_user.id
     )
@@ -90,16 +96,60 @@ async def list_conversations(
     total = query.count()
     conversations = query.offset(offset).limit(limit).all()
 
+    if not conversations:
+        return {
+            "success": True,
+            "data": {
+                "conversations": [],
+                "total": total,
+                "offset": offset,
+                "limit": limit,
+            },
+        }
+
+    conv_ids = [c.id for c in conversations]
+
+    # 一次 GROUP BY 拿所有对话的 message_count，消除 N+1
+    count_rows = db.query(
+        ChatMessageRecord.conversation_id,
+        func.count(ChatMessageRecord.id),
+    ).filter(
+        ChatMessageRecord.conversation_id.in_(conv_ids)
+    ).group_by(
+        ChatMessageRecord.conversation_id
+    ).all()
+    msg_counts: dict[str, int] = {cid: cnt for cid, cnt in count_rows}
+
+    # 一次窗口函数拿每个对话的最后一条消息（按 created_at desc 取第一条）
+    # 使用子查询 + ROW_NUMBER() 替代 per-conversation SELECT ... LIMIT 1
+    latest_msg_subq = (
+        db.query(
+            ChatMessageRecord,
+            func.row_number().over(
+                partition_by=ChatMessageRecord.conversation_id,
+                order_by=ChatMessageRecord.created_at.desc(),
+            ).label("rn"),
+        )
+        .filter(ChatMessageRecord.conversation_id.in_(conv_ids))
+        .subquery()
+    )
+    latest_msg_alias = db.query(
+        latest_msg_subq.c.id,
+        latest_msg_subq.c.conversation_id,
+        latest_msg_subq.c.role,
+        latest_msg_subq.c.content,
+        latest_msg_subq.c.status,
+        latest_msg_subq.c.result_json,
+        latest_msg_subq.c.task_id,
+        latest_msg_subq.c.plan_json,
+        latest_msg_subq.c.created_at,
+    ).filter(latest_msg_subq.c.rn == 1).all()
+
+    last_msgs: dict[str, any] = {row.conversation_id: row for row in latest_msg_alias}
+
     result = []
     for conv in conversations:
-        msg_count = db.query(ChatMessageRecord).filter(
-            ChatMessageRecord.conversation_id == conv.id
-        ).count()
-
-        last_msg = db.query(ChatMessageRecord).filter(
-            ChatMessageRecord.conversation_id == conv.id
-        ).order_by(ChatMessageRecord.created_at.desc()).first()
-
+        last_msg = last_msgs.get(conv.id)
         last_msg_response = None
         if last_msg:
             last_msg_response = MessageResponse(
@@ -118,7 +168,7 @@ async def list_conversations(
             title=conv.title,
             created_at=conv.created_at.isoformat() if conv.created_at else "",
             updated_at=conv.updated_at.isoformat() if conv.updated_at else "",
-            message_count=msg_count,
+            message_count=msg_counts.get(conv.id, 0),
             last_message=last_msg_response,
         ))
 
@@ -228,6 +278,9 @@ async def update_conversation(
     if request.title is not None:
         conversation.title = request.title
 
+    # 显式 bump updated_at：解决 SQLAlchemy onupdate 仅在 dirty field 时触发的问题
+    conversation.updated_at = datetime.utcnow()
+
     db.commit()
     db.refresh(conversation)
 
@@ -294,12 +347,12 @@ async def add_message(
     db.add(message)
 
     # 更新对话的 updated_at 时间
-    from datetime import datetime
     conversation.updated_at = datetime.utcnow()
 
     # 如果是第一条用户消息且对话标题是默认的，自动设置标题
+    # 省略号统一用 …（前端 ConversationHistory 截断展示也用 …）
     if request.role == "user" and conversation.title == "新对话":
-        conversation.title = request.content[:30] + ("..." if len(request.content) > 30 else "")
+        conversation.title = request.content[:30] + ("…" if len(request.content) > 30 else "")
 
     db.commit()
     db.refresh(message)
@@ -341,6 +394,10 @@ async def update_message(
         message.status = request.status
     if request.result is not None:
         message.result_json = json.dumps(request.result)
+
+    # bump 对话的 updated_at，让左侧历史能正确按"今天/昨天"分组。
+    # add_message 里也会 bump，这里补齐 update_message 路径。
+    message.conversation.updated_at = datetime.utcnow()
 
     db.commit()
     db.refresh(message)

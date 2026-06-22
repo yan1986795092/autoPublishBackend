@@ -18,10 +18,12 @@ logger = get_logger("agent.writing")
 
 async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     try:
-        topic = task_input.get("topic", task_input.get("query", ""))
-        content_type = task_input.get("content_type", "blog")
-        style = task_input.get("style", "")
-        platform = task_input.get("platform", "")
+        # 优先从 _agent_context 读结构化参数，fallback 到 task_input 顶层
+        _actx = task_input.get("_agent_context", {})
+        topic = _actx.get("topic") or task_input.get("topic", task_input.get("query", ""))
+        content_type = _actx.get("content_type") or task_input.get("content_type", "blog")
+        style = _actx.get("style") or task_input.get("style", "")
+        platform = _actx.get("platform") or task_input.get("platform", "")
         platform_name = ""
 
         # ── 平台深度配置加载 ──
@@ -63,7 +65,7 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                     text = str(raw)[:char_limit]
                 context_str_parts.append(text)
 
-        # 记忆上下文（由 MemoryManager 注入）
+        # 记忆上下文（由 nodes.py 统一注入，handler 不主动检索）
         memory_context = task_input.get("_memory_context", "")
 
         # ── 用 PromptBuilder 构建 ──
@@ -147,6 +149,13 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             if content:
                 logger.warning("extract_output 返回空，使用原始响应", agent="WritingAgent")
 
+        # 后处理：剥离 LLM 自我元描述（## 思考 / ## 正文 / 行内"思考：xxx"等）
+        from ..output_filter import strip_meta_dump
+        if content:
+            _stripped = strip_meta_dump(content)
+            if _stripped and len(_stripped.strip()) >= 100:
+                content = _stripped
+
         platform_display = f"（{platform_name}）" if platform_name else ""
         from ..result import agent_response
         return agent_response(
@@ -166,5 +175,5 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             }],
         )
     except Exception as e:
-        logger.error("WritingAgent 执行失败", error=str(e), exc_info=True)
+        logger.error("WritingAgent 执行失败", exception=str(e), exc_info=True)
         raise HandlerError(str(e), handler="WritingAgent") from e

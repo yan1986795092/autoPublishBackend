@@ -62,8 +62,9 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                     content = cdata["content"]
                     break
 
-        content_type = task_input.get("content_type", "general")
-        platform = task_input.get("platform", "")
+        _actx = task_input.get("_agent_context", {})
+        content_type = _actx.get("content_type") or task_input.get("content_type", "general")
+        platform = _actx.get("platform") or task_input.get("platform", "")
         banned_found = check_banned_words(content) if content else []
         known_facts = task_input.get("known_facts")
 
@@ -88,7 +89,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         # 事实核查
         fc_report = factcheck_report(content, known_facts) if content else None
 
-        # 记忆上下文
+        # 记忆上下文（由 nodes.py 统一注入，handler 不主动检索）
         memory_context = task_input.get("_memory_context", "")
         memory_section = f"\n\n{memory_context}" if memory_context else ""
         # 创作上下文（CreativeAnchors 等）
@@ -151,8 +152,15 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         dims = re.findall(r"[：:][\s\*]*(\d{1,2})\s*/\s*25", quality_text)
         min_dim = min(int(d) for d in dims) if len(dims) >= 4 else 0
 
-        # 判定标准：总分≥90 且 每项≥16 才算通过
-        passed = score >= 90 and min_dim >= 16
+        # 提取 LLM 显式结论（prompt 末尾的"**审核结论：通过/需修改**"行）
+        # 优先信任 LLM 自己的判断（它能识别"改无可改"的边际情况）
+        explicit_pass = bool(re.search(
+            r"\*\*审核结论[:：]\*\*\s*\[?通过\]?", quality_text
+        ))
+
+        # 判定标准：总分≥70 且 每项≥12（"基本通过"线），
+        # 或 LLM 显式给出"通过"结论（"已达标可放过"）。
+        passed = explicit_pass or (score >= 70 and min_dim >= 12)
 
         # 提取改进建议（只取 "**改进建议：**" 之后的内容，避免评分区文字干扰）
         suggestions = []
@@ -227,7 +235,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                     fixed_content = fix_result.content.strip()
                     rewrite_applied = bool(fixed_content) and fixed_content != original_for_fix[:5000]
             except Exception as fix_err:
-                logger.warning("ReviewAgent 自动修正失败，跳过修正", error=str(fix_err))
+                logger.warning("ReviewAgent 自动修正失败，跳过修正", exception=str(fix_err))
 
         # 汇总 token（审核 + 修正）
         total_tokens = llm_result.total_tokens + (fix_result.total_tokens if rewrite_applied else 0)
@@ -269,5 +277,5 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             }],
         )
     except Exception as e:
-        logger.error("ReviewAgent 执行失败", error=str(e), exc_info=True)
+        logger.error("ReviewAgent 执行失败", exception=str(e), exc_info=True)
         raise HandlerError(str(e), handler="ReviewAgent") from e

@@ -139,11 +139,8 @@ class UnifiedEsWriter:
 
     async def _try_es_bulk(self, index_type: str, docs: list[dict]) -> bool:
         """批量写入 ES。成功返回 True。"""
-        if not self._es_available:
-            return False
         es = await self._get_es_client()
         if not es:
-            self._es_available = False
             return False
 
         index_name = self._index_name(index_type)
@@ -161,6 +158,7 @@ class UnifiedEsWriter:
             return True
         except Exception as exc:
             logger.warning("ES 批量写入 %s 失败: %s", index_type, exc)
+            self._es_client = None
             self._es_available = False
             return False
 

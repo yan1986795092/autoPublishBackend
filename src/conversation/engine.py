@@ -10,6 +10,7 @@
 from __future__ import annotations
 import json
 import logging
+import re
 from typing import AsyncGenerator, Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
@@ -19,6 +20,7 @@ from .schemas import ConversationContext, GenerateTrigger
 from .intent_detector import TriggerExtractor
 from src.core.model_router import ModelRouter
 from src.config import get_settings
+from src.memory.manager import memory_manager
 
 logger = logging.getLogger(__name__)
 
@@ -39,31 +41,47 @@ SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话�
 - tone: 语调（friendly/professional/humorous/warm）
 - audience: 目标读者（beginner/intermediate/expert）
 
-## 决策规则 — 必须遵守
+## 决策规则 — 必须严格遵守
 
-**你的角色是「需求收集者」，不是「写作者」。** 收集完信息后必须触发 [GENERATE]，让专门的 Agent Pipeline 去生成内容。
+你是「需求收集者」，**不是**「写作者」。你**绝对不可以**自己写正文、标题、章节。
 
-根据用户需求选择处理方式：
+### 规则 A：判断用户当前是否在要求"生成新内容"
+判断关键词（不限于）：写、生成、写一份、重新写、再来一份、重新生成、重写、扩写、改写。
+
+- 用户**没有**明确要生成 → 继续对话、追问
+- 用户**明确**要生成但信息不足（缺主题/平台/风格） → 追问 1-2 个问题
+- 用户**明确**要生成且信息充分 → 触发 [GENERATE]
+
+### 规则 B：禁止越权（核心约束）
+**绝对禁止**在回复中包含任何形式的：
+- 以 `## 思考：` / `## 正文：` / `## 标题：` / `## 引言：` / `## 结论：` / `## 章节：` 开头的结构化元描述
+- 任何超过 3 行的"标题 + 引言 + 多章节 + 结论"框架
+- Markdown 标题（`#` / `##`）超过 1 个
+
+如果违反上面任何一条，本次回复**作废**，用户将看到错误，必须输出 [GENERATE] 标记由专门的 Pipeline 处理。
+
+### 规则 C：trigger 格式
+仅在确认要生成时，在回复**末尾**附加：
+
+[GENERATE]
+{{
+  "action": "create|revise|expand",
+  "topic": "...",
+  "platform": "...",
+  "style": "...",
+  "length": "short|medium|long",
+  "tone": "...",
+  "audience": "...",
+  "keywords": ["..."]
+}}
+[/GENERATE]
+
+trigger 之外**不得**有任何正文、标题、章节内容。最多一句话确认（如"好，信息够了，开始创作！"）。
 
 ### 规则 1：简单修改（改词、调语气、改 1-2 句）
 → 直接改好回复，不加标记。例：
 用户：把"很好"改成"非常好"
 你：好的，改好了：原来的"...很好..." → "...非常好..."
-
-### 规则 2：全新创作（写文章/笔记/文案/脚本/故事 等）
-→ 收集到足够信息后，**必须**加 [GENERATE] 触发 Agent，**不得**自己写。
-
-正确示例：
-用户：写一篇关于职场沟通的文章
-你：（经过几轮对话收集信息后）
-好的，信息够了，开始帮你创作！
-[GENERATE]
-{{...action=create...}}
-[/GENERATE]
-
-错误示例（**不准这样做**）：
-用户：写一篇关于职场沟通的文章
-你：好的，我直接帮你写：职场沟通很重要... （❌ 不准自己写，必须触发 [GENERATE]）
 
 ### 规则 3：润色/修改已有内容
 用户对**已经生成好的内容**提修改意见（如"润色一下""开头改得更吸引人""第二段太啰嗦了"），
@@ -99,10 +117,53 @@ SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话�
 }}
 [/GENERATE]
 
-## 用户偏好
-以下是从记忆中读取的用户历史偏好，供参考：
-{user_profile}
 """
+# 注意：System Prompt 是纯静态指令，不夹带动态数据。
+# 用户偏好、历史记录等上下文通过单独的 USER 消息注入。
+
+
+def _log_llm_messages(messages: list) -> None:
+    """打印 LLM 收到的完整 messages（绕过 structlog 渲染）"""
+    _log = logging.getLogger("conversation.llm")
+    parts = [f"\n{'='*60}", "  LLM 输入 [ConversationAgent]", f"{'='*60}"]
+    for msg in messages:
+        role = msg.__class__.__name__.replace("Message", "").upper()
+        content = msg.content or ""
+        parts.append(f"\n──[{role}]──\n{content}")
+    parts.append(f"\n{'='*60}")
+    text = "".join(parts)
+    try:
+        for i in range(0, len(text), 2000):
+            _log.info("📋 %s", text[i:i+2000])
+    except Exception:
+        pass
+
+
+def _build_trigger_data(trigger: "GenerateTrigger") -> dict:
+    """从 GenerateTrigger 构造触发器 dict（避免重复代码）"""
+    return {
+        "action": trigger.action,
+        "topic": trigger.topic,
+        "platform": trigger.platform,
+        "style": trigger.style,
+        "length": trigger.length,
+        "tone": trigger.tone,
+        "audience": trigger.audience,
+        "keywords": trigger.keywords,
+        "revision_focus": trigger.revision_focus,
+        "_prompt": trigger.to_prompt(),
+        "pipeline_request": {
+            "action": trigger.action,
+            "topic": trigger.topic,
+            "platform": trigger.platform,
+            "style": trigger.style,
+            "length": trigger.length,
+            "tone": trigger.tone,
+            "audience": trigger.audience,
+            "keywords": trigger.keywords,
+            "revision_focus": trigger.revision_focus,
+        },
+    }
 
 
 class ConversationEngine:
@@ -189,17 +250,13 @@ class ConversationEngine:
         """
         llm = self._get_llm()
 
-        # 1. 构建消息列表
-        system = SystemMessage(
-            content=SYSTEM_PROMPT.format(
-                user_profile=ctx.user_profile or "暂无用户数据"
-            )
-        )
-
+        # 1. System Prompt（纯静态，不夹带动态数据）
+        system = SystemMessage(content=SYSTEM_PROMPT)
         messages = [system]
 
-        # 2. 添加对话历史（最多 20 条）
-        for msg in ctx.history[-20:]:
+        # 2. 对话历史（按 conversation_id 严格隔离）
+        # 每个窗口有独立的 conversation_id → ctx.history 天然是窗口级
+        for msg in ctx.history[-6:]:  # 最近 3 轮
             role = msg.get("role", "")
             content = msg.get("content", "")
             if role == "user":
@@ -207,8 +264,14 @@ class ConversationEngine:
             elif role == "assistant":
                 messages.append(AIMessage(content=content))
 
-        # 3. 添加当前消息
+        # 4. 当前用户消息
         messages.append(HumanMessage(content=ctx.message))
+
+        # 3.5 记录 LLM 收到的完整 messages
+        try:
+            _log_llm_messages(messages)
+        except Exception:
+            pass
 
         # 4. 流式调用 LLM
         full_text = ""
@@ -225,23 +288,131 @@ class ConversationEngine:
 
         # 5. 检查触发标记
         trigger = TriggerExtractor.extract(full_text)
-        if trigger:
-            # 返回移除标记后的纯文本
+        has_marker = TriggerExtractor.has_marker(full_text)
+
+        # 5.1 越权自写检测：有 trigger 但有大量正文/元描述 → 警告并把正文部分剥离
+        if trigger and TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=True):
+            logger.warning(
+                "对话 LLM 越权自写：触发器已识别但伴随大量正文/元描述，剥离正文部分 "
+                "(full_text_len=%s)",
+                len(full_text),
+            )
             clean_text = TriggerExtractor.strip(full_text)
             if clean_text:
                 yield {"type": "text_cleanup", "content": clean_text}
+            yield {"type": "trigger", "data": _build_trigger_data(trigger)}
+            return
 
-            # 注入记忆标签到 trigger（用于后续记忆沉淀）
-            trigger_data = {
-                "action": trigger.action,
-                "topic": trigger.topic,
-                "platform": trigger.platform,
-                "style": trigger.style,
-                "length": trigger.length,
-                "tone": trigger.tone,
-                "audience": trigger.audience,
-                "keywords": trigger.keywords,
-                "revision_focus": trigger.revision_focus,
-                "_prompt": trigger.to_prompt(),
+        if trigger:
+            clean_text = TriggerExtractor.strip(full_text)
+            if clean_text:
+                yield {"type": "text_cleanup", "content": clean_text}
+            yield {"type": "trigger", "data": _build_trigger_data(trigger)}
+            return
+
+        # 5.2 越权自写但没 trigger → 拦截，强制重发（让前端展示错误 + 不触发 pipeline）
+        if TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=False):
+            logger.error(
+                "对话 LLM 越权自写且未输出 [GENERATE]，强制拦截，避免污染 pipeline "
+                "(full_text_len=%s, preview=%r)",
+                len(full_text), full_text[:80],
+            )
+            yield {
+                "type": "text_cleanup",
+                "content": "抱歉，我刚刚的回复格式有误，请重试一次。"
+                          "请用一句话告诉我：你想写什么主题、发布在哪个平台。",
             }
-            yield {"type": "trigger", "data": trigger_data}
+            return
+
+        # ── 兜底：LLM 没有输出 [GENERATE] 但用户明确要求生成内容 ──
+        _user_msg = (ctx.message or "").strip()
+        _user_msg_lower = _user_msg.lower()
+        _gen_keywords = ["写", "生成", "重新写", "重新生成", "重写", "再来",
+                         "新的一篇", "重新", "生成一份", "写一份", "来一份"]
+        # "重做"类关键词：用户想用相同主题再生成一次，必须保留上次 topic
+        _redo_keywords = ["重新生成", "重新写", "重新", "重写", "再来", "新的一篇",
+                          "再来一份", "重新来"]
+        # 简化：用户消息几乎完全是重做关键词（如 "重新生成"、"再写一份吧"）
+        _is_pure_redo = (
+            len(_user_msg) <= 8
+            and any(_user_msg.strip() == kw or _user_msg.strip().startswith(kw)
+                    for kw in _redo_keywords)
+        )
+        _wants_generation = any(kw in _user_msg_lower for kw in _gen_keywords)
+
+        if _wants_generation and not TriggerExtractor.has_marker(full_text):
+            logger.info("LLM 未输出 [GENERATE] 但用户要求生成，自动触发 pipeline (msg_len=%s, user_msg=%s)",
+                        len(full_text), _user_msg[:50])
+
+            # ── 重做场景：保留上次的 topic，不要从 history 随便取 ──
+            if _is_pure_redo:
+                def _get_last_topic_from_memory(ctx_obj):
+                    return memory_manager.get_last_conversation_topic(
+                        user_id=ctx_obj.user_id or "",
+                        conversation_id=ctx_obj.conversation_id or "",
+                    )
+                _topic = _get_last_topic_from_memory(ctx)
+                if not _topic:
+                    logger.info("重做场景未找到上次 topic，转追问")
+                    yield {
+                        "type": "text_cleanup",
+                        "content": "这是我们的第一次对话，还没有可重新生成的内容。"
+                                  "请告诉我你想写什么主题、发布在哪个平台。",
+                    }
+                    return
+                logger.info("重做场景，复用上次 topic=%r", _topic[:50])
+            else:
+                # topic 提取：剥离用户输入里的"动作词"，剩余作为 topic 候选
+                _topic = _user_msg
+                for _pre in sorted(_gen_keywords, key=len, reverse=True):
+                    if _pre in _topic:
+                        _topic = _topic.replace(_pre, "").strip()
+                        break
+
+            # topic 太短 → 从对话历史里**安全**地提取
+            # 安全 = 排除 LLM 越权自写的元描述（## 思考、## 正文 等）
+            if not _topic or len(_topic) < 3:
+                _meta_re = re.compile(r'(?m)^#{1,3}\s*(思考|正文|标题|引言|结论)\s*[:：]?\s*')
+                # 按钮占位/系统消息（前端 useAgentStore 注水）：[内容生成]、[重写] 等
+                _placeholder_re = re.compile(r'^\[[^\]]+\]$')
+                for msg in reversed(ctx.history):
+                    if msg.get("role") == "user" and msg.get("content", "").strip():
+                        candidate = msg["content"].strip()
+                        # 跳过方括号占位（如 "[内容生成]"）—— 这是前端按钮注水消息
+                        if _placeholder_re.match(candidate):
+                            continue
+                        # 用户消息理论上不会带"## 思考："，但保险起见过滤
+                        candidate = _meta_re.sub('', candidate)
+                        candidate = re.sub(r'\s+', ' ', candidate).strip()
+                        if 3 <= len(candidate) <= 200:
+                            _topic = candidate
+                            break
+
+            # 还提不出来 → 不要瞎猜，直接走追问而不是兜底
+            if not _topic or len(_topic) < 3:
+                logger.info("兜底分支 topic 提取失败，转追问（不触发 pipeline）")
+                yield {
+                    "type": "text_cleanup",
+                    "content": "请告诉我你想写什么主题、发布在哪个平台（例如：小红书、公众号、知乎）。"
+                              "回复示例：'写一篇关于 Python 入门的笔记，发布在小红书'。",
+                }
+                return
+
+            _user_prefs = ctx.user_profile or ""
+            _platform = "xiaohongshu" if ("xiaohongshu" in _user_prefs or "小红书" in _user_prefs) else ""
+            _style = "真实体验分享" if "真实" in _user_prefs else ""
+
+            _fallback_trigger = GenerateTrigger(
+                action="create",
+                topic=_topic,
+                platform=_platform,
+                style=_style,
+            )
+            yield {"type": "trigger", "data": {
+                "action": _fallback_trigger.action,
+                "topic": _fallback_trigger.topic,
+                "platform": _fallback_trigger.platform,
+                "style": _fallback_trigger.style,
+                "_prompt": _fallback_trigger.to_prompt(),
+                "_fallback": True,
+            }}
