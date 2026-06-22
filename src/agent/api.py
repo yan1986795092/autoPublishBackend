@@ -74,6 +74,7 @@ async def run_agent(
     """运行 Agent 编排：输入需求，返回 Multi-Agent 协作结果"""
     try:
         context = request.context or {}
+        context["user_id"] = current_user.id
         # 注入 HTTP trace_id 用于端到端关联
         context["trace_id"] = http_request.headers.get("X-Trace-Id", "")
 
@@ -144,6 +145,7 @@ async def preview_plan(
     """预览 Agent 执行计划（不实际执行，只展示拆解结果）"""
     try:
         context = request.context or {}
+        context["user_id"] = current_user.id
 
         # Skill 注入
         if request.skill_id:
@@ -557,22 +559,22 @@ async def agent_stream(
                 """EventBus 回调：将事件放入队列"""
                 await evt_queue.put(event)
 
-            # 3. 提交异步任务（不传预计算计划，让 Graph 的 ManagerAgent 动态规划）
+            # 3. 先预留 task_id 并订阅，再入队，避免快速任务丢失首批事件
             plan = None
             # 注入 HTTP trace_id 到 skill_context 用于端到端关联
             if http_trace_id:
                 skill_context["trace_id"] = http_trace_id
+            task_id_str = task_queue.reserve_task_id()
+            event_bus.subscribe(task_id_str, on_event)
 
             async_task = await task_queue.enqueue(
                 prompt=user_prompt,
                 user_id=current_user.id,
                 plan=plan,
                 skill_context=skill_context if skill_context else None,
+                task_id=task_id_str,
             )
             task_id_str = async_task.id
-
-            # 4. 订阅 EventBus（在 enqueue 之后，使用正确的 task_id）
-            event_bus.subscribe(task_id_str, on_event)
 
             yield {
                 "event": "task_created",
@@ -744,7 +746,7 @@ async def crawl_url(
         content_text = crawl_result.get("output", {}).get("content", "")
         result = await orchestrator.run(
             user_request=f"分析以下从 {safe_url} 抓取的内容，提取核心观点和关键信息：\n\n{content_text[:8000]}",
-            context={"force_template": "simple"},
+            context={"force_template": "simple", "user_id": current_user.id},
             timeout=120.0,
         )
         return AgentRunResponse(

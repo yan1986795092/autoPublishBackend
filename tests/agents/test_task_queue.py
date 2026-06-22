@@ -83,6 +83,39 @@ class TestTaskQueueState:
         task = queue.get_task("nonexistent")
         assert task is None
 
+    @pytest.mark.asyncio
+    async def test_dequeue_skips_cancelled_pending_task(self, queue):
+        cancelled = await queue.enqueue(prompt="cancelled", user_id="u1")
+        active = await queue.enqueue(prompt="active", user_id="u1")
+        assert queue.cancel_task(cancelled.id) is True
+
+        task = await queue.dequeue()
+        assert task is not None
+        assert task.id == active.id
+        assert queue.get_task(cancelled.id).state == TaskState.CANCELLED
+
+    @pytest.mark.asyncio
+    async def test_retry_from_dlq_clears_stale_runtime_state(self, queue):
+        task = await queue.enqueue(prompt="test", user_id="u1")
+        task.state = TaskState.FAILED
+        task.progress = 72.0
+        task.progress_message = "old progress"
+        task.current_step = "old-step"
+        task.completed_steps = 3
+        task.result = {"content": "stale"}
+        queue._dead_letter_queue[task.id] = task
+
+        retried = await queue.retry_from_dlq(task.id)
+
+        assert retried is not None
+        assert retried.state == TaskState.PENDING
+        assert retried.progress == 0.0
+        assert retried.progress_message == ""
+        assert retried.current_step == ""
+        assert retried.completed_steps == 0
+        assert retried.result is None
+        assert retried.error is None
+
 
 class TestTaskQueueListing:
     @pytest.mark.asyncio

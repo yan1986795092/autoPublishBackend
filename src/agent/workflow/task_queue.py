@@ -140,9 +140,17 @@ class TaskQueue:
         self._progress_events: dict[str, list[asyncio.Event]] = {}
         self._dead_letter_queue: dict[str, AsyncTask] = {}
 
-    async def enqueue(self, prompt: str, user_id: str, metadata: Optional[dict] = None, plan: Optional[dict] = None, skill_context: Optional[dict] = None) -> AsyncTask:
+    async def enqueue(
+        self,
+        prompt: str,
+        user_id: str,
+        metadata: Optional[dict] = None,
+        plan: Optional[dict] = None,
+        skill_context: Optional[dict] = None,
+        task_id: Optional[str] = None,
+    ) -> AsyncTask:
         task = AsyncTask(
-            id=str(uuid.uuid4()),
+            id=task_id or str(uuid.uuid4()),
             user_id=user_id,
             prompt=prompt,
             plan=plan,
@@ -162,9 +170,19 @@ class TaskQueue:
 
     async def dequeue(self) -> Optional[AsyncTask]:
         try:
-            task = await asyncio.wait_for(self._queue.get(), timeout=30.0)
-            task.state = TaskState.RUNNING
-            return task
+            while True:
+                task = await asyncio.wait_for(self._queue.get(), timeout=30.0)
+                if task.state == TaskState.CANCELLED:
+                    logger.info(
+                        "跳过已取消任务",
+                        _type="system",
+                        event_name="task_cancelled_skip",
+                        message=f"任务 {task.id[:8]} 已取消，跳过执行",
+                        status="stopped",
+                    )
+                    continue
+                task.state = TaskState.RUNNING
+                return task
         except asyncio.TimeoutError:
             return None
 
@@ -174,6 +192,15 @@ class TaskQueue:
     def complete_task(self, task_id: str, result: dict) -> None:
         task = self._tasks.get(task_id)
         if task:
+            if task.state == TaskState.CANCELLED:
+                logger.info(
+                    "已取消任务跳过完成",
+                    _type="system",
+                    event_name="task_complete_ignored",
+                    message=f"任务 {task_id[:8]} 已取消，忽略完成结果",
+                    status="stopped",
+                )
+                return
             task.state = TaskState.COMPLETED
             task.progress = 100.0
             task.result = result
@@ -195,6 +222,15 @@ class TaskQueue:
     def fail_task(self, task_id: str, error: str) -> None:
         task = self._tasks.get(task_id)
         if task:
+            if task.state == TaskState.CANCELLED:
+                logger.info(
+                    "已取消任务跳过失败",
+                    _type="system",
+                    event_name="task_fail_ignored",
+                    message=f"任务 {task_id[:8]} 已取消，忽略失败更新",
+                    status="stopped",
+                )
+                return
             task.state = TaskState.FAILED
             task.error = error
             task.completed_at = datetime.utcnow().isoformat()
@@ -231,6 +267,8 @@ class TaskQueue:
     def update_task_progress(self, task_id: str, progress: float, message: str = "", step: str = "") -> None:
         task = self._tasks.get(task_id)
         if task:
+            if task.state == TaskState.CANCELLED:
+                return
             task.update_progress(progress, message, step)
             task.completed_steps = int(progress / 100 * task.total_steps)
             self._notify_progress(task_id)
@@ -288,12 +326,20 @@ class TaskQueue:
         task = self._dead_letter_queue.pop(task_id, None)
         if task:
             task.state = TaskState.PENDING
+            task.progress = 0.0
+            task.progress_message = ""
+            task.current_step = ""
+            task.completed_steps = 0
+            task.result = None
             task.error = None
             task.completed_at = None
             task.retry_count = (task.retry_count or 0) + 1
             self._tasks[task_id] = task
             await self._queue.put(task)
         return task
+
+    def reserve_task_id(self) -> str:
+        return str(uuid.uuid4())
 
     async def publish_thinking_step(self, task_id: str, step_data: dict) -> None:
         await self._publish_event(StreamEvent(

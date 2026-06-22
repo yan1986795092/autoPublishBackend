@@ -46,7 +46,10 @@ class _FakeSubtask:
 
 def test_run_agent_success(auth_client, monkeypatch):
     client, token = auth_client
+    captured: dict[str, object] = {}
+
     async def fake_run(**kwargs):
+        captured.update(kwargs)
         return _FakeRunResult()
 
     monkeypatch.setattr(
@@ -59,6 +62,7 @@ def test_run_agent_success(auth_client, monkeypatch):
         headers=_auth_header(token),
     )
     assert response.status_code == 200
+    assert captured["context"]["user_id"]
 
 
 def test_run_agent_no_auth(client):
@@ -284,3 +288,26 @@ def test_cache_invalidate_is_disabled(auth_client):
     client, token = auth_client
     response = client.post("/api/v1/agent/cache/invalidate", headers=_auth_header(token))
     assert response.status_code == 403
+
+
+def test_run_agent_injects_current_user_into_context(client, two_users, monkeypatch):
+    captured: dict[str, object] = {}
+
+    async def fake_run(**kwargs):
+        captured.update(kwargs)
+        return _FakeRunResult()
+
+    monkeypatch.setattr(
+        "src.agent.api._create_orchestrator",
+        lambda **kwargs: SimpleNamespace(run=fake_run),
+    )
+
+    response = client.post(
+        "/api/v1/agent/run",
+        json={"prompt": "write", "context": {"user_id": "spoofed", "custom": "value"}},
+        headers=_auth_header(two_users["token1"]),
+    )
+
+    assert response.status_code == 200
+    assert captured["context"]["user_id"] == two_users["user1"].id
+    assert captured["context"]["custom"] == "value"

@@ -58,6 +58,11 @@ def _apply_retry_strategy(skill_context: Optional[dict], attempt: int) -> tuple[
     return new_ctx, model_override
 
 
+def _is_cancelled(async_task: AsyncTask) -> bool:
+    current = task_queue.get_task(async_task.id)
+    return bool(current and current.state.value == "cancelled")
+
+
 class AgentWorker:
     """Worker: 从队列中取出任务，执行 Agent 编排"""
 
@@ -136,8 +141,15 @@ class AgentWorker:
         """执行单个异步任务，带重试逻辑"""
         last_error = ""
 
+        if _is_cancelled(async_task):
+            logger.info("任务在执行前已取消", task_id=async_task.id, _type="worker", event_name="task_cancelled_before_start")
+            return
+
         for attempt in range(self._max_retries):
             try:
+                if _is_cancelled(async_task):
+                    logger.info("任务在重试前已取消", task_id=async_task.id, _type="worker", event_name="task_cancelled_before_retry")
+                    return
                 if attempt > 0:
                     wait = min(2 ** attempt, 30)
                     logger.info(
@@ -150,6 +162,9 @@ class AgentWorker:
                         event_name="task_retry",
                     )
                     await asyncio.sleep(wait)
+                    if _is_cancelled(async_task):
+                        logger.info("任务在重试等待期间已取消", task_id=async_task.id, _type="worker", event_name="task_cancelled_during_backoff")
+                        return
 
                 task_queue.update_task_progress(
                     async_task.id, 5.0,
@@ -196,6 +211,10 @@ class AgentWorker:
                     context=context,
                 )
 
+                if _is_cancelled(async_task):
+                    logger.info("任务执行完成后检测到已取消，忽略结果", task_id=async_task.id, _type="worker", event_name="task_cancelled_after_run")
+                    return
+
                 task_queue.update_task_progress(
                     async_task.id, 90.0,
                     message="完成，正在整理结果...",
@@ -222,6 +241,9 @@ class AgentWorker:
                 )
                 # partial 结果可以继续（当达到最大重试次数时退化为 partial 完成）
                 if attempt >= self._max_retries - 1:
+                    if _is_cancelled(async_task):
+                        logger.info("任务在部分结果收尾前已取消", task_id=async_task.id, _type="worker", event_name="task_cancelled_before_partial_complete")
+                        return
                     task_queue.complete_task(async_task.id, result.to_dict())
                     save_agent_task(
                         task_id=async_task.id,
@@ -250,6 +272,9 @@ class AgentWorker:
                 last_error = str(e)
                 logger.error("任务执行错误",
                              task_id=async_task.id, attempt=attempt + 1, exc_info=True)
+                if _is_cancelled(async_task):
+                    logger.info("任务异常后检测到已取消", task_id=async_task.id, _type="worker", event_name="task_cancelled_after_error")
+                    return
                 # 网络/超时类错误可重试
                 if isinstance(e, (asyncio.TimeoutError, ConnectionError, OSError)):
                     continue
@@ -257,6 +282,10 @@ class AgentWorker:
                 if attempt < self._max_retries - 1:
                     continue
                 break
+
+        if _is_cancelled(async_task):
+            logger.info("任务在进入 DLQ 前已取消", task_id=async_task.id, _type="worker", event_name="task_cancelled_before_dlq")
+            return
 
         # 所有重试耗尽，进入死信队列
         logger.warning(
