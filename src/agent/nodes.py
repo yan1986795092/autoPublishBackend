@@ -2195,6 +2195,7 @@ def _persist_results_sync(
             completed_steps=len(state.get("completed_task_ids", [])),
             total_tokens=total_tokens,
             total_cost=estimate_cost(total_tokens, model_name),
+            model_name=model_name,
             agent_events={"events": state.get("thinking_steps", [])},
         )
 

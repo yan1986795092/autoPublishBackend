@@ -15,6 +15,20 @@ router = APIRouter(prefix="/api/v1/admin/metrics", tags=["admin"])
 _DEFAULT_MONTHLY_BUDGET = 100.0
 _ESTIMATED_COST_PER_1K = 0.015
 
+_PLATFORM_NAME_MAP: dict[str, str] = {
+    "xiaohongshu": "小红书",
+    "wechat": "微信公众号",
+    "zhihu": "知乎",
+    "bilibili": "哔哩哔哩",
+    "toutiao": "今日头条",
+    "weibo": "微博",
+    "jianshu": "简书",
+    "csdn": "CSDN",
+    "tech-doc": "技术文档",
+    "copywriting": "文案",
+    "unknown": "未知平台",
+}
+
 
 @router.get("/production")
 async def get_production_metrics(
@@ -111,8 +125,7 @@ async def get_production_metrics(
                     SELECT COUNT(*)
                     FROM contents
                     WHERE user_id = :user_id
-                      AND metadata_json IS NOT NULL
-                      AND metadata_json != ''
+                      AND is_ai_generated = TRUE
                     """
                 ),
                 {"user_id": current_user.id},
@@ -156,10 +169,14 @@ async def get_production_metrics(
             ).fetchall()
             total_platform = sum(row.cnt for row in platform_rows) or 1
             for row in platform_rows:
+                resolved_name = row.platform_name
+                # DB 中没有该平台时，platform_name 就是 code，用映射表转中文
+                if row.platform_name == row.platform:
+                    resolved_name = _PLATFORM_NAME_MAP.get(row.platform, row.platform_name)
                 data["platform_distribution"].append(
                     {
                         "platform_code": row.platform,
-                        "platform_name": row.platform_name,
+                        "platform_name": resolved_name,
                         "count": row.cnt,
                         "percentage": round(row.cnt / total_platform, 4),
                     }
@@ -259,10 +276,13 @@ async def get_publishing_metrics(
                 week_total = row.total or 0
                 week_success = row.success_count or 0
                 week_rate = round(week_success / max(week_total, 1), 4)
+                resolved_name = row.platform_name
+                if row.platform_name == row.platform_code:
+                    resolved_name = _PLATFORM_NAME_MAP.get(row.platform_code, row.platform_name)
                 data["platforms"].append(
                     {
                         "platform_code": row.platform_code,
-                        "platform_name": row.platform_name,
+                        "platform_name": resolved_name,
                         "status": "healthy" if week_rate >= 0.95 else ("degraded" if week_rate >= 0.7 else "down"),
                         "today_success": 0,
                         "today_total": 0,
@@ -324,7 +344,7 @@ async def get_publishing_metrics(
                         platform["last_failure_reason"] = row.error_message
                         break
 
-            # is_recent logic removed — system has no retry mechanism, all failures are manual
+            # 失败记录列表已移除 — 系统无重试机制，无需展示失败流
         finally:
             db.close()
     except Exception:
@@ -409,26 +429,41 @@ async def get_cost_metrics(
                     """
                     SELECT
                         DATE(created_at) as date,
+                        COALESCE(NULLIF(model_name, ''), 'unknown') as model,
                         SUM(total_tokens) as tokens,
                         SUM(total_cost) as cost
                     FROM agent_tasks
                     WHERE user_id = :user_id
                       AND status IN ('completed', 'partial')
-                    GROUP BY DATE(created_at)
+                    GROUP BY DATE(created_at), COALESCE(NULLIF(model_name, ''), 'unknown')
                     ORDER BY date ASC
-                    LIMIT 60
+                    LIMIT 600
                     """
                 ),
                 {"user_id": current_user.id},
             ).fetchall()
+
+            # 按日期聚合各模型的 token/cost
+            day_map: dict[str, dict[str, int | float]] = {}
+            for row in trend_rows:
+                day = str(row.date)
+                if day not in day_map:
+                    day_map[day] = {"tokens": 0, "cost": 0.0}
+                day_map[day]["tokens"] += row.tokens or 0
+                day_map[day]["cost"] += row.cost or 0
+
             data["token_trend"] = [
                 {
-                    "date": row.date,
-                    "models": {"all": row.tokens or 0},
-                    "total_tokens": row.tokens or 0,
-                    "total_cost": round(row.cost or 0, 4),
+                    "date": day,
+                    "models": {
+                        row.model: row.tokens or 0
+                        for row in trend_rows
+                        if str(row.date) == day
+                    },
+                    "total_tokens": day_map[day]["tokens"],
+                    "total_cost": round(day_map[day]["cost"], 4),
                 }
-                for row in trend_rows
+                for day in sorted(day_map.keys())
             ]
 
             stage_rows = db.execute(
@@ -476,32 +511,48 @@ async def get_cost_metrics(
                     """
                     SELECT
                         DATE(created_at) as date,
+                        COALESCE(NULLIF(model_name, ''), 'unknown') as model,
                         COUNT(*) as call_count,
                         SUM(total_tokens) as tokens,
                         SUM(total_cost) as cost
                     FROM agent_tasks
                     WHERE user_id = :user_id
                       AND status IN ('completed', 'partial')
-                    GROUP BY DATE(created_at)
+                    GROUP BY DATE(created_at), COALESCE(NULLIF(model_name, ''), 'unknown')
                     ORDER BY date DESC
-                    LIMIT 31
+                    LIMIT 62
                     """
                 ),
                 {"user_id": current_user.id},
             ).fetchall()
 
+            # 按日期聚合
+            detail_day_map: dict[str, dict[str, Any]] = {}
+            for row in detail_rows:
+                day = str(row.date)
+                if day not in detail_day_map:
+                    detail_day_map[day] = {"call_count": 0, "tokens": 0, "cost": 0.0, "model_costs": {}}
+                detail_day_map[day]["call_count"] += row.call_count or 0
+                detail_day_map[day]["tokens"] += row.tokens or 0
+                detail_day_map[day]["cost"] += row.cost or 0
+                model = row.model
+                if model not in detail_day_map[day]["model_costs"]:
+                    detail_day_map[day]["model_costs"][model] = 0.0
+                detail_day_map[day]["model_costs"][model] += row.cost or 0
+
             prev_cost: float | None = None
-            for row in reversed(detail_rows):
-                day_cost = round(row.cost or 0, 4)
+            for day in sorted(detail_day_map.keys(), reverse=True):
+                d = detail_day_map[day]
+                day_cost = round(d["cost"], 4)
                 change = None
                 if prev_cost is not None and prev_cost > 0:
                     change = round((day_cost - prev_cost) / prev_cost, 4)
                 data["daily_details"].append(
                     {
-                        "date": row.date,
-                        "call_count": row.call_count or 0,
-                        "total_tokens": row.tokens or 0,
-                        "model_costs": {"all": day_cost},
+                        "date": day,
+                        "call_count": d["call_count"],
+                        "total_tokens": d["tokens"],
+                        "model_costs": {k: round(v, 4) for k, v in d["model_costs"].items()},
                         "total_cost": day_cost,
                         "change_rate": change,
                     }

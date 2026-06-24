@@ -867,28 +867,8 @@ async def agent_metrics(
         if t.user_id == current_user.id and t.state.value in ("pending", "running")
     )
 
-    # 实时内存数据当前是进程级全局计数，避免向普通用户暴露跨用户活动。
-    mem = {
-        "agent_runs": {
-            "total": 0,
-            "success": 0,
-            "failed": 0,
-            "timeout": 0,
-            "success_rate": 0,
-            "p95_duration_ms": 0,
-        },
-        "llm_calls": {
-            "total": 0,
-            "errors": 0,
-            "prompt_tokens": 0,
-            "completion_tokens": 0,
-            "total_tokens": 0,
-            "p95_duration_ms": 0,
-            "by_model": {},
-            "by_provider": {},
-        },
-        "tool_calls": {},
-    }
+    # 实时内存数据（StatsCollector 聚合，同时写入 Prometheus）
+    mem = stats_collector.get_stats()
 
     # DB 持久化累计数据
     db_totals: dict[str, Any] = {

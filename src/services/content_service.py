@@ -737,6 +737,7 @@ class ContentService:
             content_html=result["content_md"].replace("\n", "<br>"),
             status=ContentStatus.DRAFT,
             metadata_json=json.dumps(request.parameters or {}),
+            is_ai_generated=True,
         )
         self.db.add(content)
         self.db.commit()
@@ -888,6 +889,7 @@ class ContentService:
                     content_html=full_content.replace("\n", "<br>"),
                     status=ContentStatus.DRAFT,
                     metadata_json=json.dumps(request.parameters or {}),
+                    is_ai_generated=True,
                 )
                 self.db.add(content)
                 self.db.commit()

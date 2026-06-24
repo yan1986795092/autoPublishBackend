@@ -97,6 +97,7 @@ def save_content_from_agent_result(
                 content_html=content_html,
                 status=ContentStatus.DRAFT,
                 tags=tags_csv,
+                is_ai_generated=True,
             )
             db.add(content)
             db.flush()  # 获取 content.id
@@ -144,6 +145,7 @@ def save_agent_task(
     completed_steps: int = 0,
     total_tokens: int = 0,
     total_cost: float = 0.0,
+    model_name: str = "",
     agent_events: Optional[dict] = None,
     conversation_id: str = "",
 ) -> None:
@@ -160,6 +162,8 @@ def save_agent_task(
                 task.total_tokens = total_tokens
                 task.total_cost = total_cost
                 task.error_message = error
+                if model_name:
+                    task.model_name = model_name
                 if result:
                     task.result_json = json.dumps(result, ensure_ascii=False)
                 if events_json:
@@ -179,6 +183,7 @@ def save_agent_task(
                     progress=progress,
                     total_tokens=total_tokens,
                     total_cost=total_cost,
+                    model_name=model_name or None,
                     result_json=json.dumps(result, ensure_ascii=False) if result else None,
                     error_message=error,
                     agent_events_json=events_json,

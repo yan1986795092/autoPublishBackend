@@ -132,3 +132,47 @@ def add_agent_tasks_conversation_id(engine) -> None:
             logger.info("Added conversation_id to agent_tasks")
     else:
         logger.info("agent_tasks already has conversation_id, skipped")
+
+
+@migration_manager.register(
+    "add_agent_tasks_model_name",
+    "向 agent_tasks 表添加 model_name 列",
+)
+def add_agent_tasks_model_name(engine) -> None:
+    inspector = inspect(engine)
+    if "agent_tasks" not in inspector.get_table_names():
+        return
+    columns = [c["name"] for c in inspector.get_columns("agent_tasks")]
+    if "model_name" not in columns:
+        with engine.connect() as conn:
+            conn.execute(
+                text("ALTER TABLE agent_tasks ADD COLUMN model_name VARCHAR(100)")
+            )
+            conn.commit()
+            logger.info("Added model_name to agent_tasks")
+    else:
+        logger.info("agent_tasks already has model_name, skipped")
+
+
+@migration_manager.register(
+    "add_contents_is_ai_generated",
+    "向 contents 表添加 is_ai_generated 列并回填 AI 生成的内容",
+)
+def add_contents_is_ai_generated(engine) -> None:
+    inspector = inspect(engine)
+    if "contents" not in inspector.get_table_names():
+        return
+    columns = [c["name"] for c in inspector.get_columns("contents")]
+    if "is_ai_generated" not in columns:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE contents ADD COLUMN is_ai_generated BOOLEAN DEFAULT FALSE"))
+            conn.execute(
+                text(
+                    "UPDATE contents SET is_ai_generated = TRUE "
+                    "WHERE metadata_json IS NOT NULL AND metadata_json != ''"
+                )
+            )
+            conn.commit()
+            logger.info("Added is_ai_generated to contents and backfilled AI content")
+    else:
+        logger.info("contents already has is_ai_generated, skipped")
