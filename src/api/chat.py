@@ -12,6 +12,7 @@ from sqlalchemy import func
 from src.database import get_db
 from src.api.auth import get_current_user
 from src.models import User, ChatConversation, ChatMessageRecord
+from src.api.chat_message_ui import build_message_ui_fields
 
 logger = logging.getLogger(__name__)
 
@@ -52,6 +53,12 @@ class MessageResponse(BaseModel):
     result: Optional[dict] = None
     task_id: Optional[str] = None
     plan: Optional[dict] = None
+    kind: Optional[str] = None
+    render_mode: Optional[str] = None
+    render_payload: Optional[dict] = None
+    is_generation: Optional[bool] = None
+    is_conversation: Optional[bool] = None
+    generation_meta: Optional[dict] = None
     created_at: str
 
     class Config:
@@ -68,6 +75,43 @@ class ConversationResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+def _build_message_response(
+    *,
+    id: str,
+    role: str,
+    content: str,
+    status: str,
+    result: Optional[dict],
+    task_id: Optional[str],
+    plan: Optional[dict],
+    created_at: str,
+) -> MessageResponse:
+    ui = build_message_ui_fields(
+        role=role,
+        status=status,
+        content=content,
+        result=result,
+        task_id=task_id,
+        plan=plan,
+    )
+    return MessageResponse(
+        id=id,
+        role=role,
+        content=content,
+        status=status,
+        result=result,
+        task_id=task_id,
+        plan=plan,
+        kind=ui["kind"],
+        render_mode=ui["render_mode"],
+        render_payload=ui["render_payload"],
+        is_generation=ui["is_generation"],
+        is_conversation=ui["is_conversation"],
+        generation_meta=ui["generation_meta"],
+        created_at=created_at,
+    )
 
 
 # ===================== 对话 API =====================
@@ -152,14 +196,16 @@ async def list_conversations(
         last_msg = last_msgs.get(conv.id)
         last_msg_response = None
         if last_msg:
-            last_msg_response = MessageResponse(
+            last_result = json.loads(last_msg.result_json) if last_msg.result_json else None
+            last_plan = json.loads(last_msg.plan_json) if last_msg.plan_json else None
+            last_msg_response = _build_message_response(
                 id=last_msg.id,
                 role=last_msg.role,
                 content=last_msg.content,
                 status=last_msg.status,
-                result=json.loads(last_msg.result_json) if last_msg.result_json else None,
+                result=last_result,
                 task_id=last_msg.task_id,
-                plan=json.loads(last_msg.plan_json) if last_msg.plan_json else None,
+                plan=last_plan,
                 created_at=last_msg.created_at.isoformat() if last_msg.created_at else "",
             )
 
@@ -231,7 +277,7 @@ async def get_conversation(
     ).order_by(ChatMessageRecord.created_at.asc()).all()
 
     message_responses = [
-        MessageResponse(
+        _build_message_response(
             id=msg.id,
             role=msg.role,
             content=msg.content,
@@ -404,7 +450,7 @@ async def update_message(
 
     return {
         "success": True,
-        "data": MessageResponse(
+        "data": _build_message_response(
             id=message.id,
             role=message.role,
             content=message.content,
@@ -476,7 +522,7 @@ async def quick_start_conversation(
         "success": True,
         "data": {
             "conversation_id": conversation.id,
-            "message": MessageResponse(
+            "message": _build_message_response(
                 id=message.id,
                 role=message.role,
                 content=message.content,

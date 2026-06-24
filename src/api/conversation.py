@@ -26,6 +26,58 @@ logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/api/v1/conversation", tags=["conversation"])
 
 
+# ===================== 辅助函数 =====================
+
+
+def _inject_revision_source(
+    trigger_data: dict,
+    conversation_id: str,
+    db: Session,
+) -> None:
+    """revise trigger 缺少 content/draft_content 时，从对话历史自动找最近正文"""
+    if trigger_data.get("content") or trigger_data.get("draft_content"):
+        return  # 已有来源，无需注入
+
+    try:
+        # 查最近一条包含实际 agent 输出的 assistant 消息（result_json 含 output 字段，
+        # 而非仅 trigger 元信息），跳过当前刚生成的 trigger 消息自身
+        candidates = (
+            db.query(ChatMessageRecord)
+            .filter(
+                ChatMessageRecord.conversation_id == conversation_id,
+                ChatMessageRecord.role == "assistant",
+                ChatMessageRecord.result_json.isnot(None),
+            )
+            .order_by(ChatMessageRecord.created_at.desc())
+            .limit(10)
+            .all()
+        )
+        for msg in candidates:
+            if not msg.result_json:
+                continue
+            try:
+                result = json.loads(msg.result_json)
+                # 跳过只有 trigger 的消息（对话引擎的 [GENERATE] 标记消息）
+                if not isinstance(result, dict) or "output" not in result:
+                    continue
+                output = result.get("output") or {}
+                full_text = output.get("full_text") or output.get("content") or ""
+                draft_text = output.get("draft_content") or ""
+                if full_text:
+                    trigger_data["content"] = full_text
+                    if draft_text:
+                        trigger_data["draft_content"] = draft_text
+                    logger.info(
+                        "revise source auto-injected (%d chars) from conversation %s",
+                        len(full_text), conversation_id,
+                    )
+                    return
+            except json.JSONDecodeError:
+                continue
+    except Exception as e:
+        logger.warning("revise source injection failed: %s", e)
+
+
 # ===================== 请求/响应模型 =====================
 
 
@@ -155,6 +207,10 @@ async def conversation_chat(
 
             # 6. 如果有 trigger，保存到 assistant 消息 result 中 + yield
             if trigger_data:
+                # 6a. revise 时自动注入最近正文/草稿作为修订来源
+                if trigger_data.get("action") == "revise":
+                    _inject_revision_source(trigger_data, conversation_id, db)
+
                 # 更新 assistant 消息的 result_json
                 asst_msg.result_json = json.dumps({
                     "trigger": trigger_data,

@@ -1450,9 +1450,26 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     except Exception as e:
                         logger.warning("流式事件发布失败", event_type=event_type, exception=str(e))
 
-                def _make_on_llm_chunk(agent: str, rr: int = 0):
+                # Agent → 内容通道映射，前端据此路由渲染（不再靠 agent 名称推测）
+                _CHANNEL_MAP: dict[str, str] = {
+                    "WritingAgent": "body",
+                    "FixAgent": "body",
+                    "ReviewAgent": "review",
+                    "JudgeAgent": "review",
+                    "CriticAgent": "review",
+                    "WebSearch": "search",
+                    "URLCrawler": "search",
+                    "HotTopicAgent": "search",
+                    "SEOAgent": "body",
+                    "CodeAgent": "body",
+                    "DiagramAgent": "body",
+                    "AnalysisAgent": "review",
+                }
+                _agent_channel = _CHANNEL_MAP.get(agent_type, "body")
+
+                def _make_on_llm_chunk(agent: str, rr: int = 0, ch: str = "body"):
                     async def _on_llm_chunk(chunk: str) -> None:
-                        data = {"agent": agent, "content": chunk, "timestamp": time.time()}
+                        data = {"agent": agent, "content": chunk, "channel": ch, "timestamp": time.time()}
                         if rr > 0:
                             data["_review_round"] = rr
                         await _safe_publish("llm_chunk", data)
@@ -1475,7 +1492,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                         except Exception:
                             pass
                     return _on_reasoning
-                t_input["_on_llm_chunk"] = _make_on_llm_chunk(agent_type, review_round)
+                t_input["_on_llm_chunk"] = _make_on_llm_chunk(agent_type, review_round, _agent_channel)
                 t_input["_on_reasoning"] = _make_on_reasoning(agent_type, review_round)
 
             # 执行 handler（带安全兜底）

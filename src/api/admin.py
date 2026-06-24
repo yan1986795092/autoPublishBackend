@@ -269,7 +269,7 @@ async def get_publishing_metrics(
                         "last_failure_time": None,
                         "last_failure_reason": None,
                         "week_success_rate": week_rate,
-                        "week_trend": week_rate - 1.0,
+                        "week_trend": 0,
                     }
                 )
 
@@ -324,43 +324,7 @@ async def get_publishing_metrics(
                         platform["last_failure_reason"] = row.error_message
                         break
 
-            one_hour_ago_dt = datetime.now(timezone.utc) - timedelta(hours=1)
-            failures = db.execute(
-                text(
-                    """
-                    SELECT pr.created_at, c.title, pr.platform_code, pr.error_message
-                    FROM publish_records pr
-                    JOIN contents c ON c.id = pr.content_id
-                    WHERE c.user_id = :user_id
-                      AND pr.status = 'failed'
-                    ORDER BY pr.created_at DESC
-                    LIMIT 20
-                    """
-                ),
-                {"user_id": current_user.id},
-            ).fetchall()
-            platform_name_map = {item["platform_code"]: item["platform_name"] for item in data["platforms"]}
-            for row in failures:
-                created_dt = row.created_at
-                try:
-                    if created_dt is None:
-                        is_recent = False
-                    elif created_dt.tzinfo is None:
-                        is_recent = created_dt.replace(tzinfo=timezone.utc) >= one_hour_ago_dt
-                    else:
-                        is_recent = created_dt >= one_hour_ago_dt
-                except Exception:
-                    is_recent = False
-                data["failures"].append(
-                    {
-                        "time": created_dt.isoformat() if hasattr(created_dt, "isoformat") else str(created_dt or ""),
-                        "content_title": row.title or "未知",
-                        "platform_code": row.platform_code,
-                        "platform_name": platform_name_map.get(row.platform_code, row.platform_code),
-                        "reason": row.error_message or "未知错误",
-                        "status": "retrying" if is_recent else "manual",
-                    }
-                )
+            # is_recent logic removed — system has no retry mechanism, all failures are manual
         finally:
             db.close()
     except Exception:
