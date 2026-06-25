@@ -127,6 +127,7 @@ def list_contents(
                     "platform_code": c.platform_code,
                     "status": c.status.value if c.status else "unknown",
                     "tags": c.tags.split(",") if c.tags else [],
+                    "content_md": (c.content_md or "")[:200],
                     "view_count": c.view_count or 0,
                     "like_count": c.like_count or 0,
                     "created_at": c.created_at.isoformat(),

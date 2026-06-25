@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import re
+import time
 from typing import AsyncGenerator
 
 from langchain_openai import ChatOpenAI
 
 from src.config import get_settings
 from src.core.model_router import ModelRouter
+from src.logging_shared.config import get_logger
+
+logger = get_logger("service.ai_editor")
 
 
 class AIEditorService:
@@ -16,6 +21,27 @@ class AIEditorService:
         self._router = router or ModelRouter()
         self._llm: ChatOpenAI = self._router.get_chat_model("AIEditorService")
         self._mock_mode = False
+
+    # ── 正文操作共用约束 ─────────────────────────────────────
+    BODY_ONLY_INSTRUCTION = (
+        "注意：标题已独立管理，不要生成或修改标题，不要使用 # 号开头的标题。"
+        "只处理正文内容，直接输出正文即可。"
+    )
+
+    @staticmethod
+    def _strip_title(text: str) -> str:
+        """移除 AI 生成的正文中可能混入的 markdown 标题安全网"""
+        lines = text.split("\n")
+        # 去掉开头的 # 标题行（最多连续 3 行）
+        while lines and re.match(r"^#+\s", lines[0]):
+            lines.pop(0)
+            # 跳过标题后的空行
+            while lines and not lines[0].strip():
+                lines.pop(0)
+        # 去掉结尾的 # 标题行
+        while lines and re.match(r"^#+\s", lines[-1]):
+            lines.pop()
+        return "\n".join(lines).strip()
 
     def _is_mock_mode(self) -> bool:
         try:
@@ -25,29 +51,55 @@ class AIEditorService:
             self._mock_mode = True
             return True
 
+    async def _call(self, prompt: str) -> dict:
+        """调用 LLM 并记录日志"""
+        t0 = time.time()
+        llm_result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        elapsed = time.time() - t0
+        tokens = llm_result.response_metadata.get("token_usage", {})
+        logger.info("ai_editor_llm_call",
+                    action="llm_call",
+                    prompt_length=len(prompt),
+                    response_length=len(llm_result.content),
+                    elapsed=round(elapsed, 3),
+                    input_tokens=tokens.get("prompt_tokens", 0),
+                    output_tokens=tokens.get("completion_tokens", 0),
+                    total_tokens=tokens.get("total_tokens", 0),
+                    )
+        return {"content": llm_result.content, "tokens": tokens}
+
     async def rewrite(self, text: str, instruction: str) -> str:
         if self._is_mock_mode():
             return "[Mock] 改写完成"
         prompt = f"""请根据以下要求改写这段文字，只返回改写后的内容，不要添加额外说明。
+
+{self.BODY_ONLY_INSTRUCTION}
 
 原文：{text}
 
 改写要求：{instruction}
 
 改写后的内容："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        return result.content
+        result = await self._call(prompt)
+        return self._strip_title(result["content"])
 
     async def expand(self, text: str) -> str:
         if self._is_mock_mode():
             return "[Mock] 扩写完成"
-        prompt = f"""请扩写以下段落，丰富细节和论证，保持风格一致。只返回扩写后的内容。
+        prompt = f"""请扩写以下内容，要求：
+
+1. 而是在正文各处展开：丰富细节、补充例子、深入论证、增加数据或场景描述
+2. 保持原文的结构和风格一致
+3. 至少将篇幅扩展到原来的 1.5-2 倍
+4. 保留所有原始信息
+
+{self.BODY_ONLY_INSTRUCTION}
 
 原文：{text}
 
-扩写后的内容："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        return result.content
+扩写后的完整内容（不要加额外说明）："""
+        result = await self._call(prompt)
+        return self._strip_title(result["content"])
 
     async def improve_tone(self, text: str, target_tone: str) -> str:
         if self._is_mock_mode():
@@ -60,22 +112,26 @@ class AIEditorService:
         desc = tone_desc.get(target_tone, target_tone)
         prompt = f"""请调整以下文字的语调，使其风格为：{desc}。只返回调整后的内容，不要添加额外说明。
 
+{self.BODY_ONLY_INSTRUCTION}
+
 原文：{text}
 
 调整后的内容："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        return result.content
+        result = await self._call(prompt)
+        return self._strip_title(result["content"])
 
     async def summarize(self, text: str) -> str:
         if self._is_mock_mode():
             return "[Mock] 这是对原文的简要总结。"
         prompt = f"""请对以下内容进行简洁总结，保留核心观点。控制在 100 字以内。只返回总结内容。
 
+{self.BODY_ONLY_INSTRUCTION}
+
 原文：{text}
 
 总结："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        return result.content
+        result = await self._call(prompt)
+        return self._strip_title(result["content"])
 
     async def translate(self, text: str, target_lang: str) -> str:
         if self._is_mock_mode():
@@ -84,11 +140,13 @@ class AIEditorService:
         name = lang_name.get(target_lang, target_lang)
         prompt = f"""请将以下文字翻译成{name}，保持原意和语气。只返回翻译结果。
 
+{self.BODY_ONLY_INSTRUCTION}
+
 原文：{text}
 
 翻译："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        return result.content
+        result = await self._call(prompt)
+        return self._strip_title(result["content"])
 
     async def suggest_tags(self, text: str) -> list[str]:
         if self._is_mock_mode():
@@ -98,8 +156,8 @@ class AIEditorService:
 内容：{text}
 
 标签："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        tags = [t.strip().lstrip("#") for t in result.content.replace("，", ",").split(",") if t.strip()]
+        result = await self._call(prompt)
+        tags = [t.strip().lstrip("#") for t in result["content"].replace("，", ",").split(",") if t.strip()]
         return tags[:5]
 
     async def generate_headlines(self, text: str, count: int = 5) -> list[str]:
@@ -112,8 +170,8 @@ class AIEditorService:
         内容：{text}
 
         标题列表："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        headlines = [line.strip().lstrip("0123456789.、. ") for line in result.content.split("\n") if line.strip()]
+        result = await self._call(prompt)
+        headlines = [line.strip().lstrip("0123456789.、. ") for line in result["content"].split("\n") if line.strip()]
         return headlines[:count]
 
     async def adapt_content(self, text: str, source_platform: str, target_platform: str) -> str:
@@ -139,14 +197,15 @@ class AIEditorService:
 - {"小红书：多用 emoji 和分段，口语化表达" if target_platform == "xiaohongshu" else ""}
 - {"微信公众号：正式专业，逻辑清晰，有章节标题" if target_platform == "wechat" else ""}
 - {"知乎：第一人称视角，有个人见解，适当引用数据" if target_platform == "zhihu" else ""}
+{self.BODY_ONLY_INSTRUCTION}
 只返回适配后的内容，不要添加额外说明。
 
 原文：
 {text}
 
 适配后的内容："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        return result.content
+        result = await self._call(prompt)
+        return self._strip_title(result["content"])
 
     async def analyze_seo(self, text: str, platform: str = "xiaohongshu") -> dict:
         if self._is_mock_mode():
@@ -181,10 +240,10 @@ class AIEditorService:
 
         内容：{text}"""
 
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        result = await self._call(prompt)
 
         try:
-            json_match = re.search(r'\{.*\}', result.content, re.DOTALL)
+            json_match = re.search(r'\{.*\}', result["content"], re.DOTALL)
             if json_match:
                 import json
                 return json.loads(json_match.group())
@@ -219,8 +278,8 @@ class AIEditorService:
 种子关键词：{seed_keywords}
 
 只返回关键词列表，每行一个，不要编号和额外说明："""
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
-        keywords = [line.strip().lstrip("0123456789.、. -") for line in result.content.split("\n") if line.strip() and len(line.strip()) > 2]
+        result = await self._call(prompt)
+        keywords = [line.strip().lstrip("0123456789.、. -") for line in result["content"].split("\n") if line.strip() and len(line.strip()) > 2]
         return keywords[:15]
 
     async def analyze_viral_potential(self, text: str) -> dict:
@@ -256,10 +315,10 @@ class AIEditorService:
 
 内容：{text}"""
 
-        result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
+        result = await self._call(prompt)
 
         try:
-            json_match = re.search(r'\{.*\}', result.content, re.DOTALL)
+            json_match = re.search(r'\{.*\}', result["content"], re.DOTALL)
             if json_match:
                 import json
                 return json.loads(json_match.group())
@@ -278,6 +337,56 @@ class AIEditorService:
             "weaknesses": ["标题吸引力有提升空间"],
             "tips": ["建议优化标题，增加互动引导"],
         }
+
+    async def check_banned_words_ai(
+        self, text: str, platform: str = "xiaohongshu"
+    ) -> dict:
+        """AI 检测平台违禁内容（含上下文理解）"""
+        if self._is_mock_mode():
+            return {"words": [], "total": 0}
+
+        PLATFORM_RULES = {
+            "xiaohongshu": "小红书社区规范：禁止医疗广告/代购/刷单/虚假宣传（如'最赚钱'等承诺收益表述）；禁止导流（微信号/QQ群）；禁止政治敏感/色情/赌博内容；禁止封建迷信。",
+            "wechat": "微信公众号规范：禁止政治敏感内容（六四/学运/法轮功等）；禁止色情/赌博/暴恐；禁止诱导分享/传销/集资；禁止荐股/内幕消息。",
+            "zhihu": "知乎社区规范：禁止政治敏感内容；禁止色情/赌博；禁止代购/刷单/传销；禁止导流行为。",
+            "douyin": "抖音社区规范：禁止政治敏感/色情/暴力内容；禁止虚假宣传/夸大功效；禁止导流行为；禁止未成年不当内容。",
+            "bilibili": "B站社区规范：禁止政治敏感/色情/暴力内容；禁止抄袭/侵权；禁止恶意引战/人身攻击。",
+        }
+
+        prompt = f"""你是一个内容安全审查专家。请检查以下内容是否违反平台发布规范。
+
+{PLATFORM_RULES.get(platform, PLATFORM_RULES['xiaohongshu'])}
+
+请逐条检查并返回所有违规项。对于每个违规项：
+1. word: 违规的具体文本片段（原样摘取）
+2. reason: 违反了什么规则
+3. suggestion: 建议的修改方案
+4. severity: "high" | "medium" | "low"
+
+如果完全合规，返回空列表。
+
+注意：
+- 不要只做关键词匹配，要理解上下文和语义
+- 夸张的营销用语（如"最好"、"第一"）也属于违规
+- 隐晦表达、谐音、变体也需识别
+
+请以 JSON 格式返回（不要添加额外说明）：
+{{"words": [{{"word": "...", "reason": "...", "suggestion": "...", "severity": "..."}}]}}
+
+内容：
+{text}"""
+
+        try:
+            result = await self._call(prompt)
+            json_match = re.search(r'\{.*\}', result["content"], re.DOTALL)
+            if json_match:
+                data = json.loads(json_match.group())
+                words = data.get("words", [])
+                return {"words": words, "total": len(words)}
+        except Exception:
+            pass
+
+        return {"words": [], "total": 0}
 
 
 ai_editor_service = AIEditorService()

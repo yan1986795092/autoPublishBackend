@@ -3,15 +3,84 @@
 from __future__ import annotations
 import re
 
-BANNED_WORDS = ["首个", "独家", "唯一", "绝对", "顶级", "百分百", "100%", "全网", "国家级", "最佳"]
+# ── 违禁词替换建议 ──
+BANNED_WORDS_SUGGESTIONS: dict[str, str] = {
+    "最赚钱": "高收益",
+    "月入过万": "稳定收入",
+    "暴利": "丰厚回报",
+    "代购": "海外购买",
+    "刷单": "提升销量",
+    "微信号": "联系方式",
+    "私聊": "进一步沟通",
+    "加我": "联系我",
+    "炒股": "投资",
+    "荐股": "投资建议",
+    "内幕消息": "行业分析",
+    "传销": "多级分销",
+    "色情": "成人内容",
+    "裸聊": "视频聊天",
+    "一夜情": "短暂关系",
+    "赌博": "博彩",
+    "赌场": "娱乐场",
+    "算命": "命理分析",
+    "改运": "转运",
+}
 
-_BANNED_PATTERNS = [
-    re.compile(r'(?:排名|销量|口碑|行业|全国|全球|全网)\s*第一'),
-    re.compile(r'第一\s*(?:品牌|名|好|大)'),
-    re.compile(r'第\s*一\s*(?:位|名)'),
-]
-for w in BANNED_WORDS:
-    _BANNED_PATTERNS.append(re.compile(re.escape(w)))
+# ── 平台敏感词库（统一词库，ReviewAgent + 编辑器共用） ──
+BANNED_WORDS: dict[str, list[str]] = {
+    "xiaohongshu": [
+        "最赚钱", "月入过万", "暴利", "刷单", "代购", "代购费",
+        "医疗器械", "处方药", "减肥药", "丰胸", "增高",
+        "微信号", "QQ群", "私聊", "加我",
+        "政治", "习近平", "天安门", "法轮功", "台独", "藏独",
+        "赌博", "赌场", "彩票技巧",
+        "封建迷信", "算命", "改运",
+    ],
+    "wechat": [
+        "政治", "习近平", "天安门", "法轮功", "台独", "藏独",
+        "六四", "学运", "暴恐", "分裂",
+        "代购", "刷单", "传销", "集资",
+        "炒股", "荐股", "内幕消息",
+        "赌博", "赌场",
+        "色情", "裸聊", "一夜情",
+        "微信号", "QQ群", "私聊", "加我",
+    ],
+    "zhihu": [
+        "政治", "习近平", "天安门", "法轮功", "台独", "藏独",
+        "六四", "学运", "暴恐", "分裂",
+        "代购", "刷单", "传销",
+        "赌博", "赌场",
+        "色情", "裸聊",
+        "微信号", "QQ群", "加我",
+    ],
+}
+
+# 通用违禁词（所有平台都检查）
+_COMMON_BANNED = ["首个", "独家", "唯一", "绝对", "顶级", "百分百", "100%", "全网", "国家级", "最佳"]
+
+def _build_banned_patterns(platform: str = "") -> list[re.Pattern]:
+    """构建当前平台的违禁词正则列表"""
+    patterns = [
+        re.compile(r'(?:排名|销量|口碑|行业|全国|全球|全网)\s*第一'),
+        re.compile(r'第一\s*(?:品牌|名|好|大)'),
+        re.compile(r'第\s*一\s*(?:位|名)'),
+    ]
+    # 通用违禁词
+    for w in _COMMON_BANNED:
+        patterns.append(re.compile(re.escape(w)))
+    # 平台特有违禁词
+    if platform and platform in BANNED_WORDS:
+        for w in BANNED_WORDS[platform]:
+            patterns.append(re.compile(re.escape(w)))
+    else:
+        # 无平台时检查所有平台
+        seen = set()
+        for words in BANNED_WORDS.values():
+            for w in words:
+                if w not in seen:
+                    seen.add(w)
+                    patterns.append(re.compile(re.escape(w)))
+    return patterns
 
 
 def extract_output(response: str) -> str:
@@ -67,16 +136,26 @@ def extract_output(response: str) -> str:
     return stripped if stripped else ""
 
 
-def check_banned_words(content: str) -> list[dict]:
-    """违禁词检查，返回匹配列表"""
+def check_banned_words(content: str, platform: str = "") -> list[dict]:
+    """违禁词检查，返回匹配列表
+
+    Args:
+        content: 待检查文本
+        platform: 目标平台（如 xiaohongshu/wechat/zhihu），为空则检查所有平台词库
+    """
+    patterns = _build_banned_patterns(platform)
     banned_found = []
     seen = set()
-    for pattern in _BANNED_PATTERNS:
+    for pattern in patterns:
         for match in pattern.finditer(content):
             word = match.group()
             if word not in seen:
                 seen.add(word)
-                banned_found.append({"word": word, "severity": "warning"})
+                suggestion = BANNED_WORDS_SUGGESTIONS.get(word, "")
+                item = {"word": word, "severity": "warning"}
+                if suggestion:
+                    item["suggestion"] = suggestion
+                banned_found.append(item)
     return banned_found
 
 

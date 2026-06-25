@@ -8,6 +8,7 @@ import asyncio
 from src.models import Content, ContentVersion, User, ContentStatus, Persona
 from src.schemas.content import GenerateRequest
 from src.utils.tokenizer import estimate_tokens
+from src.utils.evaluator import BANNED_WORDS, BANNED_WORDS_SUGGESTIONS
 from src.logging_shared.config import get_logger
 from src.core.model_router import ModelRouter
 
@@ -504,59 +505,6 @@ MOCK_BODY_TEMPLATES = {
 
 ---
 *本文为示例内容，仅供展示。*"""
-}
-
-
-# 违禁词替换建议
-BANNED_WORDS_SUGGESTIONS: dict[str, str] = {
-    "最赚钱": "高收益",
-    "月入过万": "稳定收入",
-    "暴利": "丰厚回报",
-    "代购": "海外购买",
-    "刷单": "提升销量",
-    "微信号": "联系方式",
-    "私聊": "进一步沟通",
-    "加我": "联系我",
-    "炒股": "投资",
-    "荐股": "投资建议",
-    "内幕消息": "行业分析",
-    "传销": "多级分销",
-    "色情": "成人内容",
-    "裸聊": "视频聊天",
-    "一夜情": "短暂关系",
-    "赌博": "博彩",
-    "赌场": "娱乐场",
-    "算命": "命理分析",
-    "改运": "转运",
-}
-
-# 平台敏感词库
-BANNED_WORDS: dict[str, list[str]] = {
-    "xiaohongshu": [
-        "最赚钱", "月入过万", "暴利", "刷单", "代购", "代购费",
-        "医疗器械", "处方药", "减肥药", "丰胸", "增高",
-        "微信号", "QQ群", "私聊", "加我",
-        "政治", "习近平", "天安门", "法轮功", "台独", "藏独",
-        "赌博", "赌场", "彩票技巧",
-        "封建迷信", "算命", "改运",
-    ],
-    "wechat": [
-        "政治", "习近平", "天安门", "法轮功", "台独", "藏独",
-        "六四", "学运", "暴恐", "分裂",
-        "代购", "刷单", "传销", "集资",
-        "炒股", "荐股", "内幕消息",
-        "赌博", "赌场",
-        "色情", "裸聊", "一夜情",
-        "微信号", "QQ群", "私聊", "加我",
-    ],
-    "zhihu": [
-        "政治", "习近平", "天安门", "法轮功", "台独", "藏独",
-        "六四", "学运", "暴恐", "分裂",
-        "代购", "刷单", "传销",
-        "赌博", "赌场",
-        "色情", "裸聊",
-        "微信号", "QQ群", "加我",
-    ],
 }
 
 

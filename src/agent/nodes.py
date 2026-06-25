@@ -2129,14 +2129,14 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         if 2 <= len(_clean_line) <= 60:
             _title = _clean_line
 
-        asyncio.create_task(_persist_results_async(
+        await _persist_results_async(
             state=state,
             sections=sections,
             full_text_parts=full_text_parts,
             status=status,
             title=_title,
             platform_code=plan.get("platform", "") or "",
-        ))
+        )
 
         merge_span.set_attribute("merge.status", status)
         merge_span.set_status("OK")

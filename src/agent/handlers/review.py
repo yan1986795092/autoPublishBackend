@@ -65,7 +65,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         _actx = task_input.get("_agent_context", {})
         content_type = _actx.get("content_type") or task_input.get("content_type", "general")
         platform = _actx.get("platform") or task_input.get("platform", "")
-        banned_found = check_banned_words(content) if content else []
+        banned_found = check_banned_words(content, platform) if content else []
         known_facts = task_input.get("known_facts")
 
         if not content:
@@ -110,6 +110,18 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         quality_context = ""
         if platform_quality:
             quality_context = f"\n\n**平台质量检查标准：**\n{platform_quality}"
+
+        # 违禁词检查结果 + 替换建议（注入到 prompt 让 LLM 给出修复意见）
+        if banned_found:
+            banned_section = "\n\n**违禁词检查结果（请逐条给出修改建议）：**\n"
+            for b in banned_found:
+                word = b.get("word", "")
+                suggestion = b.get("suggestion", "")
+                banned_section += f"- 「{word}」"
+                if suggestion:
+                    banned_section += f" → 建议替换为：{suggestion}"
+                banned_section += "\n"
+            quality_context += banned_section
 
         builder.instructions("review.task", {
             "content": content[:3000],
