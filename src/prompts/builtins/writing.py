@@ -69,9 +69,21 @@ templates = [
 **正文要求：**
 {type_guide}
 
-直接开始写吧，标题和正文都要。""",
-        description="写作任务指令",
-        version="2.0",
+**输出格式要求（重要）：**
+请严格按照以下 JSON 格式输出，不要包含任何其他文字或标记：
+
+{
+  "title": "文章的标题",
+  "tags": ["标签1", "标签2"],
+  "body": "完整的正文内容（包含所有格式和排版）"
+}
+
+其中：
+- title：文章的标题，简洁有力
+- tags：2-5 个标签，用中文
+- body：完整的正文内容，包含所有格式、分段、排版""",
+        description="写作任务指令（结构化 JSON 输出）",
+        version="3.0",
         role="WritingAgent",
         group="writing",
         variables=[

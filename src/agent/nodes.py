@@ -2220,10 +2220,54 @@ def _persist_results_sync(
             full_text = "".join(full_text_parts).strip()
             user_id = state.get("context", {}).get("user_id", "")
             if user_id and full_text:
+                parsed_title = title
+                parsed_tags: list[str] = []
+                parsed_body = full_text
+
+                # 优先尝试 JSON 解析（AI 按新 prompt 输出）
+                json_text = full_text
+                # 去掉 "思考：" 前缀（可选）
+                think_match = re.match(r'^思考[：:]\s*', json_text)
+                if think_match:
+                    json_text = json_text[think_match.end():].strip()
+                if json_text.startswith('{'):
+                    try:
+                        data = json.loads(json_text)
+                        if isinstance(data, dict):
+                            parsed_title = data.get("title", parsed_title)
+                            raw_tags = data.get("tags", [])
+                            if isinstance(raw_tags, list):
+                                parsed_tags = [str(t) for t in raw_tags if t]
+                            parsed_body = data.get("body", parsed_body)
+                    except (json.JSONDecodeError, TypeError):
+                        pass  # JSON 解析失败，走文本回退
+
+                # 文本回退：从正文提取 #tag 标签并剥离
+                if not parsed_tags:
+                    tag_matches = re.findall(r'#[^\s#]+', parsed_body)
+                    parsed_tags = list(dict.fromkeys(
+                        t.lstrip('#') for t in tag_matches
+                    ))
+                    # 清理正文：去掉标题行 + 去掉 #tag 标签
+                    title_skipped = False
+                    clean_lines = []
+                    for line in parsed_body.split('\n'):
+                        stripped = line.strip()
+                        if not title_skipped and stripped.startswith('# ') and len(stripped) > 2:
+                            title_skipped = True
+                            continue
+                        if re.match(r'^#[^\s#]+(\s+#[^\s#]+)*$', stripped):
+                            continue
+                        clean_line = re.sub(r'#[^\s#]+', '', line).strip()
+                        if clean_line:
+                            clean_lines.append(clean_line)
+                    parsed_body = '\n'.join(clean_lines).strip()
+
                 save_content_from_agent_result(
                     user_id=user_id,
-                    full_text=full_text,
-                    title=title,
+                    full_text=parsed_body,
+                    title=parsed_title,
+                    tags=parsed_tags,
                     topic=state.get("user_request", ""),
                     platform_code=platform_code,
                     source_task_id=task_id,

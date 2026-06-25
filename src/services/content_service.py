@@ -1,6 +1,7 @@
 from sqlalchemy.orm import Session
 from typing import Optional, AsyncGenerator
 import json
+import re
 import time
 import asyncio
 
@@ -604,16 +605,58 @@ class ContentService:
         return {"title": title, "content_md": body}
 
     def _parse_generated_content(self, content: str) -> dict:
-        """解析生成的内容，提取标题"""
-        lines = content.split("\n")
+        """解析生成的内容，提取标题和标签，从正文中剥离"""
         title = ""
-        for line in lines:
+        tags: list[str] = []
+        body = content
+
+        # 优先尝试 JSON 解析（AI 按新 prompt 输出）
+        json_text = content.strip()
+        think_match = re.match(r'^思考[：:]\s*', json_text)
+        if think_match:
+            json_text = json_text[think_match.end():].strip()
+        if json_text.startswith('{'):
+            try:
+                data = json.loads(json_text)
+                if isinstance(data, dict):
+                    title = data.get("title", "")
+                    raw_tags = data.get("tags", [])
+                    if isinstance(raw_tags, list):
+                        tags = [str(t) for t in raw_tags if t]
+                    body = data.get("body", content)
+                    return {"title": title, "content_md": body, "tags": tags}
+            except (json.JSONDecodeError, TypeError):
+                pass  # JSON 解析失败，走文本回退
+
+        # ── 文本回退：从 markdown 正文中提取 ──
+        lines = content.split("\n")
+        title_line_idx = -1
+        for i, line in enumerate(lines):
             if line.startswith("# "):
                 title = line[2:].strip()
+                title_line_idx = i
                 break
-        if not title and lines:
-            title = lines[0].strip()[:50]
-        return {"title": title, "content_md": content}
+
+        # 提取 #tag 格式的标签（排除 # Heading 这种 markdown 标题）
+        tags = list(dict.fromkeys(
+            m.lstrip('#') for m in re.findall(r'#[^\s#]+', content)
+        ))
+
+        # 从正文中剥离标题行和所有 #tag
+        clean_lines = []
+        for i, line in enumerate(lines):
+            if i == title_line_idx:
+                continue
+            stripped = line.strip()
+            tag_only = re.match(r'^#[^\s#]+(\s+#[^\s#]+)*$', stripped)
+            if tag_only:
+                continue
+            clean_line = re.sub(r'#[^\s#]+', '', line).strip()
+            if clean_line:
+                clean_lines.append(clean_line)
+
+        body = '\n'.join(clean_lines).strip()
+        return {"title": title, "content_md": body, "tags": tags}
 
     def _build_persona_desc(self, persona: Persona) -> str:
         """生成人设描述文本"""
@@ -735,6 +778,7 @@ class ContentService:
             platform_code=request.platform_code,
             content_md=result["content_md"],
             content_html=result["content_md"].replace("\n", "<br>"),
+            tags=",".join(result.get("tags", [])),
             status=ContentStatus.DRAFT,
             metadata_json=json.dumps(request.parameters or {}),
             is_ai_generated=True,
@@ -887,6 +931,7 @@ class ContentService:
                     platform_code=request.platform_code,
                     content_md=full_content,
                     content_html=full_content.replace("\n", "<br>"),
+                    tags=",".join(parsed.get("tags", [])),
                     status=ContentStatus.DRAFT,
                     metadata_json=json.dumps(request.parameters or {}),
                     is_ai_generated=True,

@@ -484,6 +484,10 @@ def autosave_content(
     if request.content_md is not None:
         content.content_md = request.content_md
         content.content_html = request.content_md.replace("\n", "<br>")
+    if request.title is not None:
+        content.title = request.title
+    if request.tags is not None:
+        content.tags = request.tags
     db.commit()
 
     return {
