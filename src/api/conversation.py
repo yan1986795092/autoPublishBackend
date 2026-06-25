@@ -174,11 +174,16 @@ async def conversation_chat(
             async for event in engine.chat(ctx):
                 if event["type"] == "text":
                     accumulated_text += event["content"]
-                    # 先不 yield text 事件——如果后面有 trigger，text 会被 text_cleanup 替换
-                    # 等循环结束后再决定 yield 什么
+                    # 流式透传 text 事件，让前端逐 token 渲染
+                    # 即使后面有 trigger，text_cleanup 会覆盖 accumulatedText，
+                    # 短暂显示原始文本（含 [GENERATE] 标记）是可接受的
+                    yield {
+                        "event": "text",
+                        "data": json.dumps({"content": event["content"]}, ensure_ascii=False),
+                    }
                 elif event["type"] == "text_cleanup":
                     accumulated_text = event["content"]
-                    # text_cleanup 只在有 trigger 时发生，此时 yield 清理后的文本
+                    # text_cleanup 只在有 trigger 时发生，此时 yield 清理后的文本替换前端内容
                     yield {
                         "event": "text_cleanup",
                         "data": json.dumps({"content": event["content"]}, ensure_ascii=False),
@@ -186,13 +191,6 @@ async def conversation_chat(
                 elif event["type"] == "trigger":
                     trigger_data = event["data"]
                     # 不在这里 yield trigger，等文本流结束后再 yield
-
-            # 4.5 没有 trigger → 把缓冲的 text 事件发给前端
-            if not trigger_data and accumulated_text:
-                yield {
-                    "event": "text_cleanup",
-                    "data": json.dumps({"content": accumulated_text}, ensure_ascii=False),
-                }
 
             # 5. 保存对话 LLM 的回复
             if accumulated_text:
