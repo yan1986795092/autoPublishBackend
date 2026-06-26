@@ -60,6 +60,8 @@ def save_content_from_agent_result(
     platform_code: str = "",
     tags: Optional[list[str]] = None,
     source_task_id: str = "",
+    content_type: str = "",
+    style: str = "",
 ) -> Optional[str]:
     """将 Agent 生成的最终正文持久化到 contents 表 + 创建 v1 版本快照。
 
@@ -83,6 +85,14 @@ def save_content_from_agent_result(
         if cleaned:
             tags_csv = ",".join(cleaned)[:500]
 
+    # metadata_json: 存平台/体裁/文体等结构化信息
+    _meta: dict[str, str] = {}
+    if content_type:
+        _meta["content_type"] = content_type
+    if style:
+        _meta["style"] = style
+    metadata_str = json.dumps(_meta, ensure_ascii=False) if _meta else ""
+
     # content_html: 简单换行转 <br>（与 contents.py 现有逻辑一致）
     content_html = full_text.replace("\n", "<br>")
 
@@ -98,6 +108,7 @@ def save_content_from_agent_result(
                 status=ContentStatus.DRAFT,
                 tags=tags_csv,
                 is_ai_generated=True,
+                metadata_json=metadata_str or None,
             )
             db.add(content)
             db.flush()  # 获取 content.id
@@ -126,7 +137,7 @@ def save_content_from_agent_result(
             db.rollback()
             logger.error(
                 "Content 创建失败",
-                error=str(e),
+                exception=str(e),
                 user_id=user_id,
                 source_task_id=source_task_id,
             )

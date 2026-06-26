@@ -13,6 +13,8 @@ class ConversationContext:
     user_id: str
     history: list[dict] = field(default_factory=list)
     user_profile: str = ""
+    platform: str = ""        # 用户已选的发布平台（如 xiaohongshu）
+    content_type: str = ""    # 用户已选的写作体裁（如 copywriting）
 
 
 @dataclass

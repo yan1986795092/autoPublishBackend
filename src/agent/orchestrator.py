@@ -214,7 +214,7 @@ class Orchestrator:
                 root_span.record_exception(e)
                 root_span.set_attribute("agent.status", "failed")
                 root_span.set_attribute("agent.error_type", type(e).__name__)
-                logger.error("图执行失败", error=str(e), exc_info=True)
+                logger.error("图执行失败", exception=e, exc_info=True)
                 record_agent_run(status="failed", skill_name=skill_name, duration_s=elapsed)
                 return AgentResult(
                     task_id=task_id,
@@ -284,7 +284,7 @@ class Orchestrator:
                 if not isinstance(understanding, dict) or "intent" not in understanding:
                     understanding = None
             except Exception as e:
-                logger.warning("编排器 LLM 理解失败", error=str(e))
+                logger.warning("编排器 LLM 理解失败", exception=str(e))
 
         if not understanding:
             understanding = _build_fallback_understanding(user_request, context)
@@ -310,7 +310,7 @@ class Orchestrator:
                 )
                 plan_dict = _parse_plan_from_response(response.content, user_request)
             except Exception as e:
-                logger.warning("编排器 LLM 规划失败", error=str(e))
+                logger.warning("编排器 LLM 规划失败", exception=str(e))
 
         if not plan_dict:
             plan_dict = _build_fallback_plan(user_request)

@@ -254,6 +254,25 @@ class ConversationEngine:
         system = SystemMessage(content=SYSTEM_PROMPT)
         messages = [system]
 
+        # 1.5 注入用户已选的平台/体裁（前端 PlatformSelector 传入）
+        # 让 LLM 知道这些信息已经确认，不要再重复询问
+        _known_parts = []
+        if ctx.platform:
+            _name = {"xiaohongshu": "小红书", "wechat": "公众号", "weibo": "微博",
+                     "douyin": "抖音", "bilibili": "B站", "zhihu": "知乎"}.get(ctx.platform, ctx.platform)
+            _known_parts.append(f"发布平台：{_name}")
+        if ctx.content_type:
+            _type_labels = {"copywriting": "产品文案", "brand-story": "品牌故事",
+                           "ad-copy": "广告文案", "fiction": "小说故事",
+                           "script": "剧本脚本", "tech-doc": "技术文档",
+                           "tutorial": "教程指南", "email": "邮件营销"}
+            _label = _type_labels.get(ctx.content_type, ctx.content_type)
+            _known_parts.append(f"写作体裁：{_label}")
+        if _known_parts:
+            messages.append(SystemMessage(content=
+                "用户已选择的配置（请基于此信息进行创作，不要再询问这些已确认的内容）：\n"
+                + "\n".join(_known_parts)))
+
         # 2. 对话历史（按 conversation_id 严格隔离）
         # 每个窗口有独立的 conversation_id → ctx.history 天然是窗口级
         for msg in ctx.history[-6:]:  # 最近 3 轮
@@ -289,6 +308,13 @@ class ConversationEngine:
         # 5. 检查触发标记
         trigger = TriggerExtractor.extract(full_text)
         has_marker = TriggerExtractor.has_marker(full_text)
+
+        # 5.0 用前端预选值覆盖 LLM 输出的标签（LLM 看到的是中文标签，不是 ID）
+        if trigger:
+            if ctx.platform:
+                trigger.platform = ctx.platform
+            if ctx.content_type:
+                trigger.style = ctx.content_type  # GenerateTrigger.style 存储体裁 ID
 
         # 5.1 越权自写检测：有 trigger 但有大量正文/元描述 → 警告并把正文部分剥离
         if trigger and TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=True):

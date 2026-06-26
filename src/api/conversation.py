@@ -84,6 +84,8 @@ def _inject_revision_source(
 class ChatRequest(BaseModel):
     message: str = Field(..., min_length=1, description="用户消息")
     conversation_id: Optional[str] = Field(None, description="对话 ID，首次不传则自动创建")
+    platform: Optional[str] = Field(None, description="用户已选的发布平台（如 xiaohongshu）")
+    content_type: Optional[str] = Field(None, description="用户已选的写作体裁（如 copywriting）")
 
 
 # ===================== 对话端点 =====================
@@ -164,6 +166,8 @@ async def conversation_chat(
                 user_id=current_user.id,
                 history=history,
                 user_profile="",
+                platform=request.platform or "",
+                content_type=request.content_type or "",
             )
 
             # 4. 调用对话引擎

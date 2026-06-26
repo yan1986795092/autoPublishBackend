@@ -2135,7 +2135,11 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             full_text_parts=full_text_parts,
             status=status,
             title=_title,
-            platform_code=plan.get("platform", "") or "",
+            platform_code=(
+                state.get("context", {}).get("platform")
+                or plan.get("platform", "")
+                or ""
+            ),
         ))
 
         merge_span.set_attribute("merge.status", status)
@@ -2152,7 +2156,11 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             "final_output": {
                 "goal": plan.get("goal", ""),
                 "plan_reasoning": plan.get("reasoning", ""),
-                "platform": plan.get("platform", ""),
+                "platform": (
+                    state.get("context", {}).get("platform")
+                    or plan.get("platform", "")
+                    or ""
+                ),
                 "title": _title,
                 "sections": sections,
                 "full_text": clean_text,
@@ -2271,6 +2279,12 @@ def _persist_results_sync(
                     topic=state.get("user_request", ""),
                     platform_code=platform_code,
                     source_task_id=task_id,
+                    content_type=(
+                        state.get("context", {}).get("content_type")
+                        or state.get("context", {}).get("style", "")
+                        or ""
+                    ),
+                    style=state.get("context", {}).get("style", ""),
                 )
     except Exception as e:
         logger.warning("持久化失败", exception=str(e))
