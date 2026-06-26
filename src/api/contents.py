@@ -103,7 +103,7 @@ def list_contents(
         tag=tag,
     )
 
-    # 全量统计（不受分页影响）
+    # 全量统计（受显式 user_id 过滤，确保 tenant 隔离）
     from src.models import ContentStatus
     from sqlalchemy import func as sa_func
     all_query = db.query(
@@ -246,9 +246,10 @@ def get_content(
     db: Session = Depends(get_db)
 ):
     """获取内容详情"""
+    # 显式 user_id 过滤（ORM hook 在某些 FastAPI 执行路径下 ContextVar 传递不可靠）
     content = db.query(Content).filter(
         Content.id == content_id,
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).first()
 
     if not content:
@@ -302,9 +303,10 @@ def update_content(
     db: Session = Depends(get_db)
 ):
     """更新内容"""
+    # 显式 user_id 过滤
     content = db.query(Content).filter(
         Content.id == content_id,
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).first()
 
     if not content:
@@ -350,9 +352,10 @@ def delete_content(
     db: Session = Depends(get_db)
 ):
     """删除内容（软删除）"""
+    # 显式 user_id 过滤
     content = db.query(Content).filter(
         Content.id == content_id,
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).first()
 
     if not content:
@@ -377,9 +380,10 @@ def batch_delete_contents(
     db: Session = Depends(get_db)
 ):
     """批量删除内容（软删除，单事务）"""
+    # 显式 user_id 过滤
     contents = db.query(Content).filter(
         Content.id.in_(request.ids),
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).all()
 
     found_ids = {c.id for c in contents}
@@ -403,9 +407,10 @@ def batch_archive_contents(
     db: Session = Depends(get_db)
 ):
     """批量归档内容（单事务）"""
+    # 显式 user_id 过滤
     contents = db.query(Content).filter(
         Content.id.in_(request.ids),
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).all()
 
     found_ids = {c.id for c in contents}
@@ -474,9 +479,10 @@ def autosave_content(
     db: Session = Depends(get_db)
 ):
     """自动保存（不创建版本快照）"""
+    # 显式 user_id 过滤
     content = db.query(Content).filter(
         Content.id == content_id,
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).first()
 
     if not content:
@@ -509,9 +515,10 @@ def check_banned_words(
     db: Session = Depends(get_db)
 ):
     """检测内容中的敏感词"""
+    # 显式 user_id 过滤
     content = db.query(Content).filter(
         Content.id == content_id,
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).first()
 
     if not content:
@@ -542,9 +549,10 @@ def diff_versions(
     db: Session = Depends(get_db)
 ):
     """对比两个版本的内容差异"""
+    # 显式 user_id 过滤
     content = db.query(Content).filter(
         Content.id == content_id,
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).first()
 
     if not content:

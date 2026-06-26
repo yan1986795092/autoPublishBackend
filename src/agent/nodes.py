@@ -574,6 +574,15 @@ async def understand_intent(state: AgentGraphState) -> dict:
             "custom.run_id": trace_id,
         },
     ) as span:
+        # ── 在 LLM 调用前发布 stage:started，让前端立即看到思考分析阶段 ──
+        await _publish_streaming_event(state, "stage", {
+            "agent": "ManagerAgent",
+            "label": "思考分析中",
+            "icon": "🧠",
+            "status": "started",
+            "timestamp": time.time(),
+        })
+
         llm = _get_llm(state, "ManagerAgent")
         understanding = None
         understanding_raw = ""
@@ -622,29 +631,31 @@ async def understand_intent(state: AgentGraphState) -> dict:
         span.set_attribute("agent.safety", str(understanding["safety"]))
         span.set_status("OK")
 
-        # Emit stage 事件
-        await _publish_streaming_event(state, "stage", {
-            "agent": "ManagerAgent",
-            "label": "思考分析中",
-            "icon": "🧠",
-            "status": "started",
-            "timestamp": time.time(),
-        })
-
-        # Emit reasoning 事件（简要总结，不发原始 JSON）
+        # Emit reasoning 事件（发送 LLM 理解分析的完整结果）
         intent_info = understanding.get("intent", {})
         slots = understanding.get("slots", {})
         platform_name = understanding.get("platform_name", "")
-        summary = f"{intent_info.get('coarse', '')}：{intent_info.get('fine', '')}"
+        safety = understanding.get("safety", True)
+        reasoning_parts = [
+            f"📋 意图分析：{intent_info.get('coarse', '')} - {intent_info.get('fine', '')}",
+        ]
         if platform_name:
-            summary += f"（平台：{platform_name}）"
+            reasoning_parts.append(f"📍 目标平台：{platform_name}")
+        if understanding.get("cleaned_prompt"):
+            reasoning_parts.append(f"💬 核心需求：{understanding['cleaned_prompt'][:100]}")
         if slots.get("tone"):
-            summary += f"，风格：{slots['tone']}"
+            reasoning_parts.append(f"🎨 写作风格：{slots['tone']}")
         if slots.get("length_hint"):
-            summary += f"，篇幅：{slots['length_hint']}"
+            reasoning_parts.append(f"📐 篇幅要求：{slots['length_hint']}")
+        if slots.get("audience"):
+            reasoning_parts.append(f"👥 目标读者：{slots['audience']}")
+        if understanding.get("language"):
+            reasoning_parts.append(f"🌐 语言：{understanding['language']}")
+        reasoning_parts.append(f"🔒 安全检查：{'✅ 通过' if safety else '❌ 未通过'}")
+        _reasoning_text = "\n".join(reasoning_parts)
         await _publish_streaming_event(state, "reasoning", {
             "agent": "ManagerAgent",
-            "content": summary,
+            "content": _reasoning_text,
             "timestamp": time.time(),
         })
 
@@ -653,6 +664,7 @@ async def understand_intent(state: AgentGraphState) -> dict:
             "status": "completed",
             "duration": time.time() - (state.get("start_time", time.time()) or time.time()),
             "timestamp": time.time(),
+            "_reasoning": _reasoning_text,  # 携带推理内容到 stage 事件
         })
 
         return updates
@@ -764,6 +776,15 @@ async def plan_tasks(state: AgentGraphState) -> dict:
             "platform_name": understanding.get("platform_name", ""),
             "language": understanding.get("language", "zh"),
         }, ensure_ascii=False, indent=2)
+
+        # ── 在 LLM 调用前发布 stage:started ──
+        await _publish_streaming_event(state, "stage", {
+            "agent": "ManagerAgent",
+            "label": "规划任务中",
+            "icon": "📋",
+            "status": "started",
+            "timestamp": time.time(),
+        })
 
         plan = None
         llm = _get_llm(state, "ManagerAgent")
@@ -891,6 +912,21 @@ Based on the above understanding, select the most appropriate agents to complete
             output_summary=f"执行计划：{plan.get('reasoning', '')[:80]}",
         ))
 
+        # Emit reasoning 事件展示任务拆解结果
+        tasks = plan.get("tasks", [])
+        reasoning_lines = [f"📋 执行计划：共 {len(tasks)} 个任务"]
+        for i, t in enumerate(tasks):
+            agent_type = t.get("agent_type", "?")
+            deps = t.get("dependencies", [])
+            dep_str = f" [依赖: {', '.join(str(d) for d in deps[:3])}]" if deps else ""
+            reasoning_lines.append(f"  {i+1}. {agent_type}{dep_str}")
+        _plan_reasoning = "\n".join(reasoning_lines)
+        await _publish_streaming_event(state, "reasoning", {
+            "agent": "ManagerAgent",
+            "content": _plan_reasoning,
+            "timestamp": time.time(),
+        })
+
         span.add_event("plan_built", {
             "task_count": len(plan.get("tasks", [])),
             "method": plan.get("plan_method", "fallback"),
@@ -899,22 +935,13 @@ Based on the above understanding, select the most appropriate agents to complete
         span.set_attribute("agent.task_count", len(plan.get("tasks", [])))
         span.set_status("OK")
 
-        # Emit stage 事件 for PlanningAgent
+        # 规划完成事件（started 已在 LLM 调用前发出）
         await _publish_streaming_event(state, "stage", {
-            "agent": "PlanningAgent",
-            "label": "任务规划中",
-            "icon": "📋",
-            "status": "started",
-            "timestamp": time.time(),
-        })
-
-        # 不 emit 硬编码 reasoning，thinking_step 已包含规划信息
-
-        await _publish_streaming_event(state, "stage", {
-            "agent": "PlanningAgent",
+            "agent": "ManagerAgent",
             "status": "completed",
             "duration": time.time() - (state.get("start_time", time.time()) or time.time()),
             "timestamp": time.time(),
+            "_reasoning": _plan_reasoning,
         })
 
         return updates

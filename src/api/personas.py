@@ -16,9 +16,8 @@ def list_personas(
     db: Session = Depends(get_db),
 ):
     """获取用户人设列表"""
-    personas = db.query(Persona).filter(
-        Persona.user_id == current_user.id,
-    ).order_by(Persona.updated_at.desc()).all()
+    # ORM Event Hook 自动按 tenant 过滤 user_id
+    personas = db.query(Persona).order_by(Persona.updated_at.desc()).all()
     return {
         "success": True,
         "data": [
@@ -71,9 +70,9 @@ def get_persona(
     db: Session = Depends(get_db),
 ):
     """获取人设详情"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     persona = db.query(Persona).filter(
         Persona.id == persona_id,
-        Persona.user_id == current_user.id,
     ).first()
     if not persona:
         from fastapi import HTTPException
@@ -101,9 +100,9 @@ def update_persona(
     db: Session = Depends(get_db),
 ):
     """更新人设"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     persona = db.query(Persona).filter(
         Persona.id == persona_id,
-        Persona.user_id == current_user.id,
     ).first()
     if not persona:
         from fastapi import HTTPException
@@ -129,9 +128,9 @@ def delete_persona(
     db: Session = Depends(get_db),
 ):
     """删除人设"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     persona = db.query(Persona).filter(
         Persona.id == persona_id,
-        Persona.user_id == current_user.id,
     ).first()
     if not persona:
         from fastapi import HTTPException

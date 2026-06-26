@@ -176,3 +176,231 @@ def add_contents_is_ai_generated(engine) -> None:
             logger.info("Added is_ai_generated to contents and backfilled AI content")
     else:
         logger.info("contents already has is_ai_generated, skipped")
+
+
+@migration_manager.register(
+    "add_conversations_is_pinned",
+    "向 chat_conversations 表添加 is_pinned 列用于置顶功能",
+)
+def add_conversations_is_pinned(engine) -> None:
+    inspector = inspect(engine)
+    if "chat_conversations" not in inspector.get_table_names():
+        return
+    columns = [c["name"] for c in inspector.get_columns("chat_conversations")]
+    if "is_pinned" not in columns:
+        with engine.connect() as conn:
+            conn.execute(text("ALTER TABLE chat_conversations ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE"))
+            conn.execute(text("CREATE INDEX IF NOT EXISTS ix_chat_conversations_pinned ON chat_conversations(is_pinned)"))
+            conn.commit()
+            logger.info("Added is_pinned to chat_conversations")
+    else:
+        logger.info("chat_conversations already has is_pinned, skipped")
+
+
+# =====================================================================
+# Phase 5: 系统模板/技能拆分
+# 把 user_id IS NULL 的数据迁移到 system_* 表，并把 user_id 改为 NOT NULL
+# =====================================================================
+
+@migration_manager.register(
+    "phase5_create_system_prompt_templates",
+    "创建 system_prompt_templates 表（系统内置提示词模板）",
+)
+def create_system_prompt_templates(engine) -> None:
+    """创建 system_prompt_templates 表"""
+    inspector = inspect(engine)
+    if "system_prompt_templates" in inspector.get_table_names():
+        logger.info("system_prompt_templates already exists, skipped")
+        return
+
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE system_prompt_templates (
+                id VARCHAR(36) PRIMARY KEY,
+                code VARCHAR(50) UNIQUE NOT NULL,
+                platform_code VARCHAR(50),
+                name VARCHAR(100) NOT NULL,
+                description TEXT,
+                system_prompt TEXT,
+                user_template TEXT,
+                variables_json TEXT,
+                model_preferred VARCHAR(50),
+                temperature FLOAT DEFAULT 0.7,
+                max_tokens INTEGER DEFAULT 2000,
+                is_active BOOLEAN DEFAULT TRUE,
+                use_count INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_system_prompt_templates_code ON system_prompt_templates(code)"))
+        conn.execute(text("CREATE INDEX ix_system_prompt_templates_platform ON system_prompt_templates(platform_code)"))
+        conn.commit()
+        logger.info("Created system_prompt_templates table")
+
+
+@migration_manager.register(
+    "phase5_create_system_skills",
+    "创建 system_skills 表（系统内置 Skill）",
+)
+def create_system_skills(engine) -> None:
+    """创建 system_skills 表"""
+    inspector = inspect(engine)
+    if "system_skills" in inspector.get_table_names():
+        logger.info("system_skills already exists, skipped")
+        return
+
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE system_skills (
+                id VARCHAR(36) PRIMARY KEY,
+                code VARCHAR(50) UNIQUE NOT NULL,
+                category VARCHAR(20) DEFAULT 'writing',
+                icon VARCHAR(10) DEFAULT '✍️',
+                author VARCHAR(100),
+                version VARCHAR(20),
+                tags VARCHAR(500),
+                is_active BOOLEAN DEFAULT TRUE,
+                use_count INTEGER DEFAULT 0,
+                name VARCHAR(100) NOT NULL,
+                description TEXT,
+                system_prompt TEXT NOT NULL,
+                user_prompt_template TEXT,
+                preset_plan_json TEXT,
+                content_types_json TEXT,
+                config_schema_json TEXT,
+                created_at TIMESTAMP DEFAULT NOW(),
+                updated_at TIMESTAMP DEFAULT NOW()
+            )
+        """))
+        conn.execute(text("CREATE INDEX ix_system_skills_code ON system_skills(code)"))
+        conn.execute(text("CREATE INDEX ix_system_skills_active ON system_skills(is_active)"))
+        conn.commit()
+        logger.info("Created system_skills table")
+
+
+@migration_manager.register(
+    "phase5_migrate_prompt_templates",
+    "把 user_id IS NULL 的 prompt_templates 迁移到 system_prompt_templates",
+)
+def migrate_prompt_templates_null_to_system(engine) -> None:
+    """迁移 prompt_templates.user_id IS NULL 的记录到 system_prompt_templates"""
+    inspector = inspect(engine)
+    if "prompt_templates" not in inspector.get_table_names():
+        return
+    if "system_prompt_templates" not in inspector.get_table_names():
+        logger.warning("system_prompt_templates not created yet, skipping migration")
+        return
+
+    with engine.connect() as conn:
+        # 查出有多少 NULL user_id
+        null_count = conn.execute(text(
+            "SELECT COUNT(*) FROM prompt_templates WHERE user_id IS NULL"
+        )).scalar()
+
+        if null_count and null_count > 0:
+            # 用 name 作为 code（如果重复则加后缀）
+            conn.execute(text("""
+                INSERT INTO system_prompt_templates (
+                    id, code, platform_code, name, description,
+                    system_prompt, user_template, variables_json,
+                    model_preferred, temperature, max_tokens,
+                    is_active, use_count, created_at, updated_at
+                )
+                SELECT
+                    id, 'migrated_' || SUBSTRING(id, 1, 8), platform_code, name, description,
+                    system_prompt, user_template, variables_json,
+                    model_preferred, temperature, max_tokens,
+                    TRUE, use_count, created_at, updated_at
+                FROM prompt_templates
+                WHERE user_id IS NULL
+            """))
+            # 删除原记录
+            conn.execute(text("DELETE FROM prompt_templates WHERE user_id IS NULL"))
+            logger.info(f"Migrated {null_count} prompt templates to system_prompt_templates")
+        else:
+            logger.info("No prompt_templates with NULL user_id, skipping migration")
+
+        conn.commit()
+
+
+@migration_manager.register(
+    "phase5_migrate_skills",
+    "把 user_id IS NULL 的 skills 迁移到 system_skills",
+)
+def migrate_skills_null_to_system(engine) -> None:
+    """迁移 skills.user_id IS NULL 的记录到 system_skills"""
+    inspector = inspect(engine)
+    if "skills" not in inspector.get_table_names():
+        return
+    if "system_skills" not in inspector.get_table_names():
+        logger.warning("system_skills not created yet, skipping migration")
+        return
+
+    with engine.connect() as conn:
+        null_count = conn.execute(text(
+            "SELECT COUNT(*) FROM skills WHERE user_id IS NULL"
+        )).scalar()
+
+        if null_count and null_count > 0:
+            conn.execute(text("""
+                INSERT INTO system_skills (
+                    id, code, category, icon, author, version, tags,
+                    is_active, use_count,
+                    name, description, system_prompt, user_prompt_template,
+                    preset_plan_json, content_types_json, config_schema_json,
+                    created_at, updated_at
+                )
+                SELECT
+                    id, 'migrated_' || SUBSTRING(id, 1, 8), category, icon, author, version, tags,
+                    is_active, use_count,
+                    name, description, system_prompt, user_prompt_template,
+                    preset_plan_json, content_types_json, config_schema_json,
+                    created_at, updated_at
+                FROM skills
+                WHERE user_id IS NULL
+            """))
+            conn.execute(text("DELETE FROM skills WHERE user_id IS NULL"))
+            logger.info(f"Migrated {null_count} skills to system_skills")
+        else:
+            logger.info("No skills with NULL user_id, skipping migration")
+
+        conn.commit()
+
+
+@migration_manager.register(
+    "phase5_set_user_id_not_null",
+    "把 prompt_templates.user_id 和 skills.user_id 改为 NOT NULL",
+)
+def set_user_id_not_null(engine) -> None:
+    """Phase 5 收尾：把 user_id 改为 NOT NULL
+
+    注意：
+      - 必须先跑 phase5_migrate_* 迁移 NULL 数据
+      - 此迁移后所有新插入必须提供 user_id
+      - ORM hook 的 before_flush 会校验
+    """
+    inspector = inspect(engine)
+    with engine.connect() as conn:
+        # PostgreSQL: ALTER COLUMN ... SET NOT NULL
+        # SQLite: 不支持 SET NOT NULL（需重建表），跳过 SQLite 场景
+        if engine.dialect.name == "postgresql":
+            for table in ("prompt_templates", "skills"):
+                if table not in inspector.get_table_names():
+                    continue
+                # 先确认没有 NULL
+                null_count = conn.execute(text(
+                    f"SELECT COUNT(*) FROM {table} WHERE user_id IS NULL"
+                )).scalar()
+                if null_count and null_count > 0:
+                    raise RuntimeError(
+                        f"[Phase 5] {table} 仍有 {null_count} 条 NULL user_id，"
+                        f"请先运行 phase5_migrate_* 迁移"
+                    )
+                conn.execute(text(
+                    f"ALTER TABLE {table} ALTER COLUMN user_id SET NOT NULL"
+                ))
+                logger.info(f"{table}.user_id -> NOT NULL")
+            conn.commit()
+        else:
+            logger.info(f"Skipping NOT NULL constraint on {engine.dialect.name} (Phase 5 仅 PostgreSQL)")

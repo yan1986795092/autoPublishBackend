@@ -84,7 +84,9 @@ class PromptTemplate(Base):
     __tablename__ = "prompt_templates"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True)
+    # Phase 5 改造：user_id 改为 nullable=False
+    # 系统模板已迁移到独立的 system_prompt_templates 表
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False)
     platform_code = Column(String(50))
     name = Column(String(100), nullable=False)
     description = Column(Text)
@@ -100,6 +102,33 @@ class PromptTemplate(Base):
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
     user = relationship("User", back_populates="templates")
+
+
+class SystemPromptTemplate(Base):
+    """系统内置提示词模板（Phase 5 新增）
+
+    与 PromptTemplate 的区别：
+      - 无 user_id 字段（所有用户共享）
+      - 由系统管理员维护，用户只读
+      - 存储在独立表，避免与个人模板混淆
+    """
+    __tablename__ = "system_prompt_templates"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    code = Column(String(50), unique=True, nullable=False, index=True)
+    platform_code = Column(String(50))
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+    system_prompt = Column(Text)
+    user_template = Column(Text)
+    variables_json = Column(Text)
+    model_preferred = Column(String(50))
+    temperature = Column(Float, default=0.7)
+    max_tokens = Column(Integer, default=2000)
+    is_active = Column(Boolean, default=True)
+    use_count = Column(Integer, default=0)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
 
 class Platform(Base):
@@ -139,6 +168,7 @@ class ChatConversation(Base):
     id = Column(String(36), primary_key=True, default=generate_uuid)
     user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
     title = Column(String(255), nullable=False, default="新对话")
+    is_pinned = Column(Boolean, default=False, index=True)  # 置顶标记
     created_at = Column(DateTime, default=func.now())
     updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
@@ -331,11 +361,14 @@ class Skill(Base):
 
     支持外部导入 SKILL.md 解析后的结构，
     用于在 Agent 执行时注入特定的 system_prompt 和 plan 配置。
+
+    Phase 5 改造：user_id 改为 nullable=False
+    系统 Skill 已迁移到独立的 SystemSkill 表。
     """
     __tablename__ = "skills"
 
     id = Column(String(36), primary_key=True, default=generate_uuid)
-    user_id = Column(String(36), ForeignKey("users.id"), nullable=True, index=True)
+    user_id = Column(String(36), ForeignKey("users.id"), nullable=False, index=True)
 
     # 元信息
     name = Column(String(100), nullable=False)
@@ -438,6 +471,43 @@ class Skill(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class SystemSkill(Base):
+    """系统内置 Skill（Phase 5 新增）
+
+    与 Skill 的区别：
+      - 无 user_id 字段（所有用户共享）
+      - 由系统管理员维护
+      - 用户只读
+    """
+    __tablename__ = "system_skills"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    code = Column(String(50), unique=True, nullable=False, index=True)
+    category = Column(SQLEnum(SkillCategory), default=SkillCategory.WRITING)
+    icon = Column(String(10), default="✍️")
+    author = Column(String(100))
+    version = Column(String(20))
+    tags = Column(String(500))          # 逗号分隔
+    is_active = Column(Boolean, default=True)
+    use_count = Column(Integer, default=0)
+
+    # 元信息
+    name = Column(String(100), nullable=False)
+    description = Column(Text)
+
+    # 执行相关
+    system_prompt = Column(Text, nullable=False)
+    user_prompt_template = Column(Text)
+    preset_plan_json = Column(Text)      # JSON
+    content_types_json = Column(Text)    # JSON
+
+    # 配置 schema
+    config_schema_json = Column(Text)
+
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
 
 class SnapshotRecord(Base):

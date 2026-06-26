@@ -41,9 +41,9 @@ def publish_content(
     db: Session = Depends(get_db)
 ):
     """发布内容到指定平台"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     content = db.query(Content).filter(
         Content.id == request.content_id,
-        Content.user_id == current_user.id
     ).first()
 
     if not content:
@@ -188,9 +188,10 @@ def get_content_publish_history(
     db: Session = Depends(get_db)
 ):
     """获取内容的所有发布记录"""
+    # 显式 user_id 过滤
     content = db.query(Content).filter(
         Content.id == content_id,
-        Content.user_id == current_user.id
+        Content.user_id == current_user.id,
     ).first()
 
     if not content:
@@ -227,9 +228,9 @@ def batch_publish(
     db: Session = Depends(get_db)
 ):
     """批量发布到多个平台"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     content = db.query(Content).filter(
         Content.id == request.content_id,
-        Content.user_id == current_user.id
     ).first()
 
     if not content:

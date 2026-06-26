@@ -20,9 +20,9 @@ def _build_auth_http_exception(detail: str) -> HTTPException:
     )
 
 
-def get_current_user(
+async def get_current_user(
     authorization: Optional[str] = Header(None, description="Bearer Token"),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
 ) -> User:
     """获取当前认证用户"""
     if not authorization or not authorization.startswith("Bearer "):

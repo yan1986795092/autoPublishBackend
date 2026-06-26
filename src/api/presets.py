@@ -18,7 +18,8 @@ def list_presets(
     db: Session = Depends(get_db),
 ):
     """获取用户预设列表"""
-    query = db.query(Preset).filter(Preset.user_id == current_user.id)
+    # ORM Event Hook 自动按 tenant 过滤 user_id
+    query = db.query(Preset)
     if platform_code:
         query = query.filter(Preset.platform_code == platform_code)
     presets = query.order_by(Preset.updated_at.desc()).all()
@@ -73,9 +74,9 @@ def get_preset(
     db: Session = Depends(get_db),
 ):
     """获取预设详情"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     preset = db.query(Preset).filter(
         Preset.id == preset_id,
-        Preset.user_id == current_user.id,
     ).first()
     if not preset:
         from fastapi import HTTPException
@@ -103,9 +104,9 @@ def update_preset(
     db: Session = Depends(get_db),
 ):
     """更新预设"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     preset = db.query(Preset).filter(
         Preset.id == preset_id,
-        Preset.user_id == current_user.id,
     ).first()
     if not preset:
         from fastapi import HTTPException
@@ -131,9 +132,9 @@ def delete_preset(
     db: Session = Depends(get_db),
 ):
     """删除预设"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     preset = db.query(Preset).filter(
         Preset.id == preset_id,
-        Preset.user_id == current_user.id,
     ).first()
     if not preset:
         from fastapi import HTTPException

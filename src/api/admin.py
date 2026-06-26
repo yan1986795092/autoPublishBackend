@@ -10,7 +10,7 @@ from src.api.auth import get_current_user
 from src.database import SessionLocal
 from src.models import User
 
-router = APIRouter(prefix="/api/v1/admin/metrics", tags=["admin"])
+router = APIRouter(prefix="/api/v1/metrics", tags=["metrics"])
 
 _DEFAULT_MONTHLY_BUDGET = 100.0
 _ESTIMATED_COST_PER_1K = 0.015
@@ -564,3 +564,46 @@ async def get_cost_metrics(
         pass
 
     return {"success": True, "data": data}
+
+
+# =====================================================================
+# 向后兼容：老路径 /api/v1/admin/metrics/* 重定向到 /api/v1/metrics/*
+# =====================================================================
+# 旧前端/外部集成临时兼容，建议在 2026-07-31 之前迁移到新路径
+# TODO: 迁移完成后删除这段
+
+from fastapi.responses import RedirectResponse
+
+
+@router.get("/_legacy_admin_alias", include_in_schema=False)
+def _legacy_admin_alias_documentation():
+    """记录 alias 路由前缀，供前端迁移参考"""
+    return {
+        "legacy_prefix": "/api/v1/admin/metrics",
+        "new_prefix": "/api/v1/metrics",
+        "endpoints": {
+            "production": {"old": "/api/v1/admin/metrics/production", "new": "/api/v1/metrics/production"},
+            "publishing": {"old": "/api/v1/admin/metrics/publishing", "new": "/api/v1/metrics/publishing"},
+            "cost": {"old": "/api/v1/admin/metrics/cost", "new": "/api/v1/metrics/cost"},
+        },
+        "deprecation_note": "老路径已重定向到新路径。建议在 2026-07-31 前完成前端迁移。",
+    }
+
+
+# 兼容旧路径的 RedirectResponse（302 临时重定向）
+legacy_admin_router = APIRouter(prefix="/api/v1/admin/metrics", include_in_schema=False)
+
+
+@legacy_admin_router.get("/production")
+def _redirect_production():
+    return RedirectResponse(url="/api/v1/metrics/production", status_code=307)
+
+
+@legacy_admin_router.get("/publishing")
+def _redirect_publishing():
+    return RedirectResponse(url="/api/v1/metrics/publishing", status_code=307)
+
+
+@legacy_admin_router.get("/cost")
+def _redirect_cost():
+    return RedirectResponse(url="/api/v1/metrics/cost", status_code=307)

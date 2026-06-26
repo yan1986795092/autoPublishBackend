@@ -120,7 +120,10 @@ async def conversation_chat(
         conversation_id = conv.id
     else:
         conv = ensure_conversation_owner(
-            db.query(ChatConversation).filter(ChatConversation.id == conversation_id).first(),
+            db.query(ChatConversation).filter(
+                ChatConversation.id == conversation_id,
+                ChatConversation.user_id == current_user.id,
+            ).first(),
             current_user,
         )
 

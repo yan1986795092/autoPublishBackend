@@ -330,9 +330,9 @@ async def get_skill(
         return {"success": True, "data": builtin}
 
     # 用户自定义/导入的 Skill 必须归属当前用户
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     skill = db.query(Skill).filter(
         Skill.id == skill_id,
-        Skill.user_id == current_user.id,
     ).first()
     if not skill:
         raise HTTPException(status_code=404, detail="Skill 不存在")
@@ -381,9 +381,9 @@ async def update_skill(
     db: Session = Depends(get_db),
 ):
     """更新 Skill"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     skill = db.query(Skill).filter(
         Skill.id == skill_id,
-        Skill.user_id == current_user.id,
         Skill.source != SkillSource.BUILTIN,
     ).first()
     if not skill:
@@ -427,9 +427,9 @@ async def delete_skill(
     db: Session = Depends(get_db),
 ):
     """删除 Skill"""
+    # ORM Event Hook 自动按 tenant 过滤 user_id
     skill = db.query(Skill).filter(
         Skill.id == skill_id,
-        Skill.user_id == current_user.id,
         Skill.source != SkillSource.BUILTIN,
     ).first()
     if not skill:
@@ -559,13 +559,12 @@ async def record_skill_use(
     db: Session = Depends(get_db),
 ):
     """记录 Skill 被使用（增加 use_count）"""
-    # 内置 Skill 无归属，查询用户的自定义/导入 Skill
+    # ORM Event Hook 自动按 tenant 过滤 user_id
+    # 内置 Skill 也计数（无 DB 记录则静默忽略计数）
     skill = db.query(Skill).filter(
         Skill.id == skill_id,
-        Skill.user_id == current_user.id,
     ).first()
     if not skill:
-        # 内置 Skill 也计数（无 DB 记录则静默忽略计数）
         if get_builtin_skill(skill_id):
             return {"success": True}
         raise HTTPException(status_code=404, detail="Skill 不存在")

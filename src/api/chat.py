@@ -7,7 +7,7 @@ from typing import Optional
 from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
-from sqlalchemy import func
+from sqlalchemy import func, desc, asc
 
 from src.database import get_db
 from src.api.auth import get_current_user
@@ -45,6 +45,11 @@ class ConversationUpdate(BaseModel):
     title: Optional[str] = None
 
 
+class ConversationPinUpdate(BaseModel):
+    """置顶更新请求"""
+    is_pinned: bool
+
+
 class MessageResponse(BaseModel):
     id: str
     role: str
@@ -68,6 +73,7 @@ class MessageResponse(BaseModel):
 class ConversationResponse(BaseModel):
     id: str
     title: str
+    is_pinned: bool = False
     created_at: str
     updated_at: str
     message_count: int = 0
@@ -125,19 +131,29 @@ async def list_conversations(
     offset: int = 0,
     q: Optional[str] = None,
 ):
-    """获取用户的对话列表（支持标题搜索）"""
-    # 防御性 limit 上限，避免一次性拖回过多数据
+    """获取用户的对话列表（支持标题搜索）
+
+    排序规则：
+    1. 置顶对话优先（按 updated_at 降序）
+    2. 非置顶对话按 updated_at 降序
+    """
+    # 显式 user_id 过滤：防止 tenant 隔离失效导致跨用户数据泄露
+    # （ORM hook 在某些 FastAPI 执行路径下 ContextVar 传递不可靠）
     limit = max(1, min(limit, 200))
     offset = max(0, offset)
 
-    query = db.query(ChatConversation).filter(
-        ChatConversation.user_id == current_user.id
-    )
+    from sqlalchemy import func
+    base_filter = ChatConversation.user_id == current_user.id
+    query = db.query(ChatConversation).filter(base_filter)
     if q:
         query = query.filter(ChatConversation.title.ilike(f"%{q}%"))
-    query = query.order_by(ChatConversation.updated_at.desc())
 
     total = query.count()
+
+    query = query.order_by(
+        desc(ChatConversation.is_pinned),
+        desc(ChatConversation.updated_at)
+    )
     conversations = query.offset(offset).limit(limit).all()
 
     if not conversations:
@@ -153,7 +169,6 @@ async def list_conversations(
 
     conv_ids = [c.id for c in conversations]
 
-    # 一次 GROUP BY 拿所有对话的 message_count，消除 N+1
     count_rows = db.query(
         ChatMessageRecord.conversation_id,
         func.count(ChatMessageRecord.id),
@@ -164,8 +179,6 @@ async def list_conversations(
     ).all()
     msg_counts: dict[str, int] = {cid: cnt for cid, cnt in count_rows}
 
-    # 一次窗口函数拿每个对话的最后一条消息（按 created_at desc 取第一条）
-    # 使用子查询 + ROW_NUMBER() 替代 per-conversation SELECT ... LIMIT 1
     latest_msg_subq = (
         db.query(
             ChatMessageRecord,
@@ -212,6 +225,7 @@ async def list_conversations(
         result.append(ConversationResponse(
             id=conv.id,
             title=conv.title,
+            is_pinned=conv.is_pinned,
             created_at=conv.created_at.isoformat() if conv.created_at else "",
             updated_at=conv.updated_at.isoformat() if conv.updated_at else "",
             message_count=msg_counts.get(conv.id, 0),
@@ -249,6 +263,7 @@ async def create_conversation(
         "data": ConversationResponse(
             id=conversation.id,
             title=conversation.title,
+            is_pinned=conversation.is_pinned,
             created_at=conversation.created_at.isoformat() if conversation.created_at else "",
             updated_at=conversation.updated_at.isoformat() if conversation.updated_at else "",
             message_count=0,
@@ -296,6 +311,7 @@ async def get_conversation(
             "conversation": ConversationResponse(
                 id=conversation.id,
                 title=conversation.title,
+                is_pinned=conversation.is_pinned,
                 created_at=conversation.created_at.isoformat() if conversation.created_at else "",
                 updated_at=conversation.updated_at.isoformat() if conversation.updated_at else "",
                 message_count=len(messages),
@@ -335,6 +351,41 @@ async def update_conversation(
         "data": ConversationResponse(
             id=conversation.id,
             title=conversation.title,
+            is_pinned=conversation.is_pinned,
+            created_at=conversation.created_at.isoformat() if conversation.created_at else "",
+            updated_at=conversation.updated_at.isoformat() if conversation.updated_at else "",
+        )
+    }
+
+
+@router.patch("/conversations/{conversation_id}/pin")
+async def pin_conversation(
+    conversation_id: str,
+    request: ConversationPinUpdate,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    """置顶/取消置顶对话"""
+    conversation = db.query(ChatConversation).filter(
+        ChatConversation.id == conversation_id,
+        ChatConversation.user_id == current_user.id,
+    ).first()
+
+    if not conversation:
+        raise HTTPException(status_code=404, detail="对话不存在")
+
+    conversation.is_pinned = request.is_pinned
+    conversation.updated_at = datetime.utcnow()
+
+    db.commit()
+    db.refresh(conversation)
+
+    return {
+        "success": True,
+        "data": ConversationResponse(
+            id=conversation.id,
+            title=conversation.title,
+            is_pinned=conversation.is_pinned,
             created_at=conversation.created_at.isoformat() if conversation.created_at else "",
             updated_at=conversation.updated_at.isoformat() if conversation.updated_at else "",
         )
@@ -499,7 +550,7 @@ async def quick_start_conversation(
 
     conversation = ChatConversation(
         user_id=current_user.id,
-        title=request.content[:30] + ("..." if len(request.content) > 30 else ""),
+        title=request.content[:30] + ("…" if len(request.content) > 30 else ""),
     )
     db.add(conversation)
     db.flush()  # 获取 conversation.id

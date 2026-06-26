@@ -18,7 +18,7 @@ from src.config import get_settings
 from src.database import engine, setup_db_logging
 from src.models import Base
 from src.api import auth, contents, publish, platforms, presets, ai_editor, personas
-from src.api.admin import router as admin_router
+from src.api.admin import router as admin_router, legacy_admin_router
 from src.api.skills import router as skills_router
 from src.api.chat import router as chat_router
 from src.api.conversation import router as conversation_router
@@ -265,6 +265,7 @@ app.include_router(presets.router, prefix="/api/v1")
 app.include_router(ai_editor.router, prefix="/api/v1")
 app.include_router(personas.router, prefix="/api/v1")
 app.include_router(admin_router)
+app.include_router(legacy_admin_router)  # 向后兼容
 app.include_router(skills_router)
 app.include_router(chat_router)
 app.include_router(conversation_router)

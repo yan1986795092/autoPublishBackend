@@ -9,6 +9,14 @@ from sqlalchemy.pool import QueuePool
 
 from src.config import get_settings
 
+# 导入租户守卫：此 import 会触发 @event.listens_for 装饰器注册
+# SQLAlchemy ORM 钩子（do_orm_execute / before_flush）
+from src.core.orm_tenant_guard import (  # noqa: F401
+    TENANT_SCOPED_MODELS,
+    inject_tenant_filter,
+    validate_tenant_on_write,
+)
+
 logger = structlog.get_logger("db")
 
 settings = get_settings()
