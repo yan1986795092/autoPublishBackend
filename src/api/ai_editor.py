@@ -17,24 +17,30 @@ router = APIRouter(prefix="/contents/ai-edit", tags=["AI 编辑"])
 class RewriteRequest(BaseModel):
     text: str
     instruction: str = ""
+    # ── P1-2: 平台感知改写，让 AI 保持小红书口语感 / 公众号深度等 DNA ──
+    platform: str | None = None
 
 
 class ExpandRequest(BaseModel):
     text: str
+    platform: str | None = None
 
 
 class ImproveToneRequest(BaseModel):
     text: str
     target_tone: str = "friendly"
+    platform: str | None = None
 
 
 class SummarizeRequest(BaseModel):
     text: str
+    platform: str | None = None
 
 
 class TranslateRequest(BaseModel):
     text: str
     target_lang: str = "en"
+    platform: str | None = None
 
 
 class CheckBannedWordsRequest(BaseModel):
@@ -54,10 +60,11 @@ async def rewrite(
                 instruction=request.instruction[:100] if request.instruction else "",
                 text_length=len(request.text))
     try:
-        result = await ai_editor_service.rewrite(request.text, request.instruction)
+        result = await ai_editor_service.rewrite(request.text, request.instruction, request.platform)
         elapsed = round(time.time() - t0, 3)
         logger.info("ai_edit_response", action=action, user=user_id,
                     status="ok", elapsed=elapsed,
+                    platform=request.platform,
                     result_length=len(result), result_preview=result)
         return {"success": True, "data": {"result": result}}
     except Exception as e:
@@ -75,11 +82,11 @@ async def expand(
     t0 = time.time()
     user_id = str(current_user.id) if hasattr(current_user, 'id') else str(current_user)
     action = "expand"
-    logger.info("ai_edit_request", action=action, user=user_id, text_length=len(request.text))
+    logger.info("ai_edit_request", action=action, user=user_id, platform=request.platform, text_length=len(request.text))
     try:
-        result = await ai_editor_service.expand(request.text)
+        result = await ai_editor_service.expand(request.text, request.platform)
         elapsed = round(time.time() - t0, 3)
-        logger.info("ai_edit_response", action=action, user=user_id, status="ok", elapsed=elapsed, result_length=len(result), result_preview=result)
+        logger.info("ai_edit_response", action=action, user=user_id, status="ok", elapsed=elapsed, platform=request.platform, result_length=len(result), result_preview=result)
         return {"success": True, "data": {"result": result}}
     except Exception as e:
         elapsed = round(time.time() - t0, 3)
@@ -95,11 +102,11 @@ async def improve_tone(
     t0 = time.time()
     user_id = str(current_user.id) if hasattr(current_user, 'id') else str(current_user)
     action = "improve_tone"
-    logger.info("ai_edit_request", action=action, user=user_id, tone=request.target_tone, text_length=len(request.text))
+    logger.info("ai_edit_request", action=action, user=user_id, tone=request.target_tone, platform=request.platform, text_length=len(request.text))
     try:
-        result = await ai_editor_service.improve_tone(request.text, request.target_tone)
+        result = await ai_editor_service.improve_tone(request.text, request.target_tone, request.platform)
         elapsed = round(time.time() - t0, 3)
-        logger.info("ai_edit_response", action=action, user=user_id, status="ok", elapsed=elapsed, result_length=len(result), result_preview=result)
+        logger.info("ai_edit_response", action=action, user=user_id, status="ok", elapsed=elapsed, platform=request.platform, result_length=len(result), result_preview=result)
         return {"success": True, "data": {"result": result}}
     except Exception as e:
         elapsed = round(time.time() - t0, 3)
@@ -113,7 +120,7 @@ async def summarize(
     current_user = Depends(get_current_user),
 ):
     try:
-        result = await ai_editor_service.summarize(request.text)
+        result = await ai_editor_service.summarize(request.text, request.platform)
         return {"success": True, "data": {"result": result}}
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -127,11 +134,11 @@ async def translate(
     t0 = time.time()
     user_id = str(current_user.id) if hasattr(current_user, 'id') else str(current_user)
     action = "translate"
-    logger.info("ai_edit_request", action=action, user=user_id, lang=request.target_lang, text_length=len(request.text))
+    logger.info("ai_edit_request", action=action, user=user_id, lang=request.target_lang, platform=request.platform, text_length=len(request.text))
     try:
-        result = await ai_editor_service.translate(request.text, request.target_lang)
+        result = await ai_editor_service.translate(request.text, request.target_lang, request.platform)
         elapsed = round(time.time() - t0, 3)
-        logger.info("ai_edit_response", action=action, user=user_id, status="ok", elapsed=elapsed, result_length=len(result), result_preview=result)
+        logger.info("ai_edit_response", action=action, user=user_id, status="ok", elapsed=elapsed, platform=request.platform, result_length=len(result), result_preview=result)
         return {"success": True, "data": {"result": result}}
     except Exception as e:
         elapsed = round(time.time() - t0, 3)

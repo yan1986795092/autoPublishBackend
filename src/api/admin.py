@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Body
 from sqlalchemy import text
 
 from src.api.auth import get_current_user
@@ -12,8 +12,7 @@ from src.models import User
 
 router = APIRouter(prefix="/api/v1/metrics", tags=["metrics"])
 
-_DEFAULT_MONTHLY_BUDGET = 100.0
-_ESTIMATED_COST_PER_1K = 0.015
+_DEFAULT_MONTHLY_BUDGET = 500.0
 
 _PLATFORM_NAME_MAP: dict[str, str] = {
     "xiaohongshu": "小红书",
@@ -30,6 +29,16 @@ _PLATFORM_NAME_MAP: dict[str, str] = {
 }
 
 
+def _resolve_name(code: str, db_name: str | None) -> str:
+    if db_name and db_name != code:
+        return db_name
+    return _PLATFORM_NAME_MAP.get(code, code)
+
+
+# ─────────────────────────────────────────────────────────────────
+# /production
+# ─────────────────────────────────────────────────────────────────
+
 @router.get("/production")
 async def get_production_metrics(
     current_user: User = Depends(get_current_user),
@@ -38,12 +47,15 @@ async def get_production_metrics(
     yesterday = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%d")
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
     two_weeks_ago = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
+    month_start = datetime.now(timezone.utc).replace(day=1).strftime("%Y-%m-%d")
 
     data: dict[str, Any] = {
         "daily": {"count": 0, "change_vs_yesterday": 0.0},
         "weekly": {"count": 0, "change_vs_last_week": 0.0},
-        "ai_generation_ratio": 0.0,
-        "avg_completion_time_min": 0.0,
+        "avg_view_count": 0,
+        "change_vs_last_week_views": 0.0,
+        "avg_engagement_rate": 0.0,
+        "avg_end_to_end_time_min": 0.0,
         "trend": [],
         "platform_distribution": [],
     }
@@ -51,136 +63,132 @@ async def get_production_metrics(
     try:
         db = SessionLocal()
         try:
-            row = db.execute(
-                text("SELECT COUNT(*) FROM contents WHERE user_id = :user_id AND DATE(created_at) = :today"),
-                {"user_id": current_user.id, "today": today},
-            ).scalar()
-            data["daily"]["count"] = row or 0
+            # ── 今日产量 ──
+            today_count = db.execute(
+                text("SELECT COUNT(*) FROM contents WHERE user_id = :uid AND DATE(created_at) = :d"),
+                {"uid": current_user.id, "d": today},
+            ).scalar() or 0
 
             yesterday_count = db.execute(
-                text("SELECT COUNT(*) FROM contents WHERE user_id = :user_id AND DATE(created_at) = :yesterday"),
-                {"user_id": current_user.id, "yesterday": yesterday},
+                text("SELECT COUNT(*) FROM contents WHERE user_id = :uid AND DATE(created_at) = :d"),
+                {"uid": current_user.id, "d": yesterday},
             ).scalar() or 0
+
+            data["daily"]["count"] = today_count
             if yesterday_count > 0:
                 data["daily"]["change_vs_yesterday"] = round(
-                    (data["daily"]["count"] - yesterday_count) / yesterday_count,
-                    4,
+                    (today_count - yesterday_count) / yesterday_count, 4,
                 )
 
+            # ── 本周总量 ──
             week_count = db.execute(
-                text("SELECT COUNT(*) FROM contents WHERE user_id = :user_id AND DATE(created_at) >= :week_ago"),
-                {"user_id": current_user.id, "week_ago": week_ago},
-            ).scalar()
-            data["weekly"]["count"] = week_count or 0
+                text("SELECT COUNT(*) FROM contents WHERE user_id = :uid AND DATE(created_at) >= :d"),
+                {"uid": current_user.id, "d": week_ago},
+            ).scalar() or 0
 
             last_week_count = db.execute(
                 text(
-                    """
-                    SELECT COUNT(*)
-                    FROM contents
-                    WHERE user_id = :user_id
-                      AND DATE(created_at) >= :two_weeks_ago
-                      AND DATE(created_at) < :week_ago
-                    """
+                    "SELECT COUNT(*) FROM contents WHERE user_id = :uid "
+                    "AND DATE(created_at) >= :d2 AND DATE(created_at) < :d1"
                 ),
-                {
-                    "user_id": current_user.id,
-                    "two_weeks_ago": two_weeks_ago,
-                    "week_ago": week_ago,
-                },
+                {"uid": current_user.id, "d2": two_weeks_ago, "d1": week_ago},
             ).scalar() or 0
+
+            data["weekly"]["count"] = week_count
             if last_week_count > 0:
                 data["weekly"]["change_vs_last_week"] = round(
-                    (data["weekly"]["count"] - last_week_count) / last_week_count,
-                    4,
+                    (week_count - last_week_count) / last_week_count, 4,
                 )
 
+            # ── 趋势图（7日/30日都用同一份数据）──
             rows = db.execute(
                 text(
-                    """
-                    SELECT DATE(created_at) as day, COUNT(*) as cnt
-                    FROM contents
-                    WHERE user_id = :user_id
-                      AND DATE(created_at) >= :week_ago
-                    GROUP BY DATE(created_at)
-                    ORDER BY day ASC
-                    """
+                    "SELECT DATE(created_at) as day, COUNT(*) as cnt "
+                    "FROM contents WHERE user_id = :uid AND DATE(created_at) >= :d "
+                    "GROUP BY DATE(created_at) ORDER BY day ASC"
                 ),
-                {"user_id": current_user.id, "week_ago": week_ago},
+                {"uid": current_user.id, "d": week_ago},
             ).fetchall()
             cumulative = 0
             for row in rows:
                 cumulative += row.cnt
-                data["trend"].append(
-                    {
-                        "date": row.day,
-                        "completed": row.cnt,
-                        "cumulative": cumulative,
-                    }
-                )
+                data["trend"].append({
+                    "date": str(row.day),
+                    "completed": row.cnt,
+                    "cumulative": cumulative,
+                })
 
-            ai_total = db.execute(
+            # ── 平台分布 ──
+            plat_rows = db.execute(
                 text(
-                    """
-                    SELECT COUNT(*)
-                    FROM contents
-                    WHERE user_id = :user_id
-                      AND is_ai_generated = TRUE
-                    """
+                    "SELECT COALESCE(c.platform_code, 'unknown') as pc, "
+                    "COALESCE(p.name, c.platform_code) as pn, COUNT(*) as cnt "
+                    "FROM contents c LEFT JOIN platforms p ON c.platform_code = p.code "
+                    "WHERE c.user_id = :uid GROUP BY c.platform_code, p.name ORDER BY cnt DESC"
                 ),
-                {"user_id": current_user.id},
-            ).scalar() or 0
-            total = db.execute(
-                text("SELECT COUNT(*) FROM contents WHERE user_id = :user_id"),
-                {"user_id": current_user.id},
-            ).scalar() or 0
-            data["ai_generation_ratio"] = round(ai_total / max(total, 1), 4)
-
-            avg_time = db.execute(
-                text(
-                    """
-                    SELECT AVG(s.time_elapsed)
-                    FROM agent_subtasks s
-                    JOIN agent_tasks t ON t.id = s.task_id
-                    WHERE t.user_id = :user_id
-                      AND s.time_elapsed > 0
-                      AND s.time_elapsed IS NOT NULL
-                    """
-                ),
-                {"user_id": current_user.id},
-            ).scalar()
-            data["avg_completion_time_min"] = round((avg_time or 0) / 60, 2)
-
-            platform_rows = db.execute(
-                text(
-                    """
-                    SELECT
-                        COALESCE(c.platform_code, 'unknown') as platform,
-                        COALESCE(p.name, c.platform_code) as platform_name,
-                        COUNT(*) as cnt
-                    FROM contents c
-                    LEFT JOIN platforms p ON c.platform_code = p.code
-                    WHERE c.user_id = :user_id
-                    GROUP BY c.platform_code, p.name
-                    ORDER BY cnt DESC
-                    """
-                ),
-                {"user_id": current_user.id},
+                {"uid": current_user.id},
             ).fetchall()
-            total_platform = sum(row.cnt for row in platform_rows) or 1
-            for row in platform_rows:
-                resolved_name = row.platform_name
-                # DB 中没有该平台时，platform_name 就是 code，用映射表转中文
-                if row.platform_name == row.platform:
-                    resolved_name = _PLATFORM_NAME_MAP.get(row.platform, row.platform_name)
-                data["platform_distribution"].append(
-                    {
-                        "platform_code": row.platform,
-                        "platform_name": resolved_name,
-                        "count": row.cnt,
-                        "percentage": round(row.cnt / total_platform, 4),
-                    }
+            total_plat = sum(r.cnt for r in plat_rows) or 1
+            for row in plat_rows:
+                data["platform_distribution"].append({
+                    "platform_code": row.pc,
+                    "platform_name": _resolve_name(row.pc, row.pn),
+                    "count": row.cnt,
+                    "percentage": round(row.cnt / total_plat, 4),
+                })
+
+            # ── 平均阅读量（本月已发布内容）──
+            row = db.execute(
+                text(
+                    "SELECT AVG(view_count) as avg_views FROM contents "
+                    "WHERE user_id = :uid AND status = 'published' "
+                    "AND DATE(created_at) >= :d"
+                ),
+                {"uid": current_user.id, "d": month_start},
+            ).scalar() or 0
+            data["avg_view_count"] = round(float(row), 1) if row else 0
+
+            # 上周平均阅读量（用于环比）
+            lw_views = db.execute(
+                text(
+                    "SELECT AVG(view_count) as avg_views FROM contents "
+                    "WHERE user_id = :uid AND status = 'published' "
+                    "AND DATE(created_at) >= :d2 AND DATE(created_at) < :d1"
+                ),
+                {"uid": current_user.id, "d2": two_weeks_ago, "d1": week_ago},
+            ).scalar() or 0
+            if lw_views and float(lw_views) > 0:
+                data["change_vs_last_week_views"] = round(
+                    (float(data["avg_view_count"]) - float(lw_views)) / float(lw_views), 4,
                 )
+
+            # ── 平均互动率（点赞+评论）/ 阅读 ──
+            eng = db.execute(
+                text(
+                    "SELECT AVG(CASE WHEN view_count > 0 "
+                    "THEN (like_count::float / view_count) ELSE 0 END) "
+                    "FROM contents WHERE user_id = :uid AND status = 'published' "
+                    "AND DATE(created_at) >= :d"
+                ),
+                {"uid": current_user.id, "d": month_start},
+            ).scalar() or 0
+            data["avg_engagement_rate"] = round(float(eng), 4) if eng else 0.0
+
+            # ── 端到端完成时长：任务创建 → 内容发布 ──
+            e2e = db.execute(
+                text(
+                    "SELECT AVG("
+                    "  EXTRACT(EPOCH FROM ("
+                    "    (SELECT COALESCE(MIN(pr.published_at), c.updated_at) FROM publish_records pr "
+                    "     WHERE pr.content_id = c.id AND pr.status = 'success') - c.created_at"
+                    "  )) / 60.0"
+                    ") FROM contents c "
+                    "WHERE c.user_id = :uid AND c.status = 'published'"
+                ),
+                {"uid": current_user.id},
+            ).scalar() or 0
+            data["avg_end_to_end_time_min"] = round(float(e2e), 1) if e2e else 0.0
+
         finally:
             db.close()
     except Exception:
@@ -189,12 +197,17 @@ async def get_production_metrics(
     return {"success": True, "data": data}
 
 
+# ─────────────────────────────────────────────────────────────────
+# /publishing
+# ─────────────────────────────────────────────────────────────────
+
 @router.get("/publishing")
 async def get_publishing_metrics(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+    two_weeks_ago = (datetime.now(timezone.utc) - timedelta(days=14)).strftime("%Y-%m-%d")
 
     data: dict[str, Any] = {
         "summary": {
@@ -205,24 +218,21 @@ async def get_publishing_metrics(
             "avg_publish_delay_seconds": 0,
         },
         "platforms": [],
-        "failures": [],
+        "recent_records": [],
     }
 
     try:
         db = SessionLocal()
         try:
+            # ── 今日发布概况 ──
             rows = db.execute(
                 text(
-                    """
-                    SELECT pr.status, COUNT(*) as cnt
-                    FROM publish_records pr
-                    JOIN contents c ON c.id = pr.content_id
-                    WHERE c.user_id = :user_id
-                      AND DATE(pr.created_at) = :today
-                    GROUP BY pr.status
-                    """
+                    "SELECT pr.status, COUNT(*) as cnt "
+                    "FROM publish_records pr JOIN contents c ON c.id = pr.content_id "
+                    "WHERE c.user_id = :uid AND DATE(pr.created_at) = :d "
+                    "GROUP BY pr.status"
                 ),
-                {"user_id": current_user.id, "today": today},
+                {"uid": current_user.id, "d": today},
             ).fetchall()
             total = 0
             for row in rows:
@@ -233,118 +243,139 @@ async def get_publishing_metrics(
                     data["summary"]["fail_count"] = row.cnt
             data["summary"]["total_today"] = total
             data["summary"]["success_rate"] = round(
-                data["summary"]["success_count"] / max(total, 1),
-                4,
+                data["summary"]["success_count"] / max(total, 1), 4,
             )
 
+            # ── 平均发布延迟 ──
             avg_delay = db.execute(
                 text(
-                    """
-                    SELECT AVG(EXTRACT(EPOCH FROM (pr.published_at - pr.created_at)))
-                    FROM publish_records pr
-                    JOIN contents c ON c.id = pr.content_id
-                    WHERE c.user_id = :user_id
-                      AND pr.status = 'success'
-                      AND pr.published_at IS NOT NULL
-                      AND pr.created_at IS NOT NULL
-                    """
+                    "SELECT AVG(EXTRACT(EPOCH FROM (pr.published_at - pr.created_at))) "
+                    "FROM publish_records pr JOIN contents c ON c.id = pr.content_id "
+                    "WHERE c.user_id = :uid AND pr.status = 'success' "
+                    "AND pr.published_at IS NOT NULL"
                 ),
-                {"user_id": current_user.id},
-            ).scalar()
-            data["summary"]["avg_publish_delay_seconds"] = round(avg_delay or 0)
+                {"uid": current_user.id},
+            ).scalar() or 0
+            data["summary"]["avg_publish_delay_seconds"] = round(float(avg_delay))
 
-            platform_rows = db.execute(
+            # ── 平台健康（近7天 + 真实周趋势）──
+            plat_rows = db.execute(
                 text(
-                    """
-                    SELECT
-                        pr.platform_code,
-                        COALESCE(p.name, pr.platform_code) as platform_name,
-                        COUNT(*) as total,
-                        SUM(CASE WHEN pr.status = 'success' THEN 1 ELSE 0 END) as success_count
-                    FROM publish_records pr
-                    JOIN contents c ON c.id = pr.content_id
-                    LEFT JOIN platforms p ON pr.platform_code = p.code
-                    WHERE c.user_id = :user_id
-                      AND DATE(pr.created_at) >= :week_ago
-                    GROUP BY pr.platform_code, p.name
-                    """
+                    "SELECT pr.platform_code, COALESCE(p.name, pr.platform_code) as pn, "
+                    "COUNT(*) as total, "
+                    "SUM(CASE WHEN pr.status = 'success' THEN 1 ELSE 0 END) as sc "
+                    "FROM publish_records pr "
+                    "JOIN contents c ON c.id = pr.content_id "
+                    "LEFT JOIN platforms p ON pr.platform_code = p.code "
+                    "WHERE c.user_id = :uid AND DATE(pr.created_at) >= :d "
+                    "GROUP BY pr.platform_code, p.name"
                 ),
-                {"user_id": current_user.id, "week_ago": week_ago},
+                {"uid": current_user.id, "d": week_ago},
             ).fetchall()
 
-            for row in platform_rows:
-                week_total = row.total or 0
-                week_success = row.success_count or 0
-                week_rate = round(week_success / max(week_total, 1), 4)
-                resolved_name = row.platform_name
-                if row.platform_name == row.platform_code:
-                    resolved_name = _PLATFORM_NAME_MAP.get(row.platform_code, row.platform_name)
-                data["platforms"].append(
-                    {
-                        "platform_code": row.platform_code,
-                        "platform_name": resolved_name,
-                        "status": "healthy" if week_rate >= 0.95 else ("degraded" if week_rate >= 0.7 else "down"),
-                        "today_success": 0,
-                        "today_total": 0,
-                        "last_failure_time": None,
-                        "last_failure_reason": None,
-                        "week_success_rate": week_rate,
-                        "week_trend": 0,
-                    }
-                )
+            for row in plat_rows:
+                w_total = row.total or 0
+                w_success = row.sc or 0
+                week_rate = round(w_success / max(w_total, 1), 4)
 
+                # 上周成功率（用于趋势计算）
+                lw_row = db.execute(
+                    text(
+                        "SELECT COUNT(*) as total, "
+                        "SUM(CASE WHEN pr.status = 'success' THEN 1 ELSE 0 END) as sc "
+                        "FROM publish_records pr "
+                        "JOIN contents c ON c.id = pr.content_id "
+                        "WHERE c.user_id = :uid AND pr.platform_code = :pc "
+                        "AND DATE(pr.created_at) >= :d2 AND DATE(pr.created_at) < :d1"
+                    ),
+                    {"uid": current_user.id, "pc": row.platform_code,
+                     "d2": two_weeks_ago, "d1": week_ago},
+                ).fetchone()
+                lw_total = lw_row.total or 0 if lw_row else 0
+                lw_success = lw_row.sc or 0 if lw_row else 0
+                lw_rate = round(lw_success / max(lw_total, 1), 4) if lw_total > 0 else None
+
+                week_trend = round(week_rate - lw_rate, 4) if lw_rate is not None else 0.0
+
+                data["platforms"].append({
+                    "platform_code": row.platform_code,
+                    "platform_name": _resolve_name(row.platform_code, row.pn),
+                    "status": "healthy" if week_rate >= 0.95 else ("degraded" if week_rate >= 0.7 else "down"),
+                    "today_success": 0,
+                    "today_total": 0,
+                    "last_failure_time": None,
+                    "last_failure_reason": None,
+                    "week_success_rate": week_rate,
+                    "week_success_count": w_success,
+                    "week_total_count": w_total,
+                    "week_trend": week_trend,
+                })
+
+            # ── 今日各平台数据 ──
             today_rows = db.execute(
                 text(
-                    """
-                    SELECT pr.platform_code,
-                           COUNT(*) as total,
-                           SUM(CASE WHEN pr.status = 'success' THEN 1 ELSE 0 END) as success_count
-                    FROM publish_records pr
-                    JOIN contents c ON c.id = pr.content_id
-                    WHERE c.user_id = :user_id
-                      AND DATE(pr.created_at) = :today
-                    GROUP BY pr.platform_code
-                    """
+                    "SELECT pr.platform_code, COUNT(*) as total, "
+                    "SUM(CASE WHEN pr.status = 'success' THEN 1 ELSE 0 END) as sc "
+                    "FROM publish_records pr JOIN contents c ON c.id = pr.content_id "
+                    "WHERE c.user_id = :uid AND DATE(pr.created_at) = :d "
+                    "GROUP BY pr.platform_code"
                 ),
-                {"user_id": current_user.id, "today": today},
+                {"uid": current_user.id, "d": today},
             ).fetchall()
-            for row in today_rows:
-                for platform in data["platforms"]:
-                    if platform["platform_code"] == row.platform_code:
-                        platform["today_success"] = row.success_count or 0
-                        platform["today_total"] = row.total or 0
-                        break
+            today_map = {r.platform_code: (r.sc or 0, r.total or 0) for r in today_rows}
+            for plat in data["platforms"]:
+                if plat["platform_code"] in today_map:
+                    plat["today_success"], plat["today_total"] = today_map[plat["platform_code"]]
 
-            last_failures = db.execute(
+            # ── 最近失败记录（用于平台卡片显示）──
+            fail_rows = db.execute(
                 text(
-                    """
-                    SELECT pr.platform_code, pr.created_at, pr.error_message
-                    FROM publish_records pr
-                    JOIN contents c ON c.id = pr.content_id
-                    WHERE c.user_id = :user_id
-                      AND pr.status = 'failed'
-                      AND pr.id IN (
-                          SELECT MAX(pr2.id)
-                          FROM publish_records pr2
-                          JOIN contents c2 ON c2.id = pr2.content_id
-                          WHERE c2.user_id = :user_id
-                            AND pr2.status = 'failed'
-                          GROUP BY pr2.platform_code
-                      )
-                    """
+                    "SELECT pr.platform_code, pr.created_at, pr.error_message "
+                    "FROM publish_records pr JOIN contents c ON c.id = pr.content_id "
+                    "WHERE c.user_id = :uid AND pr.status = 'failed' "
+                    "AND pr.id IN ("
+                    "  SELECT MAX(pr2.id) FROM publish_records pr2 "
+                    "  JOIN contents c2 ON c2.id = pr2.content_id "
+                    "  WHERE c2.user_id = :uid AND pr2.status = 'failed' "
+                    "  GROUP BY pr2.platform_code"
+                    ")"
                 ),
-                {"user_id": current_user.id},
+                {"uid": current_user.id},
             ).fetchall()
-            for row in last_failures:
-                for platform in data["platforms"]:
-                    if platform["platform_code"] == row.platform_code:
-                        platform["last_failure_time"] = (
-                            row.created_at.isoformat() if hasattr(row.created_at, "isoformat") else str(row.created_at)
-                        )
-                        platform["last_failure_reason"] = row.error_message
-                        break
+            fail_map = {r.platform_code: r for r in fail_rows}
+            for plat in data["platforms"]:
+                if plat["platform_code"] in fail_map:
+                    r = fail_map[plat["platform_code"]]
+                    ts = r.created_at
+                    plat["last_failure_time"] = ts.isoformat() if hasattr(ts, "isoformat") else str(ts)
+                    plat["last_failure_reason"] = r.error_message
 
-            # 失败记录列表已移除 — 系统无重试机制，无需展示失败流
+            # ── 最近发布记录（最近20条）──
+            recent = db.execute(
+                text(
+                    "SELECT pr.created_at, c.title, pr.platform_code, "
+                    "COALESCE(p.name, pr.platform_code) as pn, "
+                    "pr.status, c.view_count "
+                    "FROM publish_records pr "
+                    "JOIN contents c ON c.id = pr.content_id "
+                    "LEFT JOIN platforms p ON pr.platform_code = p.code "
+                    "WHERE c.user_id = :uid "
+                    "ORDER BY pr.created_at DESC LIMIT 20"
+                ),
+                {"uid": current_user.id},
+            ).fetchall()
+            data["recent_records"] = [
+                {
+                    "time": r.created_at.isoformat() if hasattr(r.created_at, "isoformat") else str(r.created_at),
+                    "title": r.title or "无标题",
+                    "platform_code": r.platform_code,
+                    "platform_name": _resolve_name(r.platform_code, r.pn),
+                    "status": r.status,
+                    "view_count": r.view_count or 0,
+                }
+                for r in recent
+            ]
+
         finally:
             db.close()
     except Exception:
@@ -353,211 +384,230 @@ async def get_publishing_metrics(
     return {"success": True, "data": data}
 
 
+# ─────────────────────────────────────────────────────────────────
+# /cost
+# ─────────────────────────────────────────────────────────────────
+
 @router.get("/cost")
 async def get_cost_metrics(
     current_user: User = Depends(get_current_user),
 ) -> dict:
     month_start = datetime.now(timezone.utc).replace(day=1).strftime("%Y-%m-%d")
+    week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+
+    budget = _DEFAULT_MONTHLY_BUDGET
 
     data: dict[str, Any] = {
         "monthly": {
-            "total_cost": 0,
-            "per_article_cost": 0,
-            "daily_avg_cost_7d": 0,
-            "budget_usage_rate": 0,
-            "monthly_budget": _DEFAULT_MONTHLY_BUDGET,
+            "total_cost": 0.0,
+            "per_article_cost": 0.0,
+            "daily_avg_cost_7d": 0.0,
+            "budget_usage_rate": 0.0,
+            "monthly_budget": budget,
         },
-        "token_trend": [],
-        "cost_by_stage": [],
+        "cost_trend": [],
+        "cost_by_model": [],
         "daily_details": [],
     }
 
     try:
         db = SessionLocal()
         try:
+            # ── 月度成本汇总 ──
             monthly = db.execute(
                 text(
-                    """
-                    SELECT
-                        COALESCE(SUM(total_tokens), 0) as total_tokens,
-                        COALESCE(SUM(total_cost), 0) as total_cost,
-                        COUNT(*) as task_count
-                    FROM agent_tasks
-                    WHERE user_id = :user_id
-                      AND DATE(created_at) >= :month_start
-                      AND status IN ('completed', 'partial')
-                    """
+                    "SELECT COALESCE(SUM(total_cost), 0) as tc, "
+                    "COALESCE(SUM(total_tokens), 0) as tt, COUNT(*) as cnt "
+                    "FROM agent_tasks WHERE user_id = :uid "
+                    "AND DATE(created_at) >= :d "
+                    "AND status IN ('completed', 'partial')"
                 ),
-                {"user_id": current_user.id, "month_start": month_start},
+                {"uid": current_user.id, "d": month_start},
             ).one()
 
-            total_cost = monthly.total_cost or 0
-            total_tokens = monthly.total_tokens or 0
+            total_cost = float(monthly.tc) if monthly else 0.0
 
-            if total_cost == 0 and total_tokens > 0:
-                total_cost = round(total_tokens / 1000 * _ESTIMATED_COST_PER_1K, 2)
+            # ── 发布量（用于单篇均摊）──
+            pub_count = db.execute(
+                text(
+                    "SELECT COUNT(*) FROM publish_records pr "
+                    "JOIN contents c ON c.id = pr.content_id "
+                    "WHERE c.user_id = :uid AND pr.status = 'success' "
+                    "AND DATE(pr.created_at) >= :d"
+                ),
+                {"uid": current_user.id, "d": month_start},
+            ).scalar() or 0
 
-            week_ago = (datetime.now(timezone.utc) - timedelta(days=7)).strftime("%Y-%m-%d")
+            # ── 近7日日均 ──
             week_cost = db.execute(
                 text(
-                    """
-                    SELECT COALESCE(SUM(total_cost), 0)
-                    FROM agent_tasks
-                    WHERE user_id = :user_id
-                      AND DATE(created_at) >= :week_ago
-                      AND status IN ('completed', 'partial')
-                    """
+                    "SELECT COALESCE(SUM(total_cost), 0) FROM agent_tasks "
+                    "WHERE user_id = :uid AND DATE(created_at) >= :d "
+                    "AND status IN ('completed', 'partial')"
                 ),
-                {"user_id": current_user.id, "week_ago": week_ago},
+                {"uid": current_user.id, "d": week_ago},
             ).scalar() or 0
 
-            total_contents = db.execute(
-                text("SELECT COUNT(*) FROM contents WHERE user_id = :user_id"),
-                {"user_id": current_user.id},
-            ).scalar() or 0
+            data["monthly"]["total_cost"] = round(total_cost, 2)
+            data["monthly"]["per_article_cost"] = round(total_cost / max(pub_count, 1), 4)
+            data["monthly"]["daily_avg_cost_7d"] = round(float(week_cost) / 7, 2)
+            data["monthly"]["budget_usage_rate"] = round(min(1.0, total_cost / max(budget, 1)), 4)
 
-            data["monthly"] = {
-                "total_cost": round(total_cost, 4),
-                "per_article_cost": round(total_cost / max(total_contents, 1), 4),
-                "daily_avg_cost_7d": round(week_cost / 7, 4),
-                "budget_usage_rate": round(min(1.0, total_cost / max(_DEFAULT_MONTHLY_BUDGET, 1)), 4),
-                "monthly_budget": _DEFAULT_MONTHLY_BUDGET,
-            }
-
+            # ── 费用趋势（按日期 × 模型，Y轴=金额）──
             trend_rows = db.execute(
                 text(
-                    """
-                    SELECT
-                        DATE(created_at) as date,
-                        COALESCE(NULLIF(model_name, ''), 'unknown') as model,
-                        SUM(total_tokens) as tokens,
-                        SUM(total_cost) as cost
-                    FROM agent_tasks
-                    WHERE user_id = :user_id
-                      AND status IN ('completed', 'partial')
-                    GROUP BY DATE(created_at), COALESCE(NULLIF(model_name, ''), 'unknown')
-                    ORDER BY date ASC
-                    LIMIT 600
-                    """
+                    "SELECT DATE(created_at) as day, "
+                    "COALESCE(NULLIF(model_name, ''), 'unknown') as model, "
+                    "SUM(total_cost) as cost "
+                    "FROM agent_tasks WHERE user_id = :uid "
+                    "AND status IN ('completed', 'partial') "
+                    "GROUP BY DATE(created_at), COALESCE(NULLIF(model_name, ''), 'unknown') "
+                    "ORDER BY day ASC LIMIT 600"
                 ),
-                {"user_id": current_user.id},
+                {"uid": current_user.id},
             ).fetchall()
 
-            # 按日期聚合各模型的 token/cost
-            day_map: dict[str, dict[str, int | float]] = {}
+            day_map: dict[str, dict[str, float]] = {}
             for row in trend_rows:
-                day = str(row.date)
+                day = str(row.day)
                 if day not in day_map:
-                    day_map[day] = {"tokens": 0, "cost": 0.0}
-                day_map[day]["tokens"] += row.tokens or 0
-                day_map[day]["cost"] += row.cost or 0
+                    day_map[day] = {}
+                day_map[day][row.model] = round(float(row.cost or 0), 4)
 
-            data["token_trend"] = [
+            data["cost_trend"] = [
                 {
                     "date": day,
-                    "models": {
-                        row.model: row.tokens or 0
-                        for row in trend_rows
-                        if str(row.date) == day
-                    },
-                    "total_tokens": day_map[day]["tokens"],
-                    "total_cost": round(day_map[day]["cost"], 4),
+                    "models": models,
+                    "total_cost": round(sum(models.values()), 2),
                 }
-                for day in sorted(day_map.keys())
+                for day, models in sorted(day_map.items())
             ]
 
-            stage_rows = db.execute(
-                text(
-                    """
-                    SELECT
-                        s.agent_type,
-                        SUM(s.tokens_used) as total_tokens,
-                        SUM(s.time_elapsed) as total_time
-                    FROM agent_subtasks s
-                    JOIN agent_tasks t ON t.id = s.task_id
-                    WHERE t.user_id = :user_id
-                    GROUP BY s.agent_type
-                    ORDER BY total_tokens DESC
-                    """
-                ),
-                {"user_id": current_user.id},
-            ).fetchall()
-            total_stage_tokens = sum(row.total_tokens or 0 for row in stage_rows) or 1
-            stage_names = {
-                "WritingAgent": "内容创作",
-                "SEOAgent": "SEO 优化",
-                "ReviewAgent": "质量审核",
-                "ManagerAgent": "任务编排",
-                "RewriteAgent": "内容改写",
-                "TranslationAgent": "翻译",
-                "FactCheckAgent": "事实核查",
-                "ResearchAgent": "调研",
-                "HotTopicAgent": "热点分析",
-            }
-            for row in stage_rows:
-                if not row.agent_type or (row.total_tokens or 0) == 0:
-                    continue
-                ratio = (row.total_tokens or 0) / total_stage_tokens
-                data["cost_by_stage"].append(
-                    {
-                        "stage": stage_names.get(row.agent_type, row.agent_type),
-                        "cost": round(total_cost * ratio, 4),
-                        "percentage": round(ratio, 4),
-                    }
-                )
+            # ── 各模型费用占比 ──
+            model_totals: dict[str, float] = {}
+            for row in trend_rows:
+                model_totals[row.model] = model_totals.get(row.model, 0) + float(row.cost or 0)
+            total_model_cost = sum(model_totals.values()) or 1.0
+            for model, cost in sorted(model_totals.items(), key=lambda x: -x[1]):
+                data["cost_by_model"].append({
+                    "model": model,
+                    "cost": round(cost, 2),
+                    "percentage": round(cost / total_model_cost, 4),
+                })
 
+            # ── 每日成本明细 ──
             detail_rows = db.execute(
                 text(
-                    """
-                    SELECT
-                        DATE(created_at) as date,
-                        COALESCE(NULLIF(model_name, ''), 'unknown') as model,
-                        COUNT(*) as call_count,
-                        SUM(total_tokens) as tokens,
-                        SUM(total_cost) as cost
-                    FROM agent_tasks
-                    WHERE user_id = :user_id
-                      AND status IN ('completed', 'partial')
-                    GROUP BY DATE(created_at), COALESCE(NULLIF(model_name, ''), 'unknown')
-                    ORDER BY date DESC
-                    LIMIT 62
-                    """
+                    "SELECT DATE(created_at) as day, COUNT(*) as call_count, "
+                    "SUM(total_cost) as cost "
+                    "FROM agent_tasks WHERE user_id = :uid "
+                    "AND status IN ('completed', 'partial') "
+                    "GROUP BY DATE(created_at) ORDER BY day DESC LIMIT 62"
                 ),
-                {"user_id": current_user.id},
+                {"uid": current_user.id},
             ).fetchall()
 
-            # 按日期聚合
-            detail_day_map: dict[str, dict[str, Any]] = {}
-            for row in detail_rows:
-                day = str(row.date)
-                if day not in detail_day_map:
-                    detail_day_map[day] = {"call_count": 0, "tokens": 0, "cost": 0.0, "model_costs": {}}
-                detail_day_map[day]["call_count"] += row.call_count or 0
-                detail_day_map[day]["tokens"] += row.tokens or 0
-                detail_day_map[day]["cost"] += row.cost or 0
-                model = row.model
-                if model not in detail_day_map[day]["model_costs"]:
-                    detail_day_map[day]["model_costs"][model] = 0.0
-                detail_day_map[day]["model_costs"][model] += row.cost or 0
-
             prev_cost: float | None = None
-            for day in sorted(detail_day_map.keys(), reverse=True):
-                d = detail_day_map[day]
-                day_cost = round(d["cost"], 4)
+            for row in sorted(detail_rows, key=lambda r: str(r.day)):
+                day_cost = round(float(row.cost or 0), 2)
                 change = None
                 if prev_cost is not None and prev_cost > 0:
                     change = round((day_cost - prev_cost) / prev_cost, 4)
-                data["daily_details"].append(
-                    {
-                        "date": day,
-                        "call_count": d["call_count"],
-                        "total_tokens": d["tokens"],
-                        "model_costs": {k: round(v, 4) for k, v in d["model_costs"].items()},
-                        "total_cost": day_cost,
-                        "change_rate": change,
-                    }
-                )
+                data["daily_details"].append({
+                    "date": str(row.day),
+                    "call_count": row.call_count or 0,
+                    "total_cost": day_cost,
+                    "change_rate": change,
+                })
                 prev_cost = day_cost
+
+        finally:
+            db.close()
+    except Exception:
+        pass
+
+    return {"success": True, "data": data}
+
+
+@router.patch("/budget")
+async def set_monthly_budget(
+    budget: float = Body(..., ge=0, le=100000),
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    return {"success": True, "data": {"monthly_budget": budget}}
+
+
+# ─────────────────────────────────────────────────────────────────
+# /system
+# ─────────────────────────────────────────────────────────────────
+
+@router.get("/system")
+async def get_system_metrics(
+    current_user: User = Depends(get_current_user),
+) -> dict:
+    data: dict[str, Any] = {
+        "worker": {"running": False},
+        "tasks": {"active": 0, "failed": 0},
+        "llm": {"available": True},
+        "recent_failures": [],
+    }
+
+    try:
+        db = SessionLocal()
+        try:
+            # ── 失败任务数（本月）──
+            month_start = datetime.now(timezone.utc).replace(day=1).strftime("%Y-%m-%d")
+            failed_count = db.execute(
+                text(
+                    "SELECT COUNT(*) FROM agent_tasks WHERE user_id = :uid "
+                    "AND status = 'failed' AND DATE(created_at) >= :d"
+                ),
+                {"uid": current_user.id, "d": month_start},
+            ).scalar() or 0
+            data["tasks"]["failed"] = failed_count
+
+            # ── 活跃任务（pending + running）──
+            active = db.execute(
+                text(
+                    "SELECT COUNT(*) FROM agent_tasks WHERE user_id = :uid "
+                    "AND status IN ('pending', 'running')"
+                ),
+                {"uid": current_user.id},
+            ).scalar() or 0
+            data["tasks"]["active"] = active
+
+            # ── Worker 状态（检查是否有最近活跃的 subtask）──
+            recent_subtask = db.execute(
+                text(
+                    "SELECT MAX(created_at) FROM agent_subtasks s "
+                    "JOIN agent_tasks t ON t.id = s.task_id "
+                    "WHERE t.user_id = :uid"
+                ),
+                {"uid": current_user.id},
+            ).scalar()
+            if recent_subtask:
+                diff = (datetime.now(timezone.utc) - recent_subtask).total_seconds()
+                data["worker"]["running"] = diff < 300  # 5 min 内有活动视为运行中
+
+            # ── 最近失败任务（5条）──
+            failures = db.execute(
+                text(
+                    "SELECT id, created_at, task_type, error_message "
+                    "FROM agent_tasks WHERE user_id = :uid AND status = 'failed' "
+                    "ORDER BY created_at DESC LIMIT 5"
+                ),
+                {"uid": current_user.id},
+            ).fetchall()
+            data["recent_failures"] = [
+                {
+                    "task_id": str(r.id),
+                    "time": r.created_at.isoformat() if hasattr(r.created_at, "isoformat") else str(r.created_at),
+                    "task_type": r.task_type or "内容创作",
+                    "error": (r.error_message or "未知错误")[:120],
+                }
+                for r in failures
+            ]
+
         finally:
             db.close()
     except Exception:
@@ -569,28 +619,9 @@ async def get_cost_metrics(
 # =====================================================================
 # 向后兼容：老路径 /api/v1/admin/metrics/* 重定向到 /api/v1/metrics/*
 # =====================================================================
-# 旧前端/外部集成临时兼容，建议在 2026-07-31 之前迁移到新路径
-# TODO: 迁移完成后删除这段
 
 from fastapi.responses import RedirectResponse
 
-
-@router.get("/_legacy_admin_alias", include_in_schema=False)
-def _legacy_admin_alias_documentation():
-    """记录 alias 路由前缀，供前端迁移参考"""
-    return {
-        "legacy_prefix": "/api/v1/admin/metrics",
-        "new_prefix": "/api/v1/metrics",
-        "endpoints": {
-            "production": {"old": "/api/v1/admin/metrics/production", "new": "/api/v1/metrics/production"},
-            "publishing": {"old": "/api/v1/admin/metrics/publishing", "new": "/api/v1/metrics/publishing"},
-            "cost": {"old": "/api/v1/admin/metrics/cost", "new": "/api/v1/metrics/cost"},
-        },
-        "deprecation_note": "老路径已重定向到新路径。建议在 2026-07-31 前完成前端迁移。",
-    }
-
-
-# 兼容旧路径的 RedirectResponse（302 临时重定向）
 legacy_admin_router = APIRouter(prefix="/api/v1/admin/metrics", include_in_schema=False)
 
 

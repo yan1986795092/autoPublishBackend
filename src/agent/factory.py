@@ -55,7 +55,7 @@ def create_orchestrator(
         except Exception:
             logger.warning("无法为 %s 创建 LLM（模型: %s）", card.name, card.model)
 
-    # ManagerAgent 单独处理（规划 Agent，固定使用 deepseek-chat）
+    # ManagerAgent 单独处理（规划 Agent，使用 deepseek-chat 高推理）
     for agent_type in ["ManagerAgent"]:
         if agent_type not in chat_models:
             try:

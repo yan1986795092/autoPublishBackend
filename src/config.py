@@ -29,9 +29,9 @@ class Settings(BaseSettings):
     openai_model: str = "gpt-3.5-turbo-16k"
     openai_base_url: str = "https://api.openai.com/v1"
 
-    # 阿里通义千问 — 兼容 QWEN_API_KEY / DASHSCOPE_API_KEY 两种环境变量名
+    # 阿里通义千问 — 兼容 QWEN_API_KEY / DASHSCOPE_API_KEY 两种环境变量名（主力，2026/08/20 到期）
     qwen_api_key: Optional[str] = Field(default=None, validation_alias=AliasChoices("qwen_api_key", "QWEN_API_KEY", "DASHSCOPE_API_KEY"))
-    qwen_model: str = "qwen-plus"
+    qwen_model: str = "qwen3.7-max"
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     zhipu_api_key: Optional[str] = None
@@ -45,7 +45,7 @@ class Settings(BaseSettings):
 
     bocha_api_key: Optional[str] = Field(default=None, validation_alias=AliasChoices("bocha_api_key", "BOCHA_API_KEY", "BOCHA_SEARCH_API_KEY"))
 
-    default_llm_provider: str = "zhipu"
+    default_llm_provider: str = "qwen"
     default_temperature: float = 0.7
     default_max_tokens: int = 2000
 

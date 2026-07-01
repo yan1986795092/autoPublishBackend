@@ -139,6 +139,8 @@ class TaskQueue:
         self._tasks: dict[str, AsyncTask] = {}
         self._progress_events: dict[str, list[asyncio.Event]] = {}
         self._dead_letter_queue: dict[str, AsyncTask] = {}
+        # 预留的 task_id（SSE 端点先订阅再入队时，用于 EventBus 匹配）
+        self.task_id: str = ""
 
     async def enqueue(
         self,
@@ -339,7 +341,9 @@ class TaskQueue:
         return task
 
     def reserve_task_id(self) -> str:
-        return str(uuid.uuid4())
+        """预留一个 task_id，供 SSE 端点在订阅 EventBus 时使用（SSE 端点先订阅再入队）"""
+        self.task_id = str(uuid.uuid4())
+        return self.task_id
 
     async def publish_thinking_step(self, task_id: str, step_data: dict) -> None:
         await self._publish_event(StreamEvent(

@@ -87,7 +87,8 @@ class Orchestrator:
         self._graph = build_agent_graph()
 
     async def run(
-        self, user_request: str, context: dict | None = None, timeout: float = 180.0
+        self, user_request: str, context: dict | None = None, timeout: float = 180.0,
+        task_queue: Any = None,
     ) -> AgentResult:
         """执行一次完整的 Agent 编排流程（使用 LangGraph StateGraph）"""
         tracer = _get_tracer()
@@ -123,6 +124,14 @@ class Orchestrator:
                 async with asyncio.timeout(timeout) if hasattr(asyncio, 'timeout') else _AsyncioTimeout(timeout):
                     precomputed = (context or {}).get("precomputed_plan")
                     skill_system_prompt = (context or {}).get("skill_system_prompt", "")
+
+                    # 优先使用传入的 task_queue（来自 SSE/WebSocket 端点），其次用实例自己的
+                    _active_tq = task_queue or self.task_queue
+                    _active_task_id = (
+                        getattr(task_queue, 'task_id', None)
+                        if task_queue else self.async_task_id
+                    ) or task_id
+
                     initial_state: AgentGraphState = {
                         "user_request": user_request,
                         "context": context or {},
@@ -142,8 +151,8 @@ class Orchestrator:
                         "final_output": None,
                         "error": None,
                         "status": "running",
-                        "_async_task_id": self.async_task_id or task_id,
-                        "_task_queue_ref": self.task_queue,
+                        "_async_task_id": _active_task_id,
+                        "_task_queue_ref": _active_tq,
                         "_llm_models": self.chat_models,
                         "_mcp_tools": self.mcp_tools,
                         "_streaming_mode": True,

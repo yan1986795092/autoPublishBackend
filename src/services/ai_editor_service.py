@@ -9,6 +9,7 @@ from typing import AsyncGenerator
 
 from langchain_openai import ChatOpenAI
 
+from src.agent.platform_profile import get_profile, format_writing_rules
 from src.config import get_settings
 from src.core.model_router import ModelRouter
 from src.logging_shared.config import get_logger
@@ -68,14 +69,52 @@ class AIEditorService:
                     )
         return {"content": llm_result.content, "tokens": tokens}
 
-    async def rewrite(self, text: str, instruction: str) -> str:
+    # ── P1-2: 平台风格拼接到 system 指令，让改写/扩写/翻译/语调都按平台 DNA 来 ──
+    @staticmethod
+    def _platform_style_block(platform: str | None) -> str:
+        """根据 platform code 返回风格约束块（注入到 user prompt 头部）。"""
+        if not platform:
+            return ""
+        profile = get_profile(platform)
+        if not profile:
+            return ""
+        name = profile.get("name", platform)
+        system_prompt = profile.get("system_prompt", "")
+        rules = profile.get("writing_rules", {})
+        rules_text = format_writing_rules(rules) if rules else ""
+        # 只取 tone + structure + avoid 三项关键约束，避免过长
+        if rules:
+            tone = rules.get("tone", "")
+            structure_list = rules.get("structure", [])
+            avoid_list = rules.get("avoid", [])
+            minimal_rules = []
+            if tone:
+                minimal_rules.append(f"- 语气：{tone}")
+            if structure_list:
+                minimal_rules.append("- 结构：")
+                for i, step in enumerate(structure_list[:4], 1):
+                    minimal_rules.append(f"  {i}. {step}")
+            if avoid_list:
+                minimal_rules.append("- 避免：")
+                for item in avoid_list[:4]:
+                    minimal_rules.append(f"  · {item}")
+            rules_text = "\n".join(minimal_rules)
+        parts = [f"【目标平台风格：{name}】"]
+        if system_prompt:
+            parts.append(f"角色定位：{system_prompt}")
+        if rules_text:
+            parts.append(f"风格要求：\n{rules_text}")
+        return "\n".join(parts) + "\n\n"
+
+    async def rewrite(self, text: str, instruction: str, platform: str | None = None) -> str:
         if self._is_mock_mode():
             return "[Mock] 改写完成"
+        style_block = self._platform_style_block(platform)
         prompt = f"""请根据以下要求改写这段文字，只返回改写后的内容，不要添加额外说明。
 
 {self.BODY_ONLY_INSTRUCTION}
 
-原文：{text}
+{style_block}原文：{text}
 
 改写要求：{instruction}
 
@@ -83,9 +122,10 @@ class AIEditorService:
         result = await self._call(prompt)
         return self._strip_title(result["content"])
 
-    async def expand(self, text: str) -> str:
+    async def expand(self, text: str, platform: str | None = None) -> str:
         if self._is_mock_mode():
             return "[Mock] 扩写完成"
+        style_block = self._platform_style_block(platform)
         prompt = f"""请扩写以下内容，要求：
 
 1. 而是在正文各处展开：丰富细节、补充例子、深入论证、增加数据或场景描述
@@ -95,13 +135,13 @@ class AIEditorService:
 
 {self.BODY_ONLY_INSTRUCTION}
 
-原文：{text}
+{style_block}原文：{text}
 
 扩写后的完整内容（不要加额外说明）："""
         result = await self._call(prompt)
         return self._strip_title(result["content"])
 
-    async def improve_tone(self, text: str, target_tone: str) -> str:
+    async def improve_tone(self, text: str, target_tone: str, platform: str | None = None) -> str:
         if self._is_mock_mode():
             return "[Mock] 语调调整完成"
         tone_desc = {
@@ -110,39 +150,42 @@ class AIEditorService:
             "humorous": "轻松幽默，适当加入俏皮话和金句",
         }
         desc = tone_desc.get(target_tone, target_tone)
+        style_block = self._platform_style_block(platform)
         prompt = f"""请调整以下文字的语调，使其风格为：{desc}。只返回调整后的内容，不要添加额外说明。
 
 {self.BODY_ONLY_INSTRUCTION}
 
-原文：{text}
+{style_block}原文：{text}
 
 调整后的内容："""
         result = await self._call(prompt)
         return self._strip_title(result["content"])
 
-    async def summarize(self, text: str) -> str:
+    async def summarize(self, text: str, platform: str | None = None) -> str:
         if self._is_mock_mode():
             return "[Mock] 这是对原文的简要总结。"
+        style_block = self._platform_style_block(platform)
         prompt = f"""请对以下内容进行简洁总结，保留核心观点。控制在 100 字以内。只返回总结内容。
 
 {self.BODY_ONLY_INSTRUCTION}
 
-原文：{text}
+{style_block}原文：{text}
 
 总结："""
         result = await self._call(prompt)
         return self._strip_title(result["content"])
 
-    async def translate(self, text: str, target_lang: str) -> str:
+    async def translate(self, text: str, target_lang: str, platform: str | None = None) -> str:
         if self._is_mock_mode():
             return f"[Mock] 翻译到 {target_lang}"
         lang_name = {"en": "英语", "zh": "中文", "ja": "日语", "ko": "韩语"}
         name = lang_name.get(target_lang, target_lang)
+        style_block = self._platform_style_block(platform)
         prompt = f"""请将以下文字翻译成{name}，保持原意和语气。只返回翻译结果。
 
 {self.BODY_ONLY_INSTRUCTION}
 
-原文：{text}
+{style_block}原文：{text}
 
 翻译："""
         result = await self._call(prompt)

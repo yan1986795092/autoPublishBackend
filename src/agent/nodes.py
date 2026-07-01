@@ -750,6 +750,16 @@ async def plan_tasks(state: AgentGraphState) -> dict:
     precomputed = state.get("plan")
     if precomputed and precomputed.get("tasks"):
         logger.info("使用预计算计划，跳过 LLM 规划")
+        # 仍然补一个 stage:completed 让前端 timeline 一致（理解阶段完成后立刻显示执行路线）
+        await _publish_streaming_event(state, "stage", {
+            "agent": "ManagerAgent",
+            "label": "规划任务中",
+            "icon": "📋",
+            "status": "completed",
+            "duration": 0,
+            "timestamp": time.time(),
+            "_reasoning": "使用预计算计划",
+        })
         return {
             "plan": precomputed,
             "plan_reasoning": precomputed.get("reasoning", ""),
@@ -845,6 +855,7 @@ Based on the above understanding, select the most appropriate agents to complete
         _PARAM_KEYS = [
             "topic", "platform", "style", "tone", "audience", "keywords", "length",
             "action", "revision_focus", "content", "draft_content",
+            "content_type",   # WritingAgent 的内容形式参数（如 blog/xhs_post/copywriting）
         ]
         for task in plan.get("tasks", []):
             task_input = task.get("input", {})
@@ -1348,6 +1359,23 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
             dep_context = _build_dependency_context(task, state)
             if dep_context:
                 t_input["_context"] = dep_context
+
+            # ── 通用下游 content/feedback 兜底 ──
+            # 让 ReviewAgent / FixAgent / SEOAgent 等所有需要上游正文的下游 agent
+            # 都能从 _context 里拿到第一个非空 content；feedback 从 ReviewAgent 拿
+            # 注意：FixAgent 的后续 multi-tier fallback 已经在它专用的 if 分支里实现，
+            # 这里只是为其它 agent 提供最薄的一层兜底
+            if not t_input.get("content"):
+                for _cdata in dep_context.values():
+                    _c_cont = _cdata.get("content", "")
+                    if _c_cont:
+                        t_input["content"] = _c_cont
+                        break
+            if not t_input.get("feedback"):
+                for _cdata in dep_context.values():
+                    if _cdata.get("agent") == "ReviewAgent":
+                        t_input["feedback"] = _cdata.get("content", "")
+                        break
 
             # Skill context injection
             skill_system_prompt = state.get("skill_system_prompt", "")

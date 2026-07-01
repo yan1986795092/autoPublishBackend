@@ -26,6 +26,11 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         platform = _actx.get("platform") or task_input.get("platform", "")
         platform_name = ""
 
+        # ── 关键校验：topic 是必填变量，空值会导致模板占位符原样发给 LLM ──
+        if not topic or not str(topic).strip():
+            logger.error("WritingAgent 收到空 topic，拒绝执行", task_input_keys=list(task_input.keys()))
+            raise HandlerError("WritingAgent 缺少必填参数 topic", handler="WritingAgent")
+
         # ── 平台深度配置加载 ──
         profile = get_profile(platform) if platform else None
         if profile:

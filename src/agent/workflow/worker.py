@@ -18,7 +18,7 @@ logger = structlog.get_logger(__name__)
 # ── 重试降级策略 ──
 # 第 1 次重试: 保持原样（兼容老路径）
 # 第 2 次重试: 追加 system reminder 禁止元描述
-# 第 3 次重试: 切到 deepseek-chat（更强指令遵循）
+# 第 3 次重试: 切到 deepseek-chat（更强指令遵循，作为备用兜底）
 _RETRY_STRATEGY = [
     # (prompt_suffix, model_override, extra_wait_s)
     ("", None, 0),
@@ -209,6 +209,7 @@ class AgentWorker:
                 result = await orchestrator.run(
                     user_request=async_task.prompt,
                     context=context,
+                    task_queue=task_queue,
                 )
 
                 if _is_cancelled(async_task):
