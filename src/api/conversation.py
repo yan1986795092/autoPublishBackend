@@ -86,6 +86,10 @@ class ChatRequest(BaseModel):
     conversation_id: Optional[str] = Field(None, description="对话 ID，首次不传则自动创建")
     platform: Optional[str] = Field(None, description="用户已选的发布平台（如 xiaohongshu）")
     content_type: Optional[str] = Field(None, description="用户已选的写作体裁（如 copywriting）")
+    preferences: Optional[dict] = Field(
+        None,
+        description="前端生成参数（creativity/length/tone/audience），由对话 LLM 透传",
+    )
 
 
 # ===================== 对话端点 =====================
@@ -108,16 +112,34 @@ async def conversation_chat(
     """
     conversation_id = request.conversation_id
 
-    # 自动创建对话
+    # 自动创建对话（修复 #9：同用户、同标题、24h 内复用，避免重复创建 N 条同名对话）
     if not conversation_id:
-        conv = ChatConversation(
-            user_id=current_user.id,
-            title=request.message[:30] + ("..." if len(request.message) > 30 else ""),
+        from datetime import datetime, timedelta
+        new_title = request.message[:30] + ("..." if len(request.message) > 30 else "")
+        cutoff = datetime.utcnow() - timedelta(hours=24)
+        existing = (
+            db.query(ChatConversation)
+            .filter(
+                ChatConversation.user_id == current_user.id,
+                ChatConversation.title == new_title,
+                ChatConversation.updated_at >= cutoff,
+            )
+            .order_by(ChatConversation.updated_at.desc())
+            .first()
         )
-        db.add(conv)
-        db.commit()
-        db.refresh(conv)
-        conversation_id = conv.id
+        if existing:
+            conversation_id = existing.id
+            existing.updated_at = datetime.utcnow()
+            db.commit()
+        else:
+            conv = ChatConversation(
+                user_id=current_user.id,
+                title=new_title,
+            )
+            db.add(conv)
+            db.commit()
+            db.refresh(conv)
+            conversation_id = conv.id
     else:
         conv = ensure_conversation_owner(
             db.query(ChatConversation).filter(
@@ -138,7 +160,7 @@ async def conversation_chat(
     db.flush()
 
     # 更新对话时间
-    from datetime import datetime
+    from datetime import datetime  # noqa: F811 — used later in scope
     conv.updated_at = datetime.utcnow()
 
     db.commit()
@@ -171,6 +193,7 @@ async def conversation_chat(
                 user_profile="",
                 platform=request.platform or "",
                 content_type=request.content_type or "",
+                preferences=request.preferences or {},
             )
 
             # 4. 调用对话引擎

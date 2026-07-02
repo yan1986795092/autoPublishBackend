@@ -15,6 +15,9 @@ class ConversationContext:
     user_profile: str = ""
     platform: str = ""        # 用户已选的发布平台（如 xiaohongshu）
     content_type: str = ""    # 用户已选的写作体裁（如 copywriting）
+    # 前端生成参数（creativity/length/tone/audience）
+    # 由对话 LLM 作为"用户偏好"使用，并合并进 trigger.parameters
+    preferences: dict = field(default_factory=dict)
 
 
 @dataclass

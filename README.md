@@ -39,7 +39,7 @@ curl -X POST http://localhost:9000/api/v1/agent/plan \
 ### 一句话生成内容
 
 ```bash
-curl -X POST http://localhost:9000/api/v1/agent/stream \
+curl -N -X POST http://localhost:9000/api/v1/agent/stream/v2 \
   -H "Content-Type: application/json" \
   -d '{
     "prompt": "推荐 5 个提高效率的 VS Code 插件",
@@ -51,6 +51,10 @@ curl -X POST http://localhost:9000/api/v1/agent/stream \
   }'
 # → SSE 流式返回: 思考分析 → 搜索资料 → 写作 → 审核 → 优化 → 完成
 ```
+
+> **端点选择**：
+> - `POST /agent/stream/v2` — **推荐**。前端契约收敛（spec 2026-07-01），实时不下发内部状态。
+> - `POST /agent/stream` — 已标 deprecated，2026-09-30 下线（详见 [docs/streaming-frontend-contract.md](./docs/streaming-frontend-contract.md)）。
 
 ### 追热点写文章
 
@@ -179,12 +183,14 @@ backend/
 
 ## API 速查
 
-### Agent 执行（4 种模式）
+### Agent 执行（5 种模式 + 1 个观测轨）
 
 | 模式 | 端点 | curl 示例 |
 |------|------|-----------|
 | 同步 | `POST /agent/run` | 等结果返回 |
-| SSE 流式 | `POST /agent/stream` | 实时看到思考过程 ✅ **推荐** |
+| **SSE 流式 v2** | `POST /agent/stream/v2` | 实时看到思考过程 ✅ **推荐**（业务轨，spec 2026-07-01） |
+| SSE 流式 v1 | `POST /agent/stream` | ⚠️ deprecated，2026-09-30 下线 |
+| Observability SSE | `GET /agent/obs/stream/{task_id}` | 内部状态/全量 events（dev panel 用） |
 | 异步 | `POST /agent/async/submit` | 提交就走，回来收草稿 |
 | WebSocket | `WS /agent/ws/{id}` | 双向实时进度 |
 
@@ -203,6 +209,71 @@ POST   /api/v1/contents/ai-edit/analyze-viral # 爆款分析
 ```
 
 > 完整端点列表见 [SPEC.md](./SPEC.md#12-appendix-api-reference)
+
+---
+
+## 🎯 SSE 前端契约（spec 2026-07-01）
+
+2026-07-01 起，`/agent/stream` 的实时 SSE 流做了**分轨收敛**：
+
+| 端点 | Audience | 实时下发事件 | `result` 事件 schema | 适用场景 |
+|------|----------|-------------|---------------------|----------|
+| `POST /agent/stream/v2` | 业务轨（前端） | `plan / stage / progress / llm_chunk / thinking_step / reasoning / result / done / error` | **收敛**（不含运行时缓冲 / 不含全量 events） | ✅ 前端产品（推荐） |
+| `POST /agent/stream` | 业务轨（前端，兼容） | **全部**事件（含 `thinking_step / reasoning`） | **全量 dump**（含 `agent_events.events[]`） | ⚠️ deprecated，2026-09-30 下线 |
+| `GET /agent/obs/stream/{task_id}` | Observability | 内部状态 + 全量 result dump | 全量 | dev panel / 后端调试 |
+
+### 业务轨 `result` 收敛 schema（v2）
+
+```jsonc
+// SSE 下发（v2）
+{
+  "task_id": "...",
+  "status": "completed",
+  "agent_type": "WritingAgent",
+  "output": {
+    "full_text": "...",
+    "title": "...",
+    "platform": "xiaohongshu",
+    "content_type": "blog",
+    "draft_content": "...",     // 多轮 review 时存在
+    "review_content": "..."     // 评审意见
+  },
+  "usage": {                     // MessageBubble 实际渲染
+    "tokens_used": 1234,
+    "time_elapsed": 8.5,
+    "model": "gpt-4o"
+  }
+  // ❌ 不下发：_stages / _thinkingSteps / _llmChunks / _reasoningChunks
+  //            _draftContent / agent_events（运行时缓冲 + 全量 dump）
+}
+```
+
+### DB 持久化 schema（不变）
+
+DB 入库时由前端 store 拼接运行时缓冲（历史回放需要），**与历史消息兼容**：
+
+```jsonc
+{
+  ...上面业务轨字段,
+  "_stages": [...],
+  "_thinkingSteps": [...],
+  "_llmChunks": {...},
+  "_reasoningChunks": {...},
+  "_draftContent": "..."
+}
+```
+
+### 迁移路径
+
+| 阶段 | 时间 | 工作 |
+|------|------|------|
+| Phase 1（本周） | 2026-07-01 | ✅ 后端实现 + 单元测试（24 用例） |
+| Phase 2（本周） | 2026-07-01 | ✅ 前端切到 v2 + StageTimeline 清理 |
+| Phase 3 | 2026-08-XX | 加 `Sunset` HTTP header + 文档提醒 |
+| Phase 4 | 2026-09-30 | 删除旧 `/agent/stream` 路由 |
+
+完整设计文档：[docs/streaming-frontend-contract.md](./docs/streaming-frontend-contract.md)
+设计 spec：[../docs/superpowers/specs/2026-07-01-streaming-frontend-contract.md](../docs/superpowers/specs/2026-07-01-streaming-frontend-contract.md)
 
 ---
 

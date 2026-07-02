@@ -31,6 +31,100 @@ from src.core.request_guards import ensure_task_owner, validate_public_http_url
 router = APIRouter(tags=["agent"])
 
 
+# ─────────────────────────────────────────────────────────
+# Result Schema 收敛（spec 2026-07-01）
+# ─────────────────────────────────────────────────────────
+
+def _safe_output_get(output: Any, key: str, default: Any = None) -> Any:
+    """从 result.output 取字段，兼容 output 为 None / 非 dict 的情况"""
+    if not isinstance(output, dict):
+        return default
+    return output.get(key, default)
+
+
+def _safe_usage_get(usage: Any, key: str, default: Any = None) -> Any:
+    """从 result.usage 取字段"""
+    if not isinstance(usage, dict):
+        return default
+    return usage.get(key, default)
+
+
+def _transform_result_for_frontend(result: dict | None) -> dict:
+    """把 AgentResult 收敛成"实时 SSE 业务轨"schema
+
+    设计要点（spec 2026-07-01 §3.3）：
+    - 保留 result.output.* 业务字段
+    - 保留 result.usage 部分字段（MessageBubble 实际渲染）
+    - **不返回** 运行时缓冲字段（_stages / _thinkingSteps / _llmChunks / _reasoningChunks / _draftContent）
+    - **不返回** agent_events 全量 dump
+    """
+    result = result or {}
+    output = result.get("output") if isinstance(result, dict) else None
+    usage = result.get("usage") if isinstance(result, dict) else None
+
+    return {
+        # 标识
+        "task_id": result.get("task_id") if isinstance(result, dict) else None,
+        "status": result.get("status") if isinstance(result, dict) else None,
+        "agent_type": result.get("agent_type") if isinstance(result, dict) else None,
+        # 产物
+        "output": {
+            "full_text": _safe_output_get(output, "full_text") or _safe_output_get(output, "content"),
+            "title": _safe_output_get(output, "title"),
+            "platform": _safe_output_get(output, "platform"),
+            "content_type": _safe_output_get(output, "content_type"),
+            "draft_content": _safe_output_get(output, "draft_content"),
+            "review_content": _safe_output_get(output, "review_content"),
+        },
+        # UI 摘要（小卡片显示）
+        "usage": {
+            "tokens_used": _safe_usage_get(usage, "tokens_used"),
+            "time_elapsed": _safe_usage_get(usage, "time_elapsed"),
+            "model": _safe_usage_get(usage, "model"),
+        },
+        # 故意不带：
+        # - _stages / _thinkingSteps / _llmChunks / _reasoningChunks（运行时缓冲，前端 store 自己累积）
+        # - agent_events（全量 dump，仅 DB 持久化用）
+        # - error（顶层状态由 status 表达）
+    }
+
+
+def _result_for_persistence(
+    frontend_result: dict,
+    *,
+    stages: list | None = None,
+    thinking_steps: list | None = None,
+    llm_chunks: dict | None = None,
+    reasoning_chunks: dict | None = None,
+    draft_content: str | None = None,
+    agent_events: dict | None = None,
+) -> dict:
+    """把"运行时缓冲"拼到收敛后的 result，得到 DB 持久化 schema
+
+    关键约束：
+    - **输入** frontend_result 必须来自 _transform_result_for_frontend()
+    - **输出** 入库 schema 与历史消息兼容（前端读出时已有 fallback 逻辑）
+    """
+    persisted = dict(frontend_result)  # 浅拷贝（output / usage 是 dict，再深拷一层）
+    persisted["output"] = dict(frontend_result.get("output") or {})
+    persisted["usage"] = dict(frontend_result.get("usage") or {})
+
+    if stages is not None:
+        persisted["_stages"] = stages
+    if thinking_steps is not None:
+        persisted["_thinkingSteps"] = thinking_steps
+    if llm_chunks is not None:
+        persisted["_llmChunks"] = llm_chunks
+    if reasoning_chunks is not None:
+        persisted["_reasoningChunks"] = reasoning_chunks
+    if draft_content is not None:
+        persisted["_draftContent"] = draft_content
+    if agent_events is not None:
+        persisted["agent_events"] = agent_events
+
+    return persisted
+
+
 class AgentRunRequest(BaseModel):
     prompt: str
     context: Optional[dict] = None
@@ -451,15 +545,20 @@ class AgentStreamRequest(BaseModel):
     trigger: Optional[dict] = None  # 对话引擎的 trigger dict（透传给 skill_context）
 
 
-@router.post("/agent/stream")
+@router.post("/agent/stream", deprecated=True)
 async def agent_stream(
     request: AgentStreamRequest,
     http_request: Request,
     current_user: User = Depends(get_current_user),
 ):
-    """流式 Agent 执行 — 通过 EventBus 实时推送计划、思考步骤、进度和结果
+    """⚠️ DEPRECATED — 2026-09-30 下线，请改用 /api/v1/agent/stream/v2
 
-    核心改进：不再轮询 TaskQueue，改为订阅 EventBus，事件驱动的实时推送。
+    v1 流式 Agent 执行 — 通过 EventBus 实时推送计划、思考步骤、进度和结果。
+
+    与 v2 的差异：
+    - v1 下发 `thinking_step / reasoning` 事件（v2 过滤掉）
+    - v1 result 数据是 AgentResult 全量 dump（v2 用收敛 schema）
+
     支持事件类型：plan, task_created, thinking_step, llm_chunk, reasoning, progress, result, error, done
     """
     # 提取 HTTP trace_id 用于端到端关联
@@ -707,6 +806,378 @@ async def agent_stream(
             }
 
     return EventSourceResponse(event_generator())
+
+
+# ===================== 业务 SSE v2（spec 2026-07-01） =====================
+# 与 /agent/stream 的核心差异：
+# 1. 实时 SSE 不下发 thinking_step / reasoning（前端 store 运行时自累积，无需服务端重复推送）
+# 2. result 事件用 _transform_result_for_frontend() 收敛（不携带运行时缓冲字段）
+# 3. 其余业务事件（plan / stage / progress / llm_chunk / done / error）保持行为一致
+
+
+@router.post("/agent/stream/v2")
+async def agent_stream_v2(
+    request: AgentStreamRequest,
+    http_request: Request,
+    current_user: User = Depends(get_current_user),
+):
+    """业务轨 SSE v2 — 实时流只下发"前端真正需要"的事件类型与字段
+
+    与 v1 的差异（spec 2026-07-01 §3）：
+    - **不下发** `thinking_step / reasoning`（前端 store 自累积）
+    - `result` 事件数据用收敛 schema，**不携带** `_stages / _thinkingSteps / _llmChunks / _reasoningChunks / _draftContent / agent_events`
+    - 行为保持：plan / stage / progress / llm_chunk / done / error 与 v1 一致
+
+    迁移路径：v2 上线后，v1 标 deprecated；2026-09-30 删除 v1。
+    """
+    http_trace_id = http_request.headers.get("X-Trace-Id", "")
+    task_id_str = ""
+
+    async def event_generator() -> AsyncGenerator[dict, None]:
+        nonlocal task_id_str
+
+        # 复用 v1 的 skill/prompt/trigger 初始化
+        skill_context, user_prompt = _init_stream_context(
+            request=request,
+            current_user=current_user,
+            http_trace_id=http_trace_id,
+        )
+
+        try:
+            # 复用 v1 的 plan 占位事件
+            yield {
+                "event": "plan",
+                "data": json.dumps({
+                    "goal": user_prompt[:200],
+                    "reasoning": "ManagerAgent 正在动态规划最佳 Agent 组合...",
+                    "estimated_steps": 0,
+                    "tasks": [],
+                }, ensure_ascii=False),
+            }
+
+            evt_queue: asyncio.Queue[StreamEvent] = asyncio.Queue()
+
+            async def on_event(event: StreamEvent) -> None:
+                await evt_queue.put(event)
+
+            task_id_str = task_queue.reserve_task_id()
+            event_bus.subscribe(task_id_str, on_event)
+
+            await task_queue.enqueue(
+                prompt=user_prompt,
+                user_id=current_user.id,
+                plan=None,
+                skill_context=skill_context if skill_context else None,
+                task_id=task_id_str,
+            )
+
+            yield {
+                "event": "task_created",
+                "data": json.dumps({"task_id": task_id_str}, ensure_ascii=False),
+            }
+
+            # 业务轨过滤：忽略 thinking_step / reasoning（前端 store 自累积）
+            # 其余业务事件实时下发。result 用收敛 schema。
+            seen_step_count = 0
+            timeout_seconds = 600
+            start_time = asyncio.get_event_loop().time()
+
+            while True:
+                elapsed = asyncio.get_event_loop().time() - start_time
+                if elapsed > timeout_seconds:
+                    yield {
+                        "event": "error",
+                        "data": json.dumps({"message": "任务执行超时"}, ensure_ascii=False),
+                    }
+                    break
+
+                try:
+                    event = await asyncio.wait_for(evt_queue.get(), timeout=1.0)
+                except asyncio.TimeoutError:
+                    task = task_queue.get_task(task_id_str)
+                    if not task:
+                        break
+                    if task.state.value not in ("completed", "failed", "cancelled"):
+                        continue
+
+                    # 兜底分支：等待超时且任务已结束
+                    remaining = []
+                    while True:
+                        try:
+                            remaining.append(evt_queue.get_nowait())
+                        except asyncio.QueueEmpty:
+                            break
+
+                    got_result = False
+                    for revt in remaining:
+                        # 业务轨过滤：跳过 internal-only events
+                        if _should_skip_in_business_track(revt):
+                            continue
+                        if revt.event_type == "result":
+                            yield {
+                                "event": "result",
+                                "data": json.dumps(
+                                    _transform_result_for_frontend(revt.data),
+                                    ensure_ascii=False,
+                                ),
+                            }
+                            got_result = True
+                        elif revt.event_type == "error":
+                            yield {
+                                "event": "error",
+                                "data": json.dumps(revt.data, ensure_ascii=False),
+                            }
+                            got_result = True
+
+                    if not got_result:
+                        if task.state.value == "completed" and task.result:
+                            yield {
+                                "event": "result",
+                                "data": json.dumps(
+                                    _transform_result_for_frontend(task.result),
+                                    ensure_ascii=False,
+                                ),
+                            }
+                        elif task.state.value == "failed":
+                            yield {
+                                "event": "error",
+                                "data": json.dumps(
+                                    {"message": task.error or "任务执行失败"},
+                                    ensure_ascii=False,
+                                ),
+                            }
+
+                    yield {
+                        "event": "done",
+                        "data": json.dumps(
+                            {"task_id": task_id_str, "state": task.state.value},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    break
+
+                et = event.event_type
+
+                # 业务轨过滤：仅 audience='observability' 的事件不下发
+                # thinking_step / reasoning 默认 audience='both' → 业务轨下发，
+                # 用于 StageTimeline 实时反馈（前端在 useAgentStore handler 内累积）
+                if _should_skip_in_business_track(event):
+                    if et == "thinking_step":
+                        seen_step_count += 1
+                    continue
+
+                if et == "result":
+                    yield {
+                        "event": "result",
+                        "data": json.dumps(
+                            _transform_result_for_frontend(event.data),
+                            ensure_ascii=False,
+                        ),
+                    }
+                    yield {
+                        "event": "done",
+                        "data": json.dumps(
+                            {"task_id": task_id_str, "state": "completed"},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    break
+                elif et == "error":
+                    yield {
+                        "event": "error",
+                        "data": json.dumps(event.data, ensure_ascii=False),
+                    }
+                    yield {
+                        "event": "done",
+                        "data": json.dumps(
+                            {"task_id": task_id_str, "state": "failed"},
+                            ensure_ascii=False,
+                        ),
+                    }
+                    break
+                else:
+                    # plan / stage / progress / llm_chunk / task_created /
+                    # thinking_step / reasoning —— 业务轨可见的内部状态事件
+                    yield {
+                        "event": et,
+                        "data": json.dumps(event.data, ensure_ascii=False),
+                    }
+        except Exception as e:
+            logger.exception("SSE v2 流错误", _type="system", event_name="sse_v2_error",
+                             message=f"SSE v2 流错误: {e}", status="error")
+            yield {
+                "event": "error",
+                "data": json.dumps({"message": str(e)}, ensure_ascii=False),
+            }
+        finally:
+            if task_id_str:
+                event_bus.unsubscribe(task_id_str, on_event)
+
+    return EventSourceResponse(event_generator())
+
+
+# ===================== Observability SSE（spec 2026-07-01） =====================
+# 只供 dev panel / 后端调试使用。下发所有内部状态事件（thinking_step / reasoning + 全量 result dump）
+# 默认关闭，未来通过 frontend dev panel 或 admin tool 订阅
+
+
+@router.get("/agent/obs/stream/{task_id}")
+async def agent_obs_stream(
+    task_id: str,
+    current_user: User = Depends(get_current_user),
+):
+    """Observability 轨 SSE（spec 2026-07-01）
+
+    行为：
+    - 订阅指定 task_id 的 EventBus
+    - 客户端通过 query param `?token=<jwt>` 鉴权（与 WebSocket 一致）
+    - 下发所有内部状态事件：thinking_step / reasoning / stage / progress / 全量 result dump
+    - 业务轨客户端不应使用此端点
+
+    注意：本端点是 OBSERVABILITY-ONLY，不会下发 frontend-facing 业务事件
+    """
+    # 简化：复用 task_queue 的"subscribe + drain"模式
+    # 注意：当前实现是基于 ORCHESTRATOR 提交后的 task_id，不是 SSE 连接时的 task_id
+
+    async def event_generator() -> AsyncGenerator[dict, None]:
+        task = task_queue.get_task(task_id)
+        if not task:
+            yield {"event": "error", "data": json.dumps({"message": "task not found"})}
+            return
+
+        if task.user_id != current_user.id:
+            yield {"event": "error", "data": json.dumps({"message": "forbidden"})}
+            return
+
+        # 简单实现：轮询 task，直到结束，再发送 result dump
+        yield {"event": "obs_start", "data": json.dumps({"task_id": task_id})}
+        while True:
+            await asyncio.sleep(1.0)
+            task = task_queue.get_task(task_id)
+            if not task:
+                yield {"event": "error", "data": json.dumps({"message": "task disappeared"})}
+                return
+
+            yield {"event": "progress", "data": json.dumps(task.to_dict())}
+
+            if task.state.value in ("completed", "failed", "cancelled"):
+                if task.state.value == "completed" and task.result:
+                    # 全量 dump（不做收敛）
+                    yield {"event": "result", "data": json.dumps(task.result, ensure_ascii=False)}
+                yield {"event": "done", "data": json.dumps({"state": task.state.value})}
+                return
+
+    return EventSourceResponse(event_generator())
+
+
+# ─────────────────────────────────────────────────────────
+# Stream 共用初始化 + 业务轨过滤（spec 2026-07-01）
+# ─────────────────────────────────────────────────────────
+
+# thinking_step / reasoning 现在是 frontend-可见事件（用于 StageTimeline 实时反馈），
+# 不再无脑按 type 过滤。过滤改为按 audience 字段判断：
+#   - audience='observability' → 业务轨不下发（仅观测轨需要）
+#   - audience='frontend' / 'both' → 业务轨下发
+# _INTERNAL_EVENT_TYPES_V2 保留作为 **可选** 黑名单（如未来需要屏蔽某个 type 不下发），
+# 但目前为空集——所有非 observability 事件都下发。
+_INTERNAL_EVENT_TYPES_V2: frozenset = frozenset()
+
+
+def _should_skip_in_business_track(event: StreamEvent) -> bool:
+    """业务轨过滤：仅 audience='observability' 的事件不下发。
+
+    历史注释（已过时）：
+        "thinking_step / reasoning 不下发（前端 store 自累积）"
+    ——该假设错误：前端没有自累积路径（useAgentStore 对这两个事件的 handler 是 no-op），
+    实际导致 StageTimeline / MessageBubble 在流式过程中永远看不到思考过程。
+    修复：把"是否下发"的判断改为按 audience 字段，thinking_step / reasoning 默认
+    audience='both' → 业务轨下发，前端累积到 stages[].reasoning 与 thinkingSteps。
+    """
+    # 黑名单兜底（目前空）
+    if event.event_type in _INTERNAL_EVENT_TYPES_V2:
+        return True
+    # 显式 audience='observability' 的事件跳过
+    if event.audience == "observability":
+        return True
+    return False
+
+
+def _init_stream_context(
+    *,
+    request: "AgentStreamRequest",
+    current_user: "User",
+    http_trace_id: str,
+) -> tuple[dict, str]:
+    """业务轨 SSE 共用的初始化逻辑（Skill + trigger + 平台）"""
+    skill_context: dict = {}
+
+    if request.skill_id:
+        from src.api.skills import load_skill_full_for_user
+        from src.database import SessionLocal
+        db = SessionLocal()
+        try:
+            skill_data = load_skill_full_for_user(request.skill_id, db, current_user.id)
+            if skill_data:
+                skill_context = {
+                    "skill_id": request.skill_id,
+                    "skill_name": skill_data.get("name", ""),
+                    "skill_system_prompt": skill_data.get("system_prompt", ""),
+                    "skill_preset_plan": skill_data.get("preset_plan"),
+                    "skill_preset_complexity": skill_data.get("preset_plan", {}).get("complexity", "medium"),
+                    "skill_user_template": skill_data.get("user_prompt_template", ""),
+                }
+            else:
+                logger.warning(
+                    "未找到 Skill", _type="system", event_name="skill_not_found",
+                    message=f"找不到 Skill: {request.skill_id}", status="error",
+                )
+        finally:
+            db.close()
+
+    user_prompt, platform_code = request.prompt, request.platform
+    if skill_context.get("skill_user_template"):
+        template = skill_context["skill_user_template"]
+        template = template.replace("{topic}", user_prompt.split("\n")[0])
+        template = template.replace("{content}", user_prompt)
+        user_prompt = template
+
+    if request.parameters:
+        for k, v in request.parameters.items():
+            if v is not None:
+                skill_context[k] = v
+
+    if request.trigger and isinstance(request.trigger, dict):
+        for k in ("platform", "style", "length", "tone", "audience",
+                  "keywords", "revision_focus", "action", "topic"):
+            v = request.trigger.get(k)
+            if v not in (None, "", [], {}):
+                skill_context[k] = v
+        trigger_topic = (request.trigger.get("topic") or "").strip()
+        if trigger_topic and 3 <= len(trigger_topic) <= 500:
+            user_prompt = trigger_topic
+        elif request.trigger.get("_prompt"):
+            user_prompt = request.trigger["_prompt"]
+        if request.trigger.get("_fallback"):
+            skill_context["_trigger_fallback"] = True
+
+    if not platform_code:
+        from .platform_registry import detect_platform
+        platform_code = detect_platform(user_prompt)
+    if platform_code:
+        skill_context["platform"] = platform_code
+        from .platform_profile import get_profile
+        profile = get_profile(platform_code)
+        if profile:
+            skill_context["platform_name"] = profile.get("name", platform_code)
+            skill_context["platform_system_prompt"] = profile.get("system_prompt", "")
+            skill_context["platform_writing_rules"] = profile.get("writing_rules", {})
+            skill_context["platform_agent_pipeline"] = profile.get("agent_pipeline", {})
+            skill_context["platform_quality_check"] = profile.get("quality_check", "")
+
+    if http_trace_id:
+        skill_context["trace_id"] = http_trace_id
+
+    return skill_context, user_prompt
 
 
 # ===================== URL 输入处理 =====================

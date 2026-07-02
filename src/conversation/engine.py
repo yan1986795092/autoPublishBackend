@@ -139,9 +139,14 @@ def _log_llm_messages(messages: list) -> None:
         pass
 
 
-def _build_trigger_data(trigger: "GenerateTrigger") -> dict:
-    """从 GenerateTrigger 构造触发器 dict（避免重复代码）"""
-    return {
+def _build_trigger_data(trigger: "GenerateTrigger", preferences: dict | None = None) -> dict:
+    """从 GenerateTrigger 构造触发器 dict（避免重复代码）
+
+    preferences 中的 creativity / length / tone / audience 会作为 fallback：
+    - 若 LLM 没在 trigger 里填某个字段（trigger.tone == ""），用 preference 兜底
+    - 同时原样写入顶层 `parameters`，前端 runStreaming 用来转发给 /agent/stream
+    """
+    _t = {
         "action": trigger.action,
         "topic": trigger.topic,
         "platform": trigger.platform,
@@ -164,6 +169,13 @@ def _build_trigger_data(trigger: "GenerateTrigger") -> dict:
             "revision_focus": trigger.revision_focus,
         },
     }
+    if preferences is not None:
+        # 把 preferences 平铺到 trigger 顶层（triggerData.parameters
+        # 会被前端 runStreaming 当成第三个参数发到 /agent/stream）
+        # 注意：用 `is not None` 判断而不是 truthiness，否则空 dict 会被吞掉，
+        # 导致前端拿不到 parameters 字段，runStreaming 走 fallback。
+        _t["parameters"] = dict(preferences)
+    return _t
 
 
 class ConversationEngine:
@@ -268,6 +280,29 @@ class ConversationEngine:
                            "tutorial": "教程指南", "email": "邮件营销"}
             _label = _type_labels.get(ctx.content_type, ctx.content_type)
             _known_parts.append(f"写作体裁：{_label}")
+        # 1.6 用户生成参数（创造力/篇幅/语调/读者）也作为已知偏好
+        _pref_labels = {
+            "creativity": ("创造力", {0: "保守", 0.5: "中等", 1: "发散"}),
+            "length": ("篇幅", {"short": "短篇", "medium": "中篇", "long": "长篇"}),
+            "tone": ("语调", {"friendly": "友好", "professional": "专业",
+                             "humorous": "幽默", "warm": "温暖"}),
+            "audience": ("目标读者", {"beginner": "初学者",
+                                 "intermediate": "进阶", "expert": "专家"}),
+        }
+        if isinstance(ctx.preferences, dict):
+            for key, (label, mapping) in _pref_labels.items():
+                v = ctx.preferences.get(key)
+                if v is None:
+                    continue
+                # 数字类用 mapping 取最接近，否则直接显示
+                if isinstance(v, (int, float)) and key == "creativity":
+                    # 取最接近档位的标签
+                    nearest = min(mapping.keys(), key=lambda x: abs(x - float(v)))
+                    _known_parts.append(f"{label}：{mapping[nearest]}({float(v):.1f})")
+                elif v in mapping:
+                    _known_parts.append(f"{label}：{mapping[v]}")
+                else:
+                    _known_parts.append(f"{label}：{v}")
         if _known_parts:
             messages.append(SystemMessage(content=
                 "用户已选择的配置（请基于此信息进行创作，不要再询问这些已确认的内容）：\n"
@@ -315,6 +350,15 @@ class ConversationEngine:
                 trigger.platform = ctx.platform
             if ctx.content_type:
                 trigger.style = ctx.content_type  # GenerateTrigger.style 存储体裁 ID
+            # 用 preference 兜底 LLM 没填的 tone/length/audience
+            # 这样 /agent/stream 拿到的 trigger 字段总是有值
+            if isinstance(ctx.preferences, dict):
+                if not trigger.tone and ctx.preferences.get("tone"):
+                    trigger.tone = str(ctx.preferences["tone"])
+                if not trigger.length and ctx.preferences.get("length"):
+                    trigger.length = str(ctx.preferences["length"])
+                if not trigger.audience and ctx.preferences.get("audience"):
+                    trigger.audience = str(ctx.preferences["audience"])
 
         # 5.1 越权自写检测：有 trigger 但有大量正文/元描述 → 警告并把正文部分剥离
         if trigger and TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=True):
@@ -326,14 +370,14 @@ class ConversationEngine:
             clean_text = TriggerExtractor.strip(full_text)
             if clean_text:
                 yield {"type": "text_cleanup", "content": clean_text}
-            yield {"type": "trigger", "data": _build_trigger_data(trigger)}
+            yield {"type": "trigger", "data": _build_trigger_data(trigger, ctx.preferences)}
             return
 
         if trigger:
             clean_text = TriggerExtractor.strip(full_text)
             if clean_text:
                 yield {"type": "text_cleanup", "content": clean_text}
-            yield {"type": "trigger", "data": _build_trigger_data(trigger)}
+            yield {"type": "trigger", "data": _build_trigger_data(trigger, ctx.preferences)}
             return
 
         # 5.2 越权自写但没 trigger → 拦截，强制重发（让前端展示错误 + 不触发 pipeline）
@@ -451,11 +495,7 @@ class ConversationEngine:
                 platform=_platform,
                 style=_style,
             )
-            yield {"type": "trigger", "data": {
-                "action": _fallback_trigger.action,
-                "topic": _fallback_trigger.topic,
-                "platform": _fallback_trigger.platform,
-                "style": _fallback_trigger.style,
-                "_prompt": _fallback_trigger.to_prompt(),
-                "_fallback": True,
-            }}
+            # 把 preferences 平铺到 fallback trigger，让前端能透传到 /agent/stream
+            _fb_data = _build_trigger_data(_fallback_trigger, ctx.preferences)
+            _fb_data["_fallback"] = True
+            yield {"type": "trigger", "data": _fb_data}

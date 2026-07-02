@@ -2,7 +2,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, Awaitable, Optional
+from typing import Any, Callable, Awaitable, Literal, Optional
 import asyncio
 import structlog
 import uuid
@@ -44,7 +44,9 @@ class AsyncTask:
         d: dict[str, Any] = {
             "id": self.id,
             "user_id": self.user_id,
-            "prompt": self.prompt[:100],
+            # P24: 把截断从 100 提到 500，覆盖大多数真实 prompt（retry / D2 fallback 时
+            #     UI 显示"用户在做什么"足够完整）。仍避免无限长（流量/日志过大）。
+            "prompt": self.prompt[:500],
             "state": self.state.value,
             "progress": self.progress,
             "progress_message": self.progress_message,
@@ -74,10 +76,17 @@ class AsyncTask:
 
 @dataclass
 class StreamEvent:
-    """流式事件结构"""
+    """流式事件结构
+
+    audience 字段（2026-07-01 新增）：
+    - "frontend"       → 只进入业务 SSE（默认）
+    - "observability"  → 只进入 observability SSE
+    - "both"           → 双轨都下发
+    """
     task_id: str
-    event_type: str       # 事件类型: plan | thinking_step | progress | result | error | llm_chunk
+    event_type: str       # 事件类型: plan | thinking_step | progress | result | error | llm_chunk | reasoning | stage
     data: dict
+    audience: Literal["frontend", "observability", "both"] = "frontend"
 
 EventCallback = Callable[[StreamEvent], Awaitable[None]]
 
@@ -345,11 +354,22 @@ class TaskQueue:
         self.task_id = str(uuid.uuid4())
         return self.task_id
 
-    async def publish_thinking_step(self, task_id: str, step_data: dict) -> None:
+    async def publish_thinking_step(
+        self,
+        task_id: str,
+        step_data: dict,
+        audience: Literal["frontend", "observability", "both"] = "both",
+    ) -> None:
+        """thinking_step 默认 audience='both'，向后兼容：
+        - 旧 /agent/stream 会照常下发（保持兼容）
+        - /agent/stream/v2 会过滤掉（业务 SSE 不下发内部状态）
+        - /agent/obs/stream 会下发
+        """
         await self._publish_event(StreamEvent(
             task_id=task_id,
             event_type="thinking_step",
             data=step_data,
+            audience=audience,
         ))
 
     async def publish_llm_chunk(self, task_id: str, chunk_data: dict) -> None:
@@ -359,11 +379,18 @@ class TaskQueue:
             data=chunk_data,
         ))
 
-    async def publish_reasoning(self, task_id: str, reasoning_data: dict) -> None:
+    async def publish_reasoning(
+        self,
+        task_id: str,
+        reasoning_data: dict,
+        audience: Literal["frontend", "observability", "both"] = "both",
+    ) -> None:
+        """reasoning 同上：默认 both，旧端点兼容"""
         await self._publish_event(StreamEvent(
             task_id=task_id,
             event_type="reasoning",
             data=reasoning_data,
+            audience=audience,
         ))
 
     async def publish_stage(self, task_id: str, stage_data: dict) -> None:

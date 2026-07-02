@@ -5,7 +5,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 from pydantic import BaseModel, Field
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response
 from sqlalchemy.orm import Session
 from sqlalchemy import func, desc, asc
 
@@ -536,15 +536,39 @@ async def delete_message(
 
 
 # ===================== 快捷接口：创建对话并添加首条消息 =====================
+# DEPRECATED: /api/v1/chat/quick-start 已废弃。
+# 新的推荐流程是：
+#   1) POST /api/v1/chat/conversations    → 拿 conversation_id（同时同步 UI 列表）
+#   2) POST /api/v1/chat/conversations/{id}/messages    → 写首条 user 消息
+#   3) POST /api/v1/conversation/chat    → 对话 LLM 流式
+# 前端 `useAgentStore.runStreaming` 已于 2026-07-01 切换到上述流程。
+# 此接口保留是为了避免线上旧客户端 500，仅在 2026-09-30 前兼容。
+# 届时将直接删除，请尽快迁移。
 
 
-@router.post("/quick-start")
+@router.post("/quick-start", deprecated=True)
 async def quick_start_conversation(
     request: MessageCreate,
+    response: Response,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """快速开始：创建对话并添加首条消息，返回 conversation_id"""
+    """快速开始：创建对话并添加首条消息，返回 conversation_id
+
+    ⚠️ DEPRECATED — 2026-09-30 下线。请改用：
+       POST /api/v1/chat/conversations
+       POST /api/v1/chat/conversations/{id}/messages
+    """
+    logger.warning(
+        "DEPRECATED /api/v1/chat/quick-start 被调用，请迁移到 /conversations + /messages 流程",
+        extra={"user_id": current_user.id},
+    )
+    response.headers["Deprecation"] = "true"
+    response.headers["Sunset"] = "2026-09-30T00:00:00Z"
+    response.headers["Link"] = (
+        '</api/v1/chat/conversations>; rel="successor-version"'
+    )
+
     if request.role != "user":
         raise HTTPException(status_code=400, detail="首条消息必须是 user 角色")
 

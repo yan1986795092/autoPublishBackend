@@ -393,7 +393,23 @@ register(AgentCard(
 
 ### 6.2 SSE 事件规范
 
-**连接方式**: `POST /api/v1/agent/stream` — 请求体包含 prompt + context
+#### 端点
+
+| 端点 | Audience | 状态 | 适用 |
+|------|----------|------|------|
+| `POST /api/v1/agent/stream/v2` | 业务轨 | ✅ 推荐 | 前端产品 |
+| `POST /api/v1/agent/stream` | 业务轨（兼容） | ⚠️ deprecated，2026-09-30 下线 | 旧前端 |
+| `GET /api/v1/agent/obs/stream/{task_id}` | Observability | 🔧 内部 | dev panel / 调试 |
+
+> **v2 vs v1 差异**（spec 2026-07-01）：
+> - v2 实时**下发** `thinking_step / reasoning`（audience 默认 both），前端 store 累积到 `stages[].reasoning` / `thinkingSteps` / `reasoningChunks` —— StageTimeline / MessageBubble 实时反馈
+> - 仅 `audience='observability'` 的事件不下发（保留观测轨独占能力）
+> - v2 `result` 事件数据**用收敛 schema**（不携带 `_stages / _thinkingSteps / _llmChunks / _reasoningChunks / _draftContent / agent_events`）—— 这些运行时缓冲由前端 store 自累积，结果入库时再拼接
+> - v2 其余事件（plan / stage / progress / llm_chunk / done / error）与 v1 一致
+>
+> 详见 [docs/streaming-frontend-contract.md](./docs/streaming-frontend-contract.md) 和 [../docs/superpowers/specs/2026-07-01-streaming-frontend-contract.md](../docs/superpowers/specs/2026-07-01-streaming-frontend-contract.md)
+
+**连接方式**: `POST /api/v1/agent/stream` (v1, deprecated) 或 `POST /api/v1/agent/stream/v2` (v2, 推荐) — 请求体包含 prompt + context + parameters + trigger
 
 **事件流** (按发送顺序):
 
@@ -403,6 +419,7 @@ event: stage
 data: {"agent":"ManagerAgent","label":"思考分析中","icon":"🧠","status":"started"}
 
 // reasoning: Agent 的推理过程 (前端思考气泡用)
+// ⚠️ v2 不下发，v1 仍下发
 event: reasoning
 data: {"agent":"ManagerAgent","content":"📋 意图分析：CREATE - generate content\n📍 目标平台：小红书..."}
 
@@ -411,6 +428,7 @@ event: llm_chunk
 data: {"agent":"WritingAgent","content":"露营新手必看", "channel":"body"}
 
 // thinking_step: 每个 Agent 步骤的起止
+// ⚠️ v2 不下发，v1 仍下发
 event: thinking_step
 data: {"agent":"WritingAgent","action":"开始执行","status":"running"}
 
@@ -419,8 +437,9 @@ event: progress
 data: {"progress":60,"message":"审核优化中"}
 
 // result: 最终结果
+// v2 用收敛 schema，v1 是 AgentResult 全量 dump
 event: result
-data: {"output":{"full_text":"...","sections":[...]},"status":"completed"}
+data: {"task_id":"...","status":"completed","agent_type":"WritingAgent","output":{...},"usage":{...}}
 
 // error: 失败
 event: error
@@ -429,15 +448,73 @@ data: {"error":"Agent 执行超时","code":"TIMEOUT"}
 
 **事件类型枚举**:
 
-| 事件 | 前端用途 | 发送者 | 是否必达 |
-|------|---------|--------|---------|
-| `stage` | Timeline 显示 Agent 阶段 | Orchestrator | 是 |
-| `reasoning` | 思考气泡展示 | ManagerAgent | 建议 |
-| `llm_chunk` | 实时文字渲染 | Handler | 是(流式) |
-| `thinking_step` | Agent 步骤详情 | Handler | 建议 |
-| `progress` | 进度条 | Orchestrator | 建议 |
-| `result` | 最终结果展示 | Orchestrator | 是 |
-| `error` | 错误提示 | Orchestrator | 是 |
+| 事件 | 前端用途 | 发送者 | 是否必达 | v1 下发？ | v2 下发？ |
+|------|---------|--------|---------|-----------|-----------|
+| `plan` | Timeline 显示规划 | Orchestrator | 是 | ✅ | ✅ |
+| `task_created` | 关联 task_id | Orchestrator | 是 | ✅ | ✅ |
+| `thinking_step` | Agent 步骤详情 | Handler | 建议 | ✅ | ❌ 收敛到 store 自累积 |
+| `progress` | 进度条 | Orchestrator | 建议 | ✅ | ✅ |
+| `stage` | Timeline 显示 Agent 阶段 | Orchestrator | 是 | ✅ | ✅ |
+| `llm_chunk` | 实时文字渲染 | Handler | 是(流式) | ✅ | ✅ |
+| `reasoning` | 思考气泡展示 | ManagerAgent | 建议 | ✅ | ❌ 同上 |
+| `result` | 最终结果展示 | Orchestrator | 是 | ✅ 全量 dump | ✅ **收敛 schema** |
+| `done` | 终态 | Orchestrator | 是 | ✅ | ✅ |
+| `error` | 错误提示 | Orchestrator | 是 | ✅ | ✅ |
+
+#### 业务轨 `result` schema 收敛（v2）
+
+**v2 下发的 result（业务轨）**：
+
+```python
+{
+    # 标识
+    "task_id": "...",
+    "status": "completed" | "failed" | "partial",
+    "agent_type": "WritingAgent",
+    # 产物
+    "output": {
+        "full_text": "...",
+        "title": "...",
+        "platform": "...",
+        "content_type": "...",
+        "draft_content": "...",     # 多轮 review 时存在
+        "review_content": "...",    # 评审意见
+    },
+    # UI 摘要（MessageBubble 实际渲染）
+    "usage": {
+        "tokens_used": 1234,
+        "time_elapsed": 8.5,
+        "model": "gpt-4o",
+    },
+}
+```
+
+**DB 持久化 schema（前端入库时拼接）**：
+
+```python
+{
+    ...上面业务轨字段,
+    "_stages": [...],              # 运行时缓冲（历史回放用）
+    "_thinkingSteps": [...],
+    "_llmChunks": {...},
+    "_reasoningChunks": {...},
+    "_draftContent": "...",
+    "agent_events": {...},         # 全量 events（仅入库）
+}
+```
+
+**后端实现位置**：
+- `_transform_result_for_frontend()` in `src/agent/api.py`
+- `_result_for_persistence()` in `src/agent/api.py`
+- `_should_skip_in_business_track()` in `src/agent/api.py`
+
+#### 单元测试
+
+`tests/agents/test_stream_v2_contract.py` 覆盖（24 个用例）：
+- transform 函数字段映射 / 兜底 / 白名单
+- persistence 不污染输入
+- 业务轨过滤逻辑（按 audience 字段：observability 不下发 / both / frontend 下发）
+- 路由注册（v1 deprecated、v2 注册、obs 注册）
 
 ### 6.3 异步任务生命周期
 
@@ -796,7 +873,9 @@ Logs (logs-YYYY.MM.DD)
 |------|------|------|--------|------|
 | POST | `/api/v1/agent/run` | 同步执行 | `{prompt, context?, skill_name?}` | `AgentResult` |
 | POST | `/api/v1/agent/plan` | 预览计划 | `{prompt, context?}` | `ExecutionPlan` |
-| POST | `/api/v1/agent/stream` | SSE 流式 | `{prompt, context?, skill_name?}` | `text/event-stream` |
+| **POST** | **`/api/v1/agent/stream/v2`** | **SSE 流式 v2（推荐）** | `{prompt, context?, skill_name?}` | **`text/event-stream`（业务轨收敛 schema）** |
+| POST | `/api/v1/agent/stream` | SSE 流式 v1（deprecated） | `{prompt, context?, skill_name?}` | `text/event-stream`（全量 dump） |
+| **GET** | **`/api/v1/agent/obs/stream/{task_id}`** | **Observability SSE** | **—** | **`text/event-stream`（dev panel 用）** |
 | POST | `/api/v1/agent/async/submit` | 异步提交 | `{prompt, context?, skill_name?}` | `{task_id}` |
 | GET | `/api/v1/agent/async/status/{id}` | 查询状态 | — | `AsyncTask` |
 | GET | `/api/v1/agent/async/list` | 任务列表 | `?page&size` | `{tasks, total}` |
