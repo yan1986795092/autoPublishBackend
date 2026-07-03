@@ -25,7 +25,6 @@ from src.api.auth import get_current_user
 from src.core.security import decode_token
 from src.models import User
 from src.tools.vector_search import vector_search
-from src.tools.langchain import CrawlerTool
 from src.config import get_settings
 from src.core.request_guards import ensure_task_owner, validate_public_http_url
 

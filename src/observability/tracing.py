@@ -88,8 +88,3 @@ def get_tracer(name: str = "autopublish"):
     """
     from src.observability.agent_tracer import get_agent_tracer
     return get_agent_tracer()
-
-
-def get_meter(name: str = "autopublish"):
-    """桩函数：未配置 meter。"""
-    return None

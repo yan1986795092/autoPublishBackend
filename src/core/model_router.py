@@ -140,12 +140,5 @@ class ModelRouter:
                     gateway=self._gateway_url)
         return llm
 
-    # ──────────────────────────────────────────
-    # 兼容方法
-    # ──────────────────────────────────────────
-
-    def get_gateway(self, agent_type: str) -> ChatOpenAI:
-        return self.get_chat_model(agent_type)
-
     def invalidate_cache(self) -> None:
         self._cache.clear()

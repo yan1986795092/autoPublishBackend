@@ -9,7 +9,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Sequence
 
 logger = logging.getLogger(__name__)
 
@@ -62,7 +61,3 @@ def estimate_tokens(text: str, encoding_name: str = "cl100k_base") -> int:
         return int(chinese_chars / 1.5 + (total_chars - chinese_chars) / 4)
     return int(total_chars / 4)
 
-
-def estimate_tokens_batch(texts: Sequence[str], encoding_name: str = "cl100k_base") -> list[int]:
-    """批量估算 token 数量"""
-    return [estimate_tokens(t, encoding_name) for t in texts]

@@ -365,25 +365,3 @@ def get_builtin_skill(skill_id: str) -> BuiltinSkill | None:
         if s["id"] == skill_id:
             return s
     return None
-
-
-def list_builtin_skills() -> list[BuiltinSkill]:
-    """列出所有内置 Skill（列表形式，不含 system_prompt）"""
-    return [
-        {
-            "id": s["id"],
-            "name": s["name"],
-            "description": s["description"],
-            "category": s["category"],
-            "icon": s["icon"],
-            "source": "builtin",
-            "author": None,
-            "version": s["version"],
-            "tags": s["tags"],
-            "is_enabled": s["is_enabled"],
-            "use_count": 0,
-            "created_at": None,
-            "updated_at": None,
-        }
-        for s in BUILTIN_SKILLS
-    ]
