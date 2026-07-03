@@ -30,6 +30,9 @@ from .cache import agent_cache
 from .stage_map import get_stage_label, get_stage_icon
 from .registry import get as get_card, by_category, CATEGORY_DEPENDENCY_RULES
 from .output_filter import content_quality_check
+from .parser import parse_plan_with_reask
+from .plan_validator import validate_plan, plan_to_dict, dict_to_plan
+from .plan_frozen import FrozenPlan, UpgradeLevel
 
 from src.core.exceptions import HandlerError, ToolExecutionError
 from src.observability.metrics import record_agent_task, record_agent_run
@@ -259,118 +262,10 @@ def _normalize_plan_for_context(plan: dict, context: dict, user_request: str) ->
 
         return {**plan, "tasks": normalized}
 
-    wants_search = any(
-        keyword in user_request.lower()
-        for keyword in ("搜索", "热点", "热搜", "最新", "趋势", "news", "trending", "search")
-    )
-    if wants_search:
-        search_task = next((t for t in tasks if t.get("agent_type") == "WebSearch"), None)
-        analysis_task = next((t for t in tasks if t.get("agent_type") == "HotTopicAgent"), None)
-        writing_task = next((t for t in tasks if t.get("agent_type") == "WritingAgent"), None)
-        review_task = next((t for t in tasks if t.get("agent_type") == "ReviewAgent"), None)
-        fix_task = next((t for t in tasks if t.get("agent_type") == "FixAgent"), None)
-
-        if search_task and not analysis_task:
-            analysis_task = {
-                "id": str(uuid.uuid4()),
-                "agent_type": "HotTopicAgent",
-                "input": {
-                    "topic": context.get("topic") or user_request,
-                    "platform": context.get("platform", ""),
-                },
-                "dependencies": [search_task["id"]],
-                "can_parallel_with": [],
-                "retry_on_low_quality": False,
-                "priority": "medium",
-                "config": {"reasoning": "search analysis", "priority": len(tasks)},
-            }
-            insert_at = tasks.index(search_task) + 1
-            tasks.insert(insert_at, analysis_task)
-
-        if not writing_task:
-            dependency_id = analysis_task["id"] if analysis_task else (search_task["id"] if search_task else None)
-            # 从 context 提取所有 trigger 元信息（默认从 user_request 拿 topic）
-            _ctx_topic = context.get("topic") or user_request
-            # topic 安全检查：剥离 ## 思考 等元描述
-            _ctx_topic_clean = re.sub(
-                r'(?m)^#{1,3}\s*(思考|正文|标题|引言|结论)\s*[:：]?\s*', '', _ctx_topic
-            ).strip()
-            if not _ctx_topic_clean or len(_ctx_topic_clean) < 3:
-                _ctx_topic_clean = user_request[:200]
-
-            writing_task = {
-                "id": str(uuid.uuid4()),
-                "agent_type": "WritingAgent",
-                "input": {
-                    "topic": _ctx_topic_clean,
-                    "content_type": context.get("content_type", "blog"),
-                    "platform": context.get("platform", ""),
-                    "style": context.get("style", ""),
-                    "length": context.get("length", ""),
-                    "tone": context.get("tone", ""),
-                    "audience": context.get("audience", ""),
-                    "keywords": context.get("keywords", []),
-                    "action": context.get("action", "create"),
-                    "revision_focus": context.get("revision_focus", ""),
-                },
-                "dependencies": [dependency_id] if dependency_id else [],
-                "can_parallel_with": [],
-                "retry_on_low_quality": True,
-                "priority": "high",
-                "config": {"reasoning": "search writing", "priority": len(tasks)},
-            }
-            tasks.append(writing_task)
-
-        if not review_task:
-            review_task = {
-                "id": str(uuid.uuid4()),
-                "agent_type": "ReviewAgent",
-                "input": {
-                    "topic": context.get("topic") or user_request,
-                    "platform": context.get("platform", ""),
-                    "style": context.get("style", ""),
-                    "length": context.get("length", ""),
-                    "audience": context.get("audience", ""),
-                },
-                "dependencies": [writing_task["id"]],
-                "can_parallel_with": [],
-                "retry_on_low_quality": False,
-                "priority": "medium",
-                "config": {"reasoning": "search review", "priority": len(tasks)},
-            }
-            tasks.append(review_task)
-
-        if not fix_task:
-            fix_task = {
-                "id": str(uuid.uuid4()),
-                "agent_type": "FixAgent",
-                "input": {
-                    "topic": context.get("topic") or user_request,
-                    "platform": context.get("platform", ""),
-                    "style": context.get("style", ""),
-                    "length": context.get("length", ""),
-                    "tone": context.get("tone", ""),
-                    "audience": context.get("audience", ""),
-                    "revision_focus": context.get("revision_focus", ""),
-                },
-                "dependencies": [writing_task["id"], review_task["id"]],
-                "can_parallel_with": [],
-                "retry_on_low_quality": True,
-                "priority": "medium",
-                "config": {"reasoning": "search fix", "priority": len(tasks)},
-            }
-            tasks.append(fix_task)
-
-        if search_task and analysis_task:
-            analysis_task["dependencies"] = [search_task["id"]]
-        if analysis_task and writing_task:
-            writing_task["dependencies"] = [analysis_task["id"]]
-        elif search_task and writing_task:
-            writing_task["dependencies"] = [search_task["id"]]
-        if writing_task and review_task:
-            review_task["dependencies"] = [writing_task["id"]]
-        if writing_task and review_task and fix_task:
-            fix_task["dependencies"] = [writing_task["id"], review_task["id"]]
+    # FIX #2: 旧 wants_search 关键词路径已删除
+    # 原 P-25 逻辑由新的 plan_validator._inject_missing_deps 替代 (Layer 3)
+    # 关键词匹配存在 over-injection 风险: "今天搜索" 也会触发不必要的 WebSearch
+    # 统一交给 validator 基于 plan 拓扑 + 搜索信号 决定是否追加
 
     return {**plan, "tasks": tasks}
 
@@ -406,6 +301,12 @@ async def _publish_streaming_event(state: AgentGraphState, event_type: str, data
                 await task_queue.publish_reasoning(task_id, data)
             elif event_type == "stage":
                 await task_queue.publish_stage(task_id, data)
+            elif event_type == "error":
+                # FIX D: 节点内部异常也能即时推 error 到 SSE
+                task_queue.fail_task(task_id, data.get("message", "节点失败"))
+            elif event_type == "result":
+                # FIX: 节点出 content 也能走此 path (较少用, 但兜底)
+                task_queue.complete_task(task_id, data)
         except Exception as e:
             logger.warning("发布流式事件失败", event_type=event_type, exception=str(e))
 
@@ -751,8 +652,9 @@ async def plan_tasks(state: AgentGraphState) -> dict:
     if precomputed and precomputed.get("tasks"):
         logger.info("使用预计算计划，跳过 LLM 规划")
         # 仍然补一个 stage:completed 让前端 timeline 一致（理解阶段完成后立刻显示执行路线）
+        # 注意：使用独立的 "PlannerAgent" key，避免与 understand_intent 的 "ManagerAgent" 冲突
         await _publish_streaming_event(state, "stage", {
-            "agent": "ManagerAgent",
+            "agent": "PlannerAgent",
             "label": "规划任务中",
             "icon": "📋",
             "status": "completed",
@@ -788,8 +690,10 @@ async def plan_tasks(state: AgentGraphState) -> dict:
         }, ensure_ascii=False, indent=2)
 
         # ── 在 LLM 调用前发布 stage:started ──
+        # 注意：使用独立的 "PlannerAgent" key，避免与 understand_intent 的 "ManagerAgent" 冲突，
+        #     这样前端 timeline 能看到"思考分析中" → "规划任务中" 两个独立阶段
         await _publish_streaming_event(state, "stage", {
-            "agent": "ManagerAgent",
+            "agent": "PlannerAgent",
             "label": "规划任务中",
             "icon": "📋",
             "status": "started",
@@ -814,14 +718,43 @@ Based on the above understanding, select the most appropriate agents to complete
                     ]),
                     timeout=60.0,
                 )
-                plan = _parse_plan_from_response(response.content, cleaned_prompt, platform=detected_platform)
+                # ── Layer 2: Pydantic + reask parse (替换旧的 regex/json.loads 路径) ──
+                user_planner_prompt = f"""## User Request
+{cleaned_prompt}
 
-                if not plan or len(plan.get("tasks", [])) == 0:
-                    logger.warning("LLM 计划没有任务，使用兜底方案. LLM响应: %s", response.content[:300] if response.content else "空")
+## Intent Understanding
+{context_str}
+
+Based on the above understanding, select the most appropriate agents to complete the task.
+Output ONLY the JSON plan, no extra text."""
+                parsed_plan = await parse_plan_with_reask(
+                    llm, user_planner_prompt,
+                    context_str=context_str,
+                    max_attempts=3,
+                    timeout=60.0,
+                )
+
+                if parsed_plan is None:
+                    logger.warning(
+                        "LLM 计划 parse+reask 全部失败, 使用兜底方案. "
+                        "LLM响应: %s", (response.content[:300] if hasattr(response, 'content') and response.content else "空")
+                    )
                     plan = _build_fallback_plan(cleaned_prompt, detected_platform)
                 else:
-                    plan["plan_method"] = "llm"
-                    logger.info("LLM 计划已生成：%d 个任务", len(plan.get("tasks", [])))
+                    # ── Layer 3: ValidationNode (校验 + 自动注入依赖, 修 wants_search bug) ──
+                    vresult = validate_plan(parsed_plan)
+                    if not vresult.valid:
+                        logger.warning(
+                            "plan 校验失败 issues=%s, 仍使用(尝试执行)",
+                            vresult.issues,
+                        )
+                    plan = plan_to_dict(vresult.plan)
+                    plan["plan_method"] = "llm" if not vresult.auto_fixed else "llm-validated"
+                    logger.info(
+                        "LLM 计划已生成：%d 个任务 (auto_fixed=%s)",
+                        len(plan.get("tasks", [])),
+                        vresult.auto_fixed,
+                    )
                     _tasks = plan.get("tasks", [])
                     _steps = []
                     for _t in _tasks:
@@ -947,13 +880,26 @@ Based on the above understanding, select the most appropriate agents to complete
         span.set_status("OK")
 
         # 规划完成事件（started 已在 LLM 调用前发出）
+        # 使用 "PlannerAgent" key 与上面的 started 配对
         await _publish_streaming_event(state, "stage", {
-            "agent": "ManagerAgent",
+            "agent": "PlannerAgent",
             "status": "completed",
             "duration": time.time() - (state.get("start_time", time.time()) or time.time()),
             "timestamp": time.time(),
             "_reasoning": _plan_reasoning,
         })
+
+        # ── Layer 4: 冻结 plan (retry→patch→replan 升级协议的状态基础) ──
+        try:
+            pyd_plan = dict_to_plan(plan)
+            frozen = FrozenPlan.freeze(pyd_plan)
+            updates["frozen_plan"] = frozen.to_dict()
+            updates["plan_version"] = frozen.version_hash
+        except Exception as _e:
+            # 冻结失败不影响 plan 本身使用, 仅记录
+            logger.warning("plan freeze failed (non-fatal)", error=str(_e)[:200])
+            updates["frozen_plan"] = None
+            updates["plan_version"] = None
 
         return updates
 
@@ -2018,6 +1964,145 @@ def _build_dependency_context(task: dict, state: AgentGraphState) -> dict:
 # 5. merge_and_finish 节点
 # ──────────────────────────────────────────────
 
+
+async def validate_plan_node(state: AgentGraphState) -> dict:
+    """Layer 3 ValidationNode 入口 (LangGraph 节点版)。
+
+    校验 plan 拓扑, 标记 plan_valid 给 conditional_edge 路由。
+    - valid=True → 继续 schedule_and_execute
+    - valid=False → 触发 replan_plan_node
+
+    注: plan_tasks 内部已调用 validate_plan 做自动修复(主要是注入缺失依赖)。
+    本节点主要负责:
+    1. 检测 Pydantic schema 校验仍失败的 plan (极少见, plan_tasks 已自动修复)
+    2. 检查 plan_version 与 frozen_plan 是否一致 (Graph Harness plan immutability)
+    3. emit 一个 stage event 让前端 timeline 显示"规划校验通过"
+    """
+    plan = state.get("plan")
+    frozen_plan_data = state.get("frozen_plan")
+
+    if not plan or not plan.get("tasks"):
+        logger.warning("validate_plan_node: plan 为空, 标记无效")
+        return {"plan_valid": False, "_validate_issues": ["plan 为空"]}
+
+    issues: list[str] = []
+
+    # 检查 frozen_plan 与当前 plan 是否一致 (防 plan 拓扑被中间环节意外修改)
+    if frozen_plan_data:
+        try:
+            from .plan_frozen import FrozenPlan
+            frozen = FrozenPlan.from_dict(frozen_plan_data)
+            # 重新 hash 当前 plan, 与 frozen 的 version_hash 比较
+            from .plan_validator import dict_to_plan
+            current_plan = dict_to_plan(plan)
+            current_frozen = FrozenPlan.freeze(current_plan)
+            if current_frozen.version_hash != frozen.version_hash:
+                issues.append(
+                    f"plan 拓扑在 freeze 后被修改 "
+                    f"(frozen={frozen.version_hash}, current={current_frozen.version_hash})"
+                )
+        except Exception as e:
+            logger.debug("frozen_plan verify skipped", error=str(e)[:100])
+
+    # 二次校验: 检查 agent_type 全部能在 registry 找到
+    for t in plan.get("tasks", []):
+        at = t.get("agent_type")
+        if not at or get_card(at) is None:
+            issues.append(f"task {t.get('id', '?')} 的 agent_type '{at}' 未注册")
+
+    # 检查依赖图无环 (粗略: 检测是否出现自引用)
+    task_ids = {t.get("id") for t in plan.get("tasks", [])}
+    for t in plan.get("tasks", []):
+        tid = t.get("id")
+        deps = t.get("dependencies", []) or []
+        if tid in deps:
+            issues.append(f"task {tid} 存在自引用依赖")
+        for d in deps:
+            if d and d not in task_ids:
+                issues.append(f"task {tid} 的 dep '{d}' 不在 plan 内")
+
+    valid = len(issues) == 0
+    logger.info(
+        "validate_plan_node: valid=%s issues=%d",
+        valid, len(issues),
+    )
+
+    return {
+        "plan_valid": valid,
+        "_validate_issues": issues,
+    }
+
+
+async def replan_plan_node(state: AgentGraphState) -> dict:
+    """replan 入口 - 当 validate_plan_node 失败时触发。
+
+    FIX #6 + #7:
+    - 保留原 frozen 的 replan_count (不重置)
+    - replan 全失败时走 fallback plan, 不让 plan 为空
+    """
+    from .plan_frozen import FrozenPlan
+
+    frozen_data = state.get("frozen_plan")
+    frozen = FrozenPlan.from_dict(frozen_data) if frozen_data else None
+
+    if frozen and not frozen.can_upgrade(UpgradeLevel.REPLAN):
+        logger.error(
+            "replan 预算耗尽 (replans=%d/%d), 跳过重规划, 走现有 plan",
+            frozen.replan_count, frozen.max_replans,
+        )
+        # FIX #7: 兜底放行, 但确保 plan 不为 None (走 fallback 兜底)
+        if not state.get("plan") or not state.get("plan", {}).get("tasks"):
+            logger.warning("replan 预算耗尽且无 plan, 注入 fallback plan")
+            fallback = _build_fallback_plan(
+                state.get("user_request", ""),
+                state.get("understanding", {}).get("platform"),
+            )
+            return {
+                "plan": fallback,
+                "plan_valid": True,
+                "_replan_skipped": True,
+            }
+        return {
+            "plan_valid": True,
+            "_replan_skipped": True,
+        }
+
+    if frozen:
+        # FIX #6: 消费 REPLAN 预算, 保留原 frozen (而不是新 freeze)
+        frozen.consume(UpgradeLevel.REPLAN)
+        preserved_frozen_data = frozen.to_dict()
+    else:
+        preserved_frozen_data = None
+
+    logger.info(
+        "replan_plan_node: 触发重规划 (replans=%d/%d)",
+        frozen.replan_count if frozen else 0,
+        frozen.max_replans if frozen else 0,
+    )
+
+    # 重新调 plan_tasks
+    result = await plan_tasks(state)
+
+    # FIX #6: 保留原 frozen 计数 (而不是让 plan_tasks 覆盖)
+    if preserved_frozen_data:
+        result["frozen_plan"] = preserved_frozen_data
+        result["plan_version"] = frozen.version_hash if frozen else None
+
+    # FIX #7: replan 后 plan 仍为空 → 走 fallback
+    if not result.get("plan") or not result.get("plan", {}).get("tasks"):
+        logger.error("replan_plan_node: 重规划后 plan 仍为空, 注入 fallback plan")
+        fallback = _build_fallback_plan(
+            state.get("user_request", ""),
+            state.get("understanding", {}).get("platform"),
+        )
+        result["plan"] = fallback
+        result["plan_valid"] = True
+        result["_replan_fallback"] = True
+
+    result["plan_valid"] = True  # plan_tasks 已自校验过
+    return result
+
+
 async def merge_and_finish(state: AgentGraphState) -> dict:
     """合并所有子任务结果为最终输出 + 持久化"""
     tracer = _get_tracer()
@@ -2143,6 +2228,10 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
 
         if not primary_content:
             logger.error("未找到主内容，合并失败")
+            # FIX B: 这种情况也发 SSE error
+            await _publish_streaming_event(state, "error", {
+                "message": "Agent 执行完成但未生成有效内容",
+            })
             return {
                 "status": "failed",
                 "error": "Agent 执行完成但未生成有效内容",
@@ -2199,6 +2288,36 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
 
         merge_span.set_attribute("merge.status", status)
         merge_span.set_status("OK")
+
+        # FIX B: status=failed 时, 主动推 SSE error 事件 + 把 task 标 failed
+        # 否则前端只能等 done, 且只看到空 result
+        if status == "failed":
+            failed_details = [
+                f"{t.get('agent_type', '?')}({t.get('id', '?')[:8]})"
+                for t in task_queue
+                if t.get("id") in failed_ids
+            ]
+            error_msg = (
+                f"所有任务都失败了 ({len(failed_ids)}/{len(task_queue)}): "
+                f"{', '.join(failed_details[:5])}"
+            )
+            await _publish_streaming_event(state, "error", {"message": error_msg})
+            # FIX B: 同时把 final_output 标 empty, 避免前端拿到半截 result
+            empty_output = {
+                "goal": plan.get("goal", ""),
+                "plan_reasoning": plan.get("reasoning", ""),
+                "platform": "",
+                "title": "",
+                "sections": [],
+                "full_text": "",
+                "review_content": "",
+                "draft_content": None,
+            }
+            return {
+                "final_output": empty_output,
+                "status": status,
+                "error": error_msg,
+            }
 
         # 清理：去掉 LLM 自行添加的"改进版"、"备选方案"等非正文段落
         raw_full_text = "".join(full_text_parts)

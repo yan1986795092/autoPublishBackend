@@ -1,13 +1,16 @@
-"""TriggerExtractor 追问意图识别单元测试
+"""IntentDetector 追问意图识别单元测试
 
 针对 BUG：对话 LLM 正确表达"信息不足/需要追问"时，兜底分支不应触发 pipeline。
+
+v3 改造：移除 TriggerExtractor 对 [GENERATE] 文本标记的处理逻辑，
+本测试只覆盖纯文本意图识别（追问 vs 越权自写）。
 """
 
-from src.conversation.intent_detector import TriggerExtractor
+from src.conversation.intent_detector import IntentDetector
 
 
 class TestLooksLikeFollowupQuestion:
-    """TriggerExtractor.looks_like_followup_question 的判定测试"""
+    """IntentDetector.looks_like_followup_question 的判定测试"""
 
     # ── 期望被识别为追问（True） ──
 
@@ -21,7 +24,7 @@ class TestLooksLikeFollowupQuestion:
             "3. 目标读者是谁？是学生、职场白领、创作者，还是普通大众？\n"
             "您先简单说说，我们再一步步把文案打磨出来！"
         )
-        assert TriggerExtractor.looks_like_followup_question(text) is True
+        assert IntentDetector.looks_like_followup_question(text) is True
 
     def test_asks_what_topic_then_invites_continue(self):
         """真实场景 2：LLM 询问主题并邀请继续"""
@@ -34,7 +37,7 @@ class TestLooksLikeFollowupQuestion:
             "2. 文案打算发在哪个平台？比如小红书（偏种草）、公众号（偏深度）。\n"
             "您简单说两句，我就能开始创作啦！"
         )
-        assert TriggerExtractor.looks_like_followup_question(text) is True
+        assert IntentDetector.looks_like_followup_question(text) is True
 
     def test_just_a_question_with_polite_invite(self):
         """真实场景 3：短追问 + 邀请"""
@@ -42,44 +45,45 @@ class TestLooksLikeFollowupQuestion:
             "请告诉我这款应用的核心卖点是什么？"
             "另外，目标读者是哪类人群？您先简单说说。"
         )
-        assert TriggerExtractor.looks_like_followup_question(text) is True
+        assert IntentDetector.looks_like_followup_question(text) is True
 
     # ── 期望不被识别为追问（False） ──
 
     def test_empty_text(self):
         """空文本"""
-        assert TriggerExtractor.looks_like_followup_question("") is False
+        assert IntentDetector.looks_like_followup_question("") is False
 
     def test_too_short_text(self):
         """过短文本（< 10 字符）"""
-        assert TriggerExtractor.looks_like_followup_question("好的") is False
-        assert TriggerExtractor.looks_like_followup_question(None) is False
+        assert IntentDetector.looks_like_followup_question("好的") is False
+        assert IntentDetector.looks_like_followup_question(None) is False
 
     def test_meta_dump_text(self):
         """LLM 越权自写的元描述 dump（不是追问）"""
         text = (
-            "## 思考：\n\n对于一篇技术博客文章，标题需要足够吸引人。\n\n"
-            "## 正文：\n\n这是一篇关于 Python 入门的文章..."
+            "## 思考：\n"
+            "好的，让我开始创作一篇推广文案。\n"
+            "## 正文：\n"
+            "智能笔记应用，让记录更高效……"
         )
-        assert TriggerExtractor.looks_like_followup_question(text) is False
+        assert IntentDetector.looks_like_followup_question(text) is False
 
     def test_unauthorized_full_write(self):
-        """LLM 直接写了一篇完整文章（无追问语气）"""
+        """LLM 完整写一篇（不是追问）"""
         text = (
-            "标题：深度解析：人工智能在医疗领域的应用\n\n"
-            "引言：人工智能正在以前所未有的速度改变着各行各业。\n\n"
-            "第一章：技术演进\n\n从专家系统到深度学习...\n\n"
-            "第二章：应用场景\n\n从影像识别到药物研发...\n\n"
-            "结论：人工智能将与医疗深度融合..."
+            "好的，我直接帮您写一篇！\n\n"
+            "标题：AI 时代如何让效率翻倍？\n\n"
+            "引言：在当今快节奏的工作环境……\n\n"
+            "第一部分：智能化趋势\n"
+            "随着 AI 技术的快速发展……\n\n"
+            "结论：选择 AI 工具是时代的必然。"
         )
-        assert TriggerExtractor.looks_like_followup_question(text) is False
+        assert IntentDetector.looks_like_followup_question(text) is False
 
     def test_normal_chat_greeting(self):
-        """普通闲聊问候（不含追问）"""
-        text = "您好！有什么可以帮助您的吗？"
-        # 单个问号 + 一个简单问句 → hits < 2，应该 False
-        # 注意："您好"+"帮助"都没有触发任何追问模式
-        assert TriggerExtractor.looks_like_followup_question(text) is False
+        """普通聊天问候（不是追问）"""
+        text = "您好！很高兴见到你。请问有什么我可以帮助您的吗？"
+        assert IntentDetector.looks_like_followup_question(text) is False
 
 
 class TestTriggerDetectionWithFollowup:
@@ -94,10 +98,41 @@ class TestTriggerDetectionWithFollowup:
             "2. 目标平台是哪里？\n"
             "您先简单说说，我们再一步步把文案打磨出来！"
         )
-        # 这个 full_text 既无 [GENERATE]，也无越权自写，但表达追问意图
-        has_marker = TriggerExtractor.has_marker(full_text)
-        is_unauth = TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=False)
-        is_followup = TriggerExtractor.looks_like_followup_question(full_text)
-        assert has_marker is False
+        # 这个 full_text 表达追问意图
+        is_unauth = IntentDetector.looks_like_unauthorized_write(full_text)
+        is_followup = IntentDetector.looks_like_followup_question(full_text)
         assert is_unauth is False
         assert is_followup is True
+
+
+class TestIntentDetectorRemovedMarkerMethods:
+    """v3 改造：移除 [GENERATE] 文本标记相关方法"""
+
+    def test_extract_method_removed(self):
+        """extract() 已被移除（不再解析文本标记）"""
+        assert not hasattr(IntentDetector, "extract")
+
+    def test_has_marker_method_removed(self):
+        """has_marker() 已被移除"""
+        assert not hasattr(IntentDetector, "has_marker")
+
+    def test_strip_method_removed(self):
+        """strip() 已被移除"""
+        assert not hasattr(IntentDetector, "strip")
+
+    def test_looks_like_unauthorized_write_no_longer_accepts_has_marker(self):
+        """looks_like_unauthorized_write 不再接受 has_marker 参数"""
+        import inspect
+        sig = inspect.signature(IntentDetector.looks_like_unauthorized_write)
+        params = list(sig.parameters.keys())
+        # 应该是 (cls, text)，不再有 has_marker
+        assert "has_marker" not in params
+        assert "text" in params
+
+
+class TestTriggerExtractorAlias:
+    """向后兼容：TriggerExtractor 别名 = IntentDetector"""
+
+    def test_trigger_extractor_is_intent_detector(self):
+        from src.conversation.intent_detector import TriggerExtractor, IntentDetector
+        assert TriggerExtractor is IntentDetector

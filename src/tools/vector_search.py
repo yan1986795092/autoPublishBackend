@@ -12,15 +12,41 @@ from src.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-# 固定使用 Zhipu embedding-2 模型（1024 维）
-# 用户已配置 zhipu_api_key，且保持一致维度便于存储和检索
-_EMBEDDING_DIM = 1024
-_EMBEDDING_MODEL = "embedding-2"
-_EMBEDDING_PROVIDER = "zhipu"
+# 嵌入模型配置（2026/07/03 起从 Zhipu embedding-2 切换到 Qwen text-embedding-v3）
+# 两者均为 1024 维、OpenAI 协议兼容，无需迁移数据即可切换。
+# 通过 settings.embedding_provider 字段可回退到 zhipu（保留旧的 Zhipu API Key 路径）。
+
+
+def _resolve_embedding_config():
+    """根据 settings.embedding_provider 返回 embedding 配置。
+
+    Returns:
+        (api_key, base_url, model, dim, provider_label)
+    """
+    settings = get_settings()
+    provider = (settings.embedding_provider or "qwen").lower()
+
+    if provider == "qwen":
+        return (
+            settings.qwen_api_key,
+            settings.qwen_base_url,
+            settings.qwen_embedding_model,
+            settings.embedding_dim,
+            "Qwen",
+        )
+
+    # 回退：Zhipu（不推荐 — embedding-2 已过期 / 余额耗尽）
+    return (
+        settings.zhipu_api_key,
+        settings.zhipu_base_url,
+        "embedding-2",
+        1024,
+        "Zhipu",
+    )
 
 
 class VectorSearchTool:
-    """语义向量搜索工具，使用 PostgreSQL + pgvector + Zhipu Embedding"""
+    """语义向量搜索工具，使用 PostgreSQL + pgvector + Qwen Embedding"""
 
     name = "vector_search"
     description = "使用语义相似度在知识库中搜索相似内容"
@@ -28,6 +54,8 @@ class VectorSearchTool:
     def __init__(self):
         self._embeddings = None
         self._pgvector_available = False
+        self._embedding_dim: int | None = None
+        self._provider_label: str | None = None
 
     def _ensure_pgvector(self) -> bool:
         """检查 pgvector 扩展是否可用"""
@@ -42,16 +70,19 @@ class VectorSearchTool:
             return False
 
     def _ensure_embeddings(self):
-        """使用 Zhipu embedding-2 模型初始化"""
+        """按 settings.embedding_provider 初始化 embedder。"""
         if self._embeddings is not None:
             return
 
-        settings = get_settings()
-        api_key = settings.zhipu_api_key
+        api_key, base_url, model_name, dim, label = _resolve_embedding_config()
+        self._embedding_dim = dim
+        self._provider_label = label
+
         if not api_key:
             logger.warning(
-                "未配置 zhipu_api_key，向量搜索不可用。"
-                "请在 .env 中设置 ZHIPU_API_KEY"
+                "未配置 %s_api_key，向量搜索不可用。"
+                "请在 .env 中设置 QWEN_API_KEY（或 ZHIPU_API_KEY 回退）",
+                label,
             )
             return
 
@@ -59,20 +90,20 @@ class VectorSearchTool:
             from langchain_openai import OpenAIEmbeddings
 
             self._embeddings = OpenAIEmbeddings(
-                model=_EMBEDDING_MODEL,
+                model=model_name,
                 openai_api_key=api_key,
-                openai_api_base=settings.zhipu_base_url,
+                openai_api_base=base_url,
             )
             logger.info(
-                "VectorSearch: 使用 Zhipu Embedding（模型=%s, 维度=%d）",
-                _EMBEDDING_MODEL, _EMBEDDING_DIM,
+                "VectorSearch: 使用 %s Embedding（模型=%s, 维度=%d）",
+                label, model_name, dim,
             )
         except Exception as e:
-            logger.warning("Zhipu Embedding 初始化失败: %s", e)
+            logger.warning("%s Embedding 初始化失败: %s", label, e)
 
     @property
     def embedding_dim(self) -> int:
-        return _EMBEDDING_DIM
+        return self._embedding_dim or 1024
 
     def _to_pgvector_str(self, embedding: list[float]) -> str:
         return "[" + ",".join(str(x) for x in embedding) + "]"
@@ -91,16 +122,38 @@ class VectorSearchTool:
         if not self._ensure_pgvector():
             return False
 
+        # 修复 BUG-2：清洗输入 — Qwen Embedding 拒绝非 str / 空字符串 / 控制字符，
+        #     直接传会让 API 抛 'contents is neither str nor list of str' 然后整批失败。
+        #     过滤非字符串 + 空串 + 过长文本（>8000 字符 Qwen 也会拒）。
+        cleaned_texts: list[str] = []
+        cleaned_metas: list[dict] = []
+        for i, t in enumerate(texts):
+            if not isinstance(t, str):
+                logger.warning("VectorSearch 跳过非字符串文本 (index=%s, type=%s)", i, type(t).__name__)
+                continue
+            t2 = "".join(ch for ch in t if ch == "\n" or ch == "\t" or ch >= " ")
+            t2 = t2.strip()
+            if not t2:
+                continue
+            if len(t2) > 8000:
+                t2 = t2[:8000]
+            cleaned_texts.append(t2)
+            if metadatas and i < len(metadatas):
+                cleaned_metas.append(metadatas[i])
+        if not cleaned_texts:
+            logger.warning("VectorSearch 全部文本清洗后为空，跳过写入")
+            return False
+
         try:
-            embeddings = self._embeddings.embed_documents(texts)
-            metadatas = metadatas or [{}] * len(texts)
+            embeddings = self._embeddings.embed_documents(cleaned_texts)
+            metas_to_use = cleaned_metas if cleaned_metas else ([{}] * len(cleaned_texts))
 
             db = SessionLocal()
             try:
-                for i, doc_text in enumerate(texts):
+                for i, doc_text in enumerate(cleaned_texts):
                     embedding_str = self._to_pgvector_str(embeddings[i])
-                    meta_json = json.dumps(metadatas[i], ensure_ascii=False) if metadatas[i] else "{}"
-                    namespace = metadatas[i].get("namespace", "general") if metadatas[i] else "general"
+                    meta_json = json.dumps(metas_to_use[i], ensure_ascii=False) if metas_to_use[i] else "{}"
+                    namespace = metas_to_use[i].get("namespace", "general") if metas_to_use[i] else "general"
 
                     db.execute(
                         text(

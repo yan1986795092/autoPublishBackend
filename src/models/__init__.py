@@ -199,6 +199,31 @@ class ChatMessageRecord(Base):
     conversation = relationship("ChatConversation", back_populates="messages")
 
 
+class ChatMessagePart(Base):
+    """Part 持久化模型（spec §3.2.1）
+
+    一个 Message 有多个 Part（text / reasoning / tool_call / artifact / plan / error）。
+    前端 SSE v3 流式写入，后端 200ms 节流 flush 到 DB。
+    """
+    __tablename__ = "chat_message_parts"
+
+    id = Column(String(36), primary_key=True, default=generate_uuid)
+    message_id = Column(
+        String(36), ForeignKey("chat_message_records.id"), nullable=False, index=True
+    )
+    seq = Column(Integer, nullable=False)
+    type = Column(String(20), nullable=False)
+    state = Column(String(20), nullable=False, default="streaming")
+    payload_json = Column(Text, nullable=False, default="{}")
+    server_id = Column(String(64), nullable=True)
+    created_at = Column(DateTime, default=func.now())
+    completed_at = Column(DateTime, nullable=True)
+
+    message = relationship("ChatMessageRecord", backref="parts")
+
+    # 索引已在 DB migration 中定义（ix_parts_message_seq / ix_parts_message_server）
+
+
 class PublishRecord(Base):
     __tablename__ = "publish_records"
 

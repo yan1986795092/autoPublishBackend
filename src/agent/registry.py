@@ -243,6 +243,16 @@ register(AgentCard(
 ))
 
 register(AgentCard(
+    name="PlannerAgent",
+    description="【任务规划】根据用户意图自动拆解为子任务序列，决定后续 Agent 调用链。",
+    category="analysis",
+    model="qwen3.7-max",
+    stage_label="规划任务中",
+    stage_icon="📋",
+    stage_color="slate",
+))
+
+register(AgentCard(
     name="HotTopicAgent",
     description="【热点分析】基于 WebSearch 获取的搜索结果，分析社交平台的热点话题趋势和洞察。必须依赖 WebSearch 的输出，不可独立搜索。",
     category="analysis",

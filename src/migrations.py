@@ -404,3 +404,64 @@ def set_user_id_not_null(engine) -> None:
             conn.commit()
         else:
             logger.info(f"Skipping NOT NULL constraint on {engine.dialect.name} (Phase 5 仅 PostgreSQL)")
+
+
+# =====================================================================
+# Phase 1: Parts 模型重构
+# =====================================================================
+
+@migration_manager.register(
+    "chat_message_parts",
+    "创建 chat_message_parts 表（Part 持久化，一对多关联 chat_message_records）",
+)
+def create_chat_message_parts(engine) -> None:
+    """创建 chat_message_parts 表（spec §3.2.1）
+
+    表结构：
+      - id           VARCHAR(36)  PRIMARY KEY
+      - message_id   VARCHAR(36)  NOT NULL  FK → chat_message_records.id
+      - seq          INTEGER      NOT NULL   （同一 message 内的顺序）
+      - type         VARCHAR(20)  NOT NULL   （text/reasoning/tool_call/artifact/plan/error）
+      - state        VARCHAR(20)  NOT NULL   DEFAULT 'streaming'
+      - payload_json TEXT         NOT NULL   （各 type 的 payload，JSON）
+      - server_id    VARCHAR(64)  可选       （服务端分配，用于幂等去重）
+      - created_at   TIMESTAMP WITH TIME ZONE
+      - completed_at TIMESTAMP WITH TIME ZONE
+    """
+    inspector = inspect(engine)
+
+    if "chat_message_parts" in inspector.get_table_names():
+        logger.info("chat_message_parts 已存在，跳过")
+        return
+
+    with engine.connect() as conn:
+        conn.execute(text("""
+            CREATE TABLE chat_message_parts (
+                id              VARCHAR(36) PRIMARY KEY,
+                message_id      VARCHAR(36) NOT NULL,
+                seq             INTEGER NOT NULL,
+                type            VARCHAR(20) NOT NULL,
+                state           VARCHAR(20) NOT NULL DEFAULT 'streaming',
+                payload_json    TEXT NOT NULL DEFAULT '{}',
+                server_id       VARCHAR(64),
+                created_at      TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
+                completed_at    TIMESTAMP WITH TIME ZONE
+            )
+        """))
+        conn.execute(text(
+            "ALTER TABLE chat_message_parts "
+            "ADD CONSTRAINT fk_parts_message "
+            "FOREIGN KEY (message_id) REFERENCES chat_message_records(id) ON DELETE CASCADE"
+        ))
+        conn.execute(text(
+            "CREATE INDEX ix_parts_message_seq "
+            "ON chat_message_parts(message_id, seq)"
+        ))
+        conn.execute(text(
+            "CREATE UNIQUE INDEX ix_parts_message_server "
+            "ON chat_message_parts(message_id, server_id) "
+            "WHERE server_id IS NOT NULL"
+        ))
+        conn.commit()
+
+    logger.info("chat_message_parts 表创建完成")

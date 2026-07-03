@@ -164,7 +164,25 @@ class Orchestrator:
                     }
 
                     config = {"recursion_limit": 200}
-                    final_state = await self._graph.ainvoke(initial_state, config=config)
+                    try:
+                        final_state = await self._graph.ainvoke(initial_state, config=config)
+                    except Exception as graph_exc:
+                        # FIX A: graph 内部异常 → 发布 SSE error 事件, 让前端立刻看到失败
+                        # 而不是等 90s 心跳超时
+                        error_msg = f"图执行失败: {type(graph_exc).__name__}: {str(graph_exc)[:200]}"
+                        logger.error(
+                            "graph.ainvoke 抛出异常, 发布 SSE error",
+                            exception=str(graph_exc),
+                        )
+                        if _active_tq and _active_task_id:
+                            try:
+                                _active_tq.fail_task(_active_task_id, error_msg)
+                            except Exception as pub_exc:
+                                logger.warning(
+                                    "发布 graph 异常到 SSE 失败",
+                                    exception=str(pub_exc),
+                                )
+                        raise  # 仍抛给上层 except, 返回 AgentResult(FAILED)
 
                     elapsed = round(time.time() - start_time, 2)
                     status = final_state.get("status", "completed")
@@ -210,6 +228,12 @@ class Orchestrator:
                 root_span.record_exception(TimeoutError(f"图在 {timeout}s 后超时"))
                 root_span.set_attribute("agent.status", "timeout")
                 record_agent_run(status="timeout", skill_name=skill_name, duration_s=elapsed)
+                # FIX A: 超时也要 push error event
+                if _active_tq and _active_task_id:
+                    try:
+                        _active_tq.fail_task(_active_task_id, f"图执行超时 ({timeout}s)")
+                    except Exception:
+                        pass
                 return AgentResult(
                     task_id=task_id,
                     status=TaskStatus.FAILED,
@@ -225,6 +249,15 @@ class Orchestrator:
                 root_span.set_attribute("agent.error_type", type(e).__name__)
                 logger.error("图执行失败", exception=e, exc_info=True)
                 record_agent_run(status="failed", skill_name=skill_name, duration_s=elapsed)
+                # FIX A: 顶层异常兜底: 即使 graph_exc try-except 失败, 仍发 error event
+                if _active_tq and _active_task_id:
+                    try:
+                        _active_tq.fail_task(
+                            _active_task_id,
+                            f"图执行失败: {type(e).__name__}: {str(e)[:200]}",
+                        )
+                    except Exception:
+                        pass
                 return AgentResult(
                     task_id=task_id,
                     status=TaskStatus.FAILED,
@@ -267,8 +300,11 @@ class Orchestrator:
         """将用户请求分解为执行计划（用于 /agent/plan 端点）"""
         from .nodes import (
             UNDERSTANDING_SYSTEM_PROMPT, PLANNING_SYSTEM_PROMPT,
-            _build_fallback_understanding, _parse_plan_from_response, _build_fallback_plan,
+            _build_fallback_understanding, _build_fallback_plan,
         )
+        # FIX #1: 改走新 parse+reask, 不再用旧 _parse_plan_from_response
+        from .parser import parse_plan_with_reask
+        from .plan_validator import validate_plan, plan_to_dict
 
         # Step 1: 理解（纯 LLM）
         understanding = None
@@ -309,17 +345,29 @@ class Orchestrator:
 
         plan_dict = None
         if self._planner_llm:
+            # FIX #1: 走新 parse+reask (Pydantic + 自动 reask)
+            user_prompt = (
+                f"## User Request\n{context_data['cleaned_prompt']}\n\n"
+                f"## Intent Understanding\n"
+                f"{json.dumps(context_data, ensure_ascii=False, indent=2)}\n\n"
+                f"Based on the above understanding, select the most appropriate agents to complete the task. "
+                f"Output ONLY the JSON plan, no extra text."
+            )
             try:
-                response = await self._planner_llm.ainvoke(
-                    [
-                        {"role": "system", "content": PLANNING_SYSTEM_PROMPT},
-                        {"role": "user", "content": f"""## User Request\n{context_data['cleaned_prompt']}\n\n## Intent Understanding\n{json.dumps(context_data, ensure_ascii=False, indent=2)}\n\nBased on the above understanding, select the most appropriate agents to complete the task."""},
-                    ],
-                    config={"temperature": self.temperature},
+                parsed = await parse_plan_with_reask(
+                    self._planner_llm, user_prompt,
+                    context_str=json.dumps(context_data, ensure_ascii=False),
+                    max_attempts=3,
+                    timeout=60.0,
                 )
-                plan_dict = _parse_plan_from_response(response.content, user_request)
+                if parsed is not None:
+                    # Layer 3: 校验 + 自动修复依赖
+                    vresult = validate_plan(parsed)
+                    plan_dict = plan_to_dict(vresult.plan)
+                else:
+                    logger.warning("orchestrator: parse+reask 全部失败, 走 fallback")
             except Exception as e:
-                logger.warning("编排器 LLM 规划失败", exception=str(e))
+                logger.warning("orchestrator LLM 规划失败", exception=str(e))
 
         if not plan_dict:
             plan_dict = _build_fallback_plan(user_request)
@@ -345,9 +393,19 @@ class Orchestrator:
         )
 
     def _parse_plan(self, response: str, goal: str) -> ExecutionPlan:
+        """同步路径 (供 _parse_plan 单独调用): 解析单个 LLM response。
+
+        FIX #1: 改走新 parse+reask 的 sync 入口(只 parse 不 reask)。
+        """
         try:
-            from .nodes import _parse_plan_from_response as _ppr
-            plan_dict = _ppr(response, goal)
+            from .parser import parse_planner_response
+            from .plan_validator import validate_plan, plan_to_dict
+
+            parsed = parse_planner_response(response)
+            if parsed is None:
+                return self._build_fallback_plan(goal)
+            vresult = validate_plan(parsed)
+            plan_dict = plan_to_dict(vresult.plan)
             if not plan_dict:
                 return self._build_fallback_plan(goal)
             tasks = []

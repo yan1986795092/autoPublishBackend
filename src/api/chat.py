@@ -64,6 +64,7 @@ class MessageResponse(BaseModel):
     is_generation: Optional[bool] = None
     is_conversation: Optional[bool] = None
     generation_meta: Optional[dict] = None
+    parts: Optional[list] = None  # Parts 模型（spec 2026-07-02 §3.1）
     created_at: str
 
     class Config:
@@ -93,6 +94,7 @@ def _build_message_response(
     task_id: Optional[str],
     plan: Optional[dict],
     created_at: str,
+    parts: Optional[list] = None,
 ) -> MessageResponse:
     ui = build_message_ui_fields(
         role=role,
@@ -116,6 +118,7 @@ def _build_message_response(
         is_generation=ui["is_generation"],
         is_conversation=ui["is_conversation"],
         generation_meta=ui["generation_meta"],
+        parts=parts,
         created_at=created_at,
     )
 
@@ -278,7 +281,15 @@ async def get_conversation(
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """获取对话详情（含所有消息）"""
+    """获取对话详情（含所有消息）
+
+    返回的消息包含 parts[] 字段（Parts 模型 spec 2026-07-02 §3.1）：
+      - 有 DB parts → 返回 parts[]
+      - 无 DB parts 且有 result_json → 走迁移 shim
+    """
+    from src.models import ChatMessagePart
+    from src.api.chat_message_ui_v2 import build_message_parts, build_preview_from_parts
+
     conversation = db.query(ChatConversation).filter(
         ChatConversation.id == conversation_id,
         ChatConversation.user_id == current_user.id,
@@ -291,8 +302,43 @@ async def get_conversation(
         ChatMessageRecord.conversation_id == conversation_id
     ).order_by(ChatMessageRecord.created_at.asc()).all()
 
-    message_responses = [
-        _build_message_response(
+    if not messages:
+        return {
+            "success": True,
+            "data": {
+                "conversation": ConversationResponse(
+                    id=conversation.id,
+                    title=conversation.title,
+                    is_pinned=conversation.is_pinned,
+                    created_at=conversation.created_at.isoformat() if conversation.created_at else "",
+                    updated_at=conversation.updated_at.isoformat() if conversation.updated_at else "",
+                    message_count=0,
+                ),
+                "messages": [],
+            }
+        }
+
+    msg_ids = [m.id for m in messages]
+
+    # 批量查询 parts
+    parts_rows = db.query(ChatMessagePart).filter(
+        ChatMessagePart.message_id.in_(msg_ids)
+    ).order_by(ChatMessagePart.seq.asc()).all()
+
+    # message_id → parts[]
+    parts_by_msg: dict[str, list] = {}
+    for row in parts_rows:
+        parts_by_msg.setdefault(row.message_id, []).append(row)
+    # 保持 seq 顺序
+    for mid in parts_by_msg:
+        parts_by_msg[mid].sort(key=lambda r: r.seq)
+
+    message_responses = []
+    for msg in messages:
+        db_parts = parts_by_msg.get(msg.id, [])
+        msg_parts = build_message_parts(msg.id, db_parts, msg.result_json)
+
+        message_responses.append(_build_message_response(
             id=msg.id,
             role=msg.role,
             content=msg.content,
@@ -301,9 +347,8 @@ async def get_conversation(
             task_id=msg.task_id,
             plan=json.loads(msg.plan_json) if msg.plan_json else None,
             created_at=msg.created_at.isoformat() if msg.created_at else "",
-        )
-        for msg in messages
-    ]
+            parts=msg_parts,
+        ))
 
     return {
         "success": True,
@@ -454,16 +499,22 @@ async def add_message(
     db.commit()
     db.refresh(message)
 
+    # 修复 BUG-11：add_message 返回值缺少 UI 字段（kind/render_mode/...
+    # 会导致前端"addMessage 后立即 updateMessage 之前"的消息渲染模式错误。
+    # 用 _build_message_response 统一构建，保证与 list / update_message 返回结构一致。
+    result = json.loads(message.result_json) if message.result_json else None
+    plan = json.loads(message.plan_json) if message.plan_json else None
+
     return {
         "success": True,
-        "data": MessageResponse(
+        "data": _build_message_response(
             id=message.id,
             role=message.role,
             content=message.content,
             status=message.status,
-            result=json.loads(message.result_json) if message.result_json else None,
+            result=result,
             task_id=message.task_id,
-            plan=json.loads(message.plan_json) if message.plan_json else None,
+            plan=plan,
             created_at=message.created_at.isoformat() if message.created_at else "",
         )
     }

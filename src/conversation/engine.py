@@ -1,9 +1,9 @@
-"""ConversationEngine — 对话引擎核心
+"""对话引擎核心
 
 每次用户消息：
 1. 加载对话历史和用户偏好
-2. 调用对话 LLM 流式生成回复
-3. 检查回复中是否包含 [GENERATE] 标记
+2. 调用对话 LLM 流式生成回复（v3: bind_tools 让 LLM 用 trigger_generation 函数触发创作）
+3. 提取 tool_call → 返回 trigger（不再支持文本 [GENERATE] 标记）
 4. 返回对话文本 + 可选的触发指令
 """
 
@@ -17,12 +17,95 @@ from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
 from langchain_openai import ChatOpenAI
 
 from .schemas import ConversationContext, GenerateTrigger
-from .intent_detector import TriggerExtractor
+from .intent_detector import IntentDetector
 from src.core.model_router import ModelRouter
 from src.config import get_settings
 from src.memory.manager import memory_manager
 
 logger = logging.getLogger(__name__)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# Trigger tool schema（OpenAI function calling 格式）
+# ──────────────────────────────────────────────────────────────────────
+# 对话 LLM 触发创作阶段的唯一方式。
+# v3 已彻底移除旧的 [GENERATE]{json}[/GENERATE] 文本标记协议——LLM 必须
+# 通过调用 trigger_generation 函数来触发，引擎不再尝试解析文本中的标记。
+#
+# 字段说明：
+# - action: create (新创作) / revise (修改已有内容) / expand (扩写)
+# - topic: 创作主题（必填，revise 时可填历史主题）
+# - platform: 平台 ID（如 xiaohongshu / weibo），可以留空让系统用前端预选值兜底
+# - style: 写作风格 / 体裁 ID（copywriting / tutorial 等）
+# - length / tone / audience: 篇幅/语调/读者
+# - keywords: 关键词列表
+# - revision_focus: 仅 revise 时必填，用户的具体修改要求
+TRIGGER_TOOL_SCHEMA: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "trigger_generation",
+            "description": (
+                "当信息收集完毕、可以开始创作时调用此函数。"
+                "这是触发创作 pipeline 的唯一方式——必须用此函数调用，"
+                "**不要**在回复文本里嵌入 `[GENERATE]{json}[/GENERATE]` 标记"
+                "（这种格式已废弃，引擎不再解析）。"
+                "调用前你应该先在文本中简短确认（如'好，信息够了，开始创作！'），"
+                "然后立即调用此函数。"
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["create", "revise", "expand"],
+                        "description": "create = 创作新内容；revise = 修改已有内容；expand = 扩写",
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "用户要创作的主题（必填）",
+                    },
+                    "platform": {
+                        "type": "string",
+                        "description": (
+                            "目标平台 ID（xiaohongshu / wechat / weibo / douyin / "
+                            "bilibili / zhihu 等）。如果系统已告知用户已选平台，"
+                            "可以传空字符串让系统用前端预选值兜底"
+                        ),
+                    },
+                    "style": {
+                        "type": "string",
+                        "description": "写作风格/体裁描述（free text），如'幽默风趣'",
+                    },
+                    "length": {
+                        "type": "string",
+                        "enum": ["", "short", "medium", "long"],
+                        "description": "篇幅：short=短篇 / medium=中篇 / long=长篇",
+                    },
+                    "tone": {
+                        "type": "string",
+                        "description": "语调（friendly / professional / humorous / warm）",
+                    },
+                    "audience": {
+                        "type": "string",
+                        "description": "目标读者（beginner / intermediate / expert）",
+                    },
+                    "keywords": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "关键词列表（可选）",
+                    },
+                    "revision_focus": {
+                        "type": "string",
+                        "description": "仅 revise 时填：用户的具体修改要求（如'把开头改得更吸引人'）",
+                    },
+                },
+                "required": ["action", "topic"],
+            },
+        },
+    },
+]
+
 
 # 对话 LLM System Prompt
 SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话帮助用户创作内容。
@@ -50,7 +133,7 @@ SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话�
 
 - 用户**没有**明确要生成 → 继续对话、追问
 - 用户**明确**要生成但信息不足（缺主题/平台/风格） → 追问 1-2 个问题
-- 用户**明确**要生成且信息充分 → 触发 [GENERATE]
+- 用户**明确**要生成且信息充分 → 调用 `trigger_generation` 工具函数
 
 ### 规则 B：禁止越权（核心约束）
 **绝对禁止**在回复中包含任何形式的：
@@ -58,65 +141,49 @@ SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话�
 - 任何超过 3 行的"标题 + 引言 + 多章节 + 结论"框架
 - Markdown 标题（`#` / `##`）超过 1 个
 
-如果违反上面任何一条，本次回复**作废**，用户将看到错误，必须输出 [GENERATE] 标记由专门的 Pipeline 处理。
+### 规则 C：触发方式（结构化 Function Calling）
+确认要生成时，**调用 `trigger_generation` 工具函数**（你已自动获得此工具）。
+这是触发创作 pipeline 的最可靠方式——比在文本里嵌入 `[GENERATE]{json}[/GENERATE]` 标记更稳定。
 
-### 规则 C：trigger 格式
-仅在确认要生成时，在回复**末尾**附加：
+正确流程示例：
+- 用户：「直接生成」
+- 你：先在文本中简短确认（一句话即可），例如"好，信息够了，开始创作！"
+- 然后**立即**调用 `trigger_generation` 工具函数，传入参数：`{action, topic, platform, tone, length, audience, ...}`
 
-[GENERATE]
-{{
-  "action": "create|revise|expand",
-  "topic": "...",
-  "platform": "...",
-  "style": "...",
-  "length": "short|medium|long",
-  "tone": "...",
-  "audience": "...",
-  "keywords": ["..."]
-}}
-[/GENERATE]
-
-trigger 之外**不得**有任何正文、标题、章节内容。最多一句话确认（如"好，信息够了，开始创作！"）。
+注意：
+1. 工具调用**与文本回复可以同时出现**——文本是确认话，工具调用是触发动作
+2. 工具调用的 topic 字段必须**填实际创作主题**（用户没明确时填你推断的最合理主题）
+3. 平台/篇幅/语调/读者等用户已选的可以直接从系统提示里读取，**不要凭空编造**
+4. revise 模式（用户对已有内容做修改）必须填 `revision_focus` 字段
 
 ### 规则 1：简单修改（改词、调语气、改 1-2 句）
-→ 直接改好回复，不加标记。例：
+→ 直接改好回复，不调用工具。例：
 用户：把"很好"改成"非常好"
 你：好的，改好了：原来的"...很好..." → "...非常好..."
 
 ### 规则 3：润色/修改已有内容
 用户对**已经生成好的内容**提修改意见（如"润色一下""开头改得更吸引人""第二段太啰嗦了"），
-→ 对话 LLM **不得**自己改，必须加 [GENERATE]action=revise[/GENERATE]，
-让 FixAgent 处理。
-注意：这种情况下 `revision_focus` 字段必须填用户的具体修改要求。
+→ 调用 `trigger_generation`，参数：`action="revise"`、`revision_focus=用户的具体要求`。
 
 ### 规则 4：大篇幅修改（扩写、改风格、重写）
-→ 加 [GENERATE]action=revise[/GENERATE]
+→ 调用 `trigger_generation`，参数：`action="revise"`、`revision_focus=用户要求`。
 
 ### 规则 5：信息不足
-→ 继续追问，不加标记。一次只问 1-2 个问题，不要全部列出来。
+→ 继续追问，不调用工具。一次只问 1-2 个问题，不要全部列出来。
 
 ### 关键：当信息收集完毕时
-用户回答了最后一个问题后，你只能说一句确认话（如"好，信息够了，开始创作！"），**然后立即输出 [GENERATE]**。
+用户回答了最后一个问题后，按以下顺序：
+1. 输出一句确认话（如"好，信息够了，开始创作！"）
+2. **立即**调用 `trigger_generation` 工具
 不准在触发前写任何内容正文。
 
-## [GENERATE] 格式
+## 强制约束：不要在文本里输出 `[GENERATE]` 标记
 
-当你确认要触发生成时，在回复末尾添加：
-
-[GENERATE]
-{{
-  "action": "create|revise|expand",
-  "topic": "主题",
-  "platform": "平台代码",
-  "style": "风格描述",
-  "length": "short|medium|long",
-  "tone": "语调",
-  "audience": "目标读者",
-  "keywords": ["关键词1", "关键词2"],
-  "revision_focus": "修改重点（仅 revise 时需要）"
-}}
-[/GENERATE]
-
+- **不要**用 `[GENERATE]{json}[/GENERATE]` 文本格式触发——这会失败，引擎已经不再解析这种格式。
+- **唯一**的触发方式是调用 `trigger_generation` 工具。
+- 如果你不知道当前是否支持工具调用：**先假设支持**，直接调用工具；
+  如果调用报错，会进入兜底流程由系统代你触发。
+- 不要试图在文本里模仿工具参数输出（如 `{action: create, ...}`）——同样会被忽略。
 """
 # 注意：System Prompt 是纯静态指令，不夹带动态数据。
 # 用户偏好、历史记录等上下文通过单独的 USER 消息注入。
@@ -181,18 +248,23 @@ def _build_trigger_data(trigger: "GenerateTrigger", preferences: dict | None = N
 class ConversationEngine:
     """对话引擎 — 单次消息处理"""
 
+    # 网关可用性缓存 TTL（秒）
+    _GATEWAY_CACHE_TTL = 30
+
     def __init__(self):
         self._router = ModelRouter()
         self._llm_cache: dict = {}
+        self._gateway_up: bool | None = None
+        self._gateway_checked_at: float = 0.0
 
-    def _get_llm(self) -> object:
-        """获取对话 LLM 实例
+    async def _get_llm(self) -> object:
+        """获取对话 LLM 实例（异步，带网关缓存）
 
         优先 Gateway（model=auto 走 AutoRouter），
         Gateway 不可用时降级为直连（用第一个可用的 API key）。
         """
-        # 先检测 Gateway 是否可达
-        gateway_up = self._check_gateway()
+        # 先检测 Gateway 是否可达（带缓存）
+        gateway_up = await self._check_gateway()
         if gateway_up:
             logger.info("对话引擎 → 使用 Gateway (auto-route)")
             return self._router.get_chat_model("ConversationAgent")
@@ -239,15 +311,24 @@ class ConversationEngine:
             "请启动 Gateway (llm-gateway) 或在 .env 中配置 deepseek_api_key。"
         )
 
-    def _check_gateway(self) -> bool:
-        """检查 LLM Gateway 是否可用（快速连接测试）"""
-        import socket
+    async def _check_gateway(self) -> bool:
+        """检查 LLM Gateway 是否可用（异步连接测试 + 30 秒缓存）"""
+        import asyncio
+        now = asyncio.get_event_loop().time()
+        # 缓存未过期且上次检查有效 → 直接返回缓存值
+        if self._gateway_up is not None and (now - self._gateway_checked_at) < self._GATEWAY_CACHE_TTL:
+            return self._gateway_up
         try:
-            s = socket.create_connection(("localhost", 9010), timeout=1.0)
-            s.close()
-            return True
-        except (OSError, Exception):
-            return False
+            _, writer = await asyncio.wait_for(
+                asyncio.open_connection("localhost", 9010), timeout=1.0,
+            )
+            writer.close()
+            await writer.wait_closed()
+            self._gateway_up = True
+        except (OSError, asyncio.TimeoutError, Exception):
+            self._gateway_up = False
+        self._gateway_checked_at = now
+        return self._gateway_up is True
 
     async def chat(
         self,
@@ -260,7 +341,7 @@ class ConversationEngine:
             {"type": "text_cleanup", "content": str} — 移除标记后的完整文本
             {"type": "trigger", "data": dict}        — 生成触发指令
         """
-        llm = self._get_llm()
+        llm = await self._get_llm()
 
         # 1. System Prompt（纯静态，不夹带动态数据）
         system = SystemMessage(content=SYSTEM_PROMPT)
@@ -327,22 +408,59 @@ class ConversationEngine:
         except Exception:
             pass
 
-        # 4. 流式调用 LLM
-        full_text = ""
+        # 4. 流式调用 LLM — 绑定 trigger_generation 工具
+        # 工具调用优先级高于文本 [GENERATE] 标记（fallback）。
+        # 旧版 LLM 不支持 tool_calls 时自动退回纯文本模式。
         try:
-            async for chunk in llm.astream(messages):
-                content = chunk.content if hasattr(chunk, "content") else str(chunk)
-                if content:
+            _llm_with_tools = llm.bind_tools(TRIGGER_TOOL_SCHEMA, tool_choice="auto")
+        except Exception:
+            _llm_with_tools = llm
+
+        full_text = ""
+        tool_call_payload: Optional[dict] = None
+        try:
+            async for chunk in _llm_with_tools.astream(messages):
+                # 提取文本片段（yield 给前端 streaming 渲染）
+                content = chunk.content if hasattr(chunk, "content") else None
+                if isinstance(content, str) and content:
                     full_text += content
                     yield {"type": "text", "content": content}
+
+                # 提取 tool_calls（OpenAI Chat Completions 格式）
+                # chunk.tool_calls 是 List[ToolCall]（每次流式追加）
+                chunk_tool_calls = getattr(chunk, "tool_calls", None)
+                if chunk_tool_calls:
+                    for tc in chunk_tool_calls:
+                        # 每个 ToolCall 有 name / args（dict 或 str）/ id
+                        # 部分 chunk 里 args 是空 dict（增量），等下一个 chunk 补全
+                        tc_name = (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None))
+                        if tc_name != "trigger_generation":
+                            continue
+                        tc_args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
+                        if isinstance(tc_args, str):
+                            try:
+                                tc_args = json.loads(tc_args) if tc_args.strip() else None
+                            except json.JSONDecodeError:
+                                tc_args = None
+                        if isinstance(tc_args, dict) and tc_args.get("topic"):
+                            tool_call_payload = tc_args
         except Exception as e:
             logger.error("对话 LLM 调用失败: %s", e)
             yield {"type": "text", "content": f"抱歉，我暂时遇到了问题: {e}"}
             return
 
-        # 5. 检查触发标记
-        trigger = TriggerExtractor.extract(full_text)
-        has_marker = TriggerExtractor.has_marker(full_text)
+        # 5. 提取 trigger：只从 tool_call 提取（v3 协议已完全移除 [GENERATE] 文本标记）。
+        trigger: Optional[GenerateTrigger] = None
+        if tool_call_payload:
+            try:
+                trigger = GenerateTrigger.from_dict(tool_call_payload)
+                logger.info(
+                    "对话 LLM 通过 function calling 触发 trigger_generation "
+                    "(action=%s, topic=%r, platform=%r)",
+                    trigger.action, trigger.topic[:60], trigger.platform,
+                )
+            except Exception as e:
+                logger.warning("tool_call 解析失败: %s", e)
 
         # 5.0 用前端预选值覆盖 LLM 输出的标签（LLM 看到的是中文标签，不是 ID）
         if trigger:
@@ -360,30 +478,34 @@ class ConversationEngine:
                 if not trigger.audience and ctx.preferences.get("audience"):
                     trigger.audience = str(ctx.preferences["audience"])
 
-        # 5.1 越权自写检测：有 trigger 但有大量正文/元描述 → 警告并把正文部分剥离
-        if trigger and TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=True):
+        # 5.1 有 trigger → 检查 LLM 是否在确认话里越权夹带正文（## 标题：xxx 等元描述）。
+        #     注意：v3 已不解析 [GENERATE] 文本标记，所以不再有 strip 步骤。
+        #     文本是合法的"确认话 + tool_call"，但若 LLM 越权自写正文，仍要剥离。
+        if trigger and IntentDetector.looks_like_unauthorized_write(full_text):
             logger.warning(
-                "对话 LLM 越权自写：触发器已识别但伴随大量正文/元描述，剥离正文部分 "
+                "对话 LLM 通过 tool_call 触发，但文本含越权元描述，剥离正文部分 "
                 "(full_text_len=%s)",
                 len(full_text),
             )
-            clean_text = TriggerExtractor.strip(full_text)
-            if clean_text:
-                yield {"type": "text_cleanup", "content": clean_text}
+            # 用一个简单的"剥离 ## 元描述行"的清理（不依赖 [GENERATE] 标记）
+            cleaned = re.sub(
+                r'(?m)^#{1,3}\s*(思考|正文|标题|引言|结论|章节)\s*[:：]?.*$',
+                '',
+                full_text,
+            ).strip()
+            if cleaned and cleaned != full_text:
+                yield {"type": "text_cleanup", "content": cleaned}
             yield {"type": "trigger", "data": _build_trigger_data(trigger, ctx.preferences)}
             return
 
         if trigger:
-            clean_text = TriggerExtractor.strip(full_text)
-            if clean_text:
-                yield {"type": "text_cleanup", "content": clean_text}
             yield {"type": "trigger", "data": _build_trigger_data(trigger, ctx.preferences)}
             return
 
         # 5.2 越权自写但没 trigger → 拦截，强制重发（让前端展示错误 + 不触发 pipeline）
-        if TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=False):
+        if IntentDetector.looks_like_unauthorized_write(full_text):
             logger.error(
-                "对话 LLM 越权自写且未输出 [GENERATE]，强制拦截，避免污染 pipeline "
+                "对话 LLM 越权自写且未调用 trigger_generation，强制拦截，避免污染 pipeline "
                 "(full_text_len=%s, preview=%r)",
                 len(full_text), full_text[:80],
             )
@@ -394,7 +516,7 @@ class ConversationEngine:
             }
             return
 
-        # ── 兜底：LLM 没有输出 [GENERATE] 但用户明确要求生成内容 ──
+        # ── 兜底：LLM 没有调用 trigger_generation 但用户明确要求生成内容 ──
         _user_msg = (ctx.message or "").strip()
         _user_msg_lower = _user_msg.lower()
         _gen_keywords = ["写", "生成", "重新写", "重新生成", "重写", "再来",
@@ -413,12 +535,11 @@ class ConversationEngine:
         # ── 关键防御：LLM 已主动追问 = 规则 A 正常执行，不要被兜底覆盖 ──
         # 当用户消息里有生成关键词，但 LLM 正确表达了"信息不足、需要追问"
         # （如"请告诉我主题和平台"），应尊重 LLM 的判断，不再兜底触发 pipeline。
-        # 兜底分支只用于：LLM 没追问、也没触发标记的异常情况（如模型卡住 / 返回空）。
+        # 兜底分支只用于：LLM 没追问、也没调用工具的异常情况（如模型卡住 / 返回空 / 旧模型不支持 tools）。
         if (
             _wants_generation
-            and not TriggerExtractor.has_marker(full_text)
-            and not TriggerExtractor.looks_like_unauthorized_write(full_text, has_marker=False)
-            and TriggerExtractor.looks_like_followup_question(full_text)
+            and not IntentDetector.looks_like_unauthorized_write(full_text)
+            and IntentDetector.looks_like_followup_question(full_text)
         ):
             logger.info(
                 "对话 LLM 已主动追问（信息不足），尊重其判断，不触发 pipeline "
@@ -427,8 +548,8 @@ class ConversationEngine:
             )
             return
 
-        if _wants_generation and not TriggerExtractor.has_marker(full_text):
-            logger.info("LLM 未输出 [GENERATE] 但用户要求生成，自动触发 pipeline (msg_len=%s, user_msg=%s)",
+        if _wants_generation:
+            logger.info("LLM 未调用 trigger_generation 但用户要求生成，自动触发 pipeline (msg_len=%s, user_msg=%s)",
                         len(full_text), _user_msg[:50])
 
             # ── 重做场景：保留上次的 topic，不要从 history 随便取 ──
@@ -485,9 +606,20 @@ class ConversationEngine:
                 }
                 return
 
-            _user_prefs = ctx.user_profile or ""
-            _platform = "xiaohongshu" if ("xiaohongshu" in _user_prefs or "小红书" in _user_prefs) else ""
-            _style = "真实体验分享" if "真实" in _user_prefs else ""
+            # 修复兜底 BUG：优先用前端已选的 ctx.platform / ctx.content_type，
+            #     不再依赖 user_profile 字符串匹配（之前 _user_profile="" 会导致 platform=""）。
+            _platform = ctx.platform or ""
+            _style = ctx.content_type or ""
+            if not _platform and _user_prefs:
+                _platform = "xiaohongshu" if ("xiaohongshu" in _user_prefs or "小红书" in _user_prefs) else ""
+                _style = "真实体验分享" if "真实" in _user_prefs else ""
+
+            # 修复兜底 BUG：剥离用户输入里的 [目标平台：xxx] 前缀（前端 Workspace.tsx 注入），
+            #     避免 topic 里夹带平台标签导致后续 pipeline 主题错乱
+            _PLATFORM_HINT_RE = re.compile(r"^\[目标平台：[^\]]+\]\s*\n?")
+            _topic = _PLATFORM_HINT_RE.sub("", _topic).strip()
+            if not _topic:
+                _topic = ctx.message
 
             _fallback_trigger = GenerateTrigger(
                 action="create",

@@ -34,6 +34,12 @@ class Settings(BaseSettings):
     qwen_model: str = "qwen3.7-max"
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
+    # Embedding 配置：用 Qwen text-embedding-v3 替代过期的 Zhipu embedding-2
+    # 1024 维，OpenAI 协议兼容，迁移无需重新建库
+    embedding_provider: str = "qwen"  # 当前支持: qwen | zhipu
+    qwen_embedding_model: str = "text-embedding-v3"
+    embedding_dim: int = 1024
+
     zhipu_api_key: Optional[str] = None
     zhipu_model: str = "glm-4-flash"
     zhipu_base_url: str = "https://open.bigmodel.cn/api/paas/v4"
