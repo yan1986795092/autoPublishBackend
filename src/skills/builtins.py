@@ -156,7 +156,7 @@ BUILTIN_SKILLS: list[BuiltinSkill] = [
         "user_prompt_template": "分析「{topic}」的现状和趋势，输出一份分析报告：\n1. 包含最新数据和行业动态\n2. 给出明确的洞察和趋势判断\n3. 提供可执行的建议\n4. 适合管理层决策参考",
         "preset_plan": {
             "complexity": "complex",
-            "agent_sequence": ["WebSearch", "HotTopicAgent", "WritingAgent", "SEOAgent", "ReviewAgent"],
+            "agent_sequence": ["WebSearch", "SearchAnalyzer", "WritingAgent", "SEOAgent", "ReviewAgent"],
         },
         "content_types": ["report"],
         "config_schema": {

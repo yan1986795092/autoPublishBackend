@@ -56,9 +56,8 @@ class PartWriter:
         """追加一个新 Part（幂等：server_id 已存在则忽略）"""
         if self._finalized:
             logger.warning(
-                "PartWriter.finalize() 后仍尝试 append，忽略",
-                message_id=self.message_id,
-                server_id=server_id,
+                "PartWriter.finalize() 后仍尝试 append，忽略 (message_id=%s, server_id=%s)",
+                self.message_id, server_id,
             )
             return
         if server_id in self._parts:
@@ -279,9 +278,9 @@ class PartWriter:
         except Exception:
             self._db.rollback()
             logger.error(
-                "PartWriter flush 失败",
-                message_id=self.message_id,
-                count=len(to_flush),
+                "PartWriter flush 失败 — message_id=%s count=%s",
+                self.message_id,
+                len(to_flush),
                 exc_info=True,
             )
 

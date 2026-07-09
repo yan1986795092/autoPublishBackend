@@ -180,5 +180,5 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             }],
         )
     except Exception as e:
-        logger.error("WritingAgent 执行失败", exception=str(e), exc_info=True)
+        logger.error("WritingAgent 执行失败: %s", e, exc_info=True)
         raise HandlerError(str(e), handler="WritingAgent") from e

@@ -10,6 +10,7 @@
 from __future__ import annotations
 import json
 import logging
+import os
 import re
 from typing import AsyncGenerator, Optional
 
@@ -24,12 +25,14 @@ from src.memory.manager import memory_manager
 
 logger = logging.getLogger(__name__)
 
+# 统一 LLM 入口：所有对话流必须走 Gateway，禁止直连
+_GATEWAY_URL = os.getenv("LLM_GATEWAY_URL") or "http://localhost:9010/v1"
+
 
 # ──────────────────────────────────────────────────────────────────────
 # Trigger tool schema（OpenAI function calling 格式）
 # ──────────────────────────────────────────────────────────────────────
 # 对话 LLM 触发创作阶段的唯一方式。
-# v3 已彻底移除旧的 [GENERATE]{json}[/GENERATE] 文本标记协议——LLM 必须
 # 通过调用 trigger_generation 函数来触发，引擎不再尝试解析文本中的标记。
 #
 # 字段说明：
@@ -46,12 +49,15 @@ TRIGGER_TOOL_SCHEMA: list[dict] = [
         "function": {
             "name": "trigger_generation",
             "description": (
-                "当信息收集完毕、可以开始创作时调用此函数。"
-                "这是触发创作 pipeline 的唯一方式——必须用此函数调用，"
+                "【必须调用】当且仅当你要开始写作时调用此函数。"
+                "这是触发创作 pipeline 的**唯一**方式——你必须实际执行工具调用，"
+                "**不要**只在文本里说'开始创作'而**不调**此函数（那样系统无法知道你已就绪）。"
                 "**不要**在回复文本里嵌入 `[GENERATE]{json}[/GENERATE]` 标记"
                 "（这种格式已废弃，引擎不再解析）。"
                 "调用前你应该先在文本中简短确认（如'好，信息够了，开始创作！'），"
-                "然后立即调用此函数。"
+                "然后立即在同一轮调用此函数。"
+                "topic 字段必须填实际创作主题（例如'AI 工具如何改变日常工作流'），"
+                "不要填'开始写'或'直接开始'这种动作词。"
             ),
             "parameters": {
                 "type": "object",
@@ -141,20 +147,27 @@ SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话�
 - 任何超过 3 行的"标题 + 引言 + 多章节 + 结论"框架
 - Markdown 标题（`#` / `##`）超过 1 个
 
-### 规则 C：触发方式（结构化 Function Calling）
-确认要生成时，**调用 `trigger_generation` 工具函数**（你已自动获得此工具）。
-这是触发创作 pipeline 的最可靠方式——比在文本里嵌入 `[GENERATE]{json}[/GENERATE]` 标记更稳定。
+### 规则 C：触发方式（结构化 Function Calling）— 关键
+
+**当且仅当你想开始写作时，必须调用 `trigger_generation` 工具函数**（你已自动获得此工具）。
+
+🚨 **绝对禁止**在文本里描述"开始创作"而**不调用**工具。如果你说"好的，开始创作"但没有调 `trigger_generation`，系统无法知道你已就绪——用户会卡在等待状态。
 
 正确流程示例：
 - 用户：「直接生成」
 - 你：先在文本中简短确认（一句话即可），例如"好，信息够了，开始创作！"
-- 然后**立即**调用 `trigger_generation` 工具函数，传入参数：`{action, topic, platform, tone, length, audience, ...}`
+- **然后立即在同一轮调用 `trigger_generation` 工具函数**，传入参数：`{action, topic, platform, tone, length, audience, ...}`
 
 注意：
-1. 工具调用**与文本回复可以同时出现**——文本是确认话，工具调用是触发动作
-2. 工具调用的 topic 字段必须**填实际创作主题**（用户没明确时填你推断的最合理主题）
+1. 工具调用**与文本回复可以同时出现**——文本是确认话，工具调用是触发动作，**两者必须同时存在**
+2. 工具调用的 topic 字段必须**填实际创作主题**（用户没明确时填你推断的最合理主题，**不要**写"直接开始"这种占位词）
 3. 平台/篇幅/语调/读者等用户已选的可以直接从系统提示里读取，**不要凭空编造**
 4. revise 模式（用户对已有内容做修改）必须填 `revision_focus` 字段
+
+**反例（绝不允许）**：
+- ❌ 只输出"好的，信息够了，开始创作！"但不调工具 → 用户卡住
+- ❌ 在文本里输出 `{action: create, topic: "..."}` → 不会被识别
+- ❌ topic 写"开始写"或"开始创作"等动作词 → topic 应该是创作内容的主题，不是动作
 
 ### 规则 1：简单修改（改词、调语气、改 1-2 句）
 → 直接改好回复，不调用工具。例：
@@ -173,8 +186,15 @@ SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话�
 
 ### 关键：当信息收集完毕时
 用户回答了最后一个问题后，按以下顺序：
-1. 输出一句确认话（如"好，信息够了，开始创作！"）
-2. **立即**调用 `trigger_generation` 工具
+
+1. 输出一句确认话（如"好，信息够了，开始创作！"）—— **只是**告诉用户你要开始了
+2. **立刻在同一轮对话里调用 `trigger_generation` 工具**—— 这是真正触发 pipeline 的动作
+
+🚨 **必须两件事一起做**：文本确认 + 工具调用。漏掉任何一件都不行。
+- 只输出文本 → 系统无法知道你已就绪，用户卡在等待
+- 只调工具 → 用户看不到状态，会以为你没反应
+- 拆成两轮 → 用户看到第一轮"开始创作"但 pipeline 没启动，第二轮才真的开始，体验割裂
+
 不准在触发前写任何内容正文。
 
 ## 强制约束：不要在文本里输出 `[GENERATE]` 标记
@@ -257,76 +277,82 @@ class ConversationEngine:
         self._gateway_up: bool | None = None
         self._gateway_checked_at: float = 0.0
 
-    async def _get_llm(self) -> object:
-        """获取对话 LLM 实例（异步，带网关缓存）
+    async def _get_llm(
+        self,
+        provider: str | None = None,
+        hint: str | None = None,
+    ) -> ChatOpenAI:
+        """获取对话 LLM 实例（统一走 Gateway，禁止直连）
 
-        优先 Gateway（model=auto 走 AutoRouter），
-        Gateway 不可用时降级为直连（用第一个可用的 API key）。
+        参数：
+          provider: 强制使用某 provider（deepseek/qwen/openai/zhipu）。
+                   None 时由 Gateway AutoRouter 按成本自动选择。
+          hint:     路由提示（simple/balanced/creative/analysis），
+                   配合 provider=None 时生效。
+
+        注意：Gateway 不可用时直接抛异常，不走直连 fallback。
+              直连 fallback 会绕过 Gateway 的路由策略、Circuit Breaker、
+              观测日志和统一鉴权，且无法保证 function calling 能力。
         """
-        # 先检测 Gateway 是否可达（带缓存）
         gateway_up = await self._check_gateway()
-        if gateway_up:
-            logger.info("对话引擎 → 使用 Gateway (auto-route)")
-            return self._router.get_chat_model("ConversationAgent")
+        if not gateway_up:
+            raise ConnectionError(
+                f"LLM Gateway ({_GATEWAY_URL}) 不可用。"
+                "请启动 llm-gateway 服务或检查网络连通性。"
+            )
 
-        # Gateway 不可用 → 直连降级
-        settings = get_settings()
-        for provider, key_attr in [
-            ("deepseek", "deepseek_api_key"),
-            ("openai", "openai_api_key"),
-            ("zhipu", "zhipu_api_key"),
-            ("qwen", "qwen_api_key"),
-        ]:
-            api_key = getattr(settings, key_attr, None)
-            if api_key:
-                base_urls = {
-                    "deepseek": "https://api.deepseek.com/v1",
-                    "openai": "https://api.openai.com/v1",
-                    "zhipu": "https://open.bigmodel.cn/api/paas/v4",
-                    "qwen": "https://dashscope.aliyuncs.com/compatible-mode/v1",
-                }
-                model_names = {
-                    "deepseek": "deepseek-chat",
-                    "openai": "gpt-4o-mini",
-                    "zhipu": "glm-4-flash",
-                    "qwen": "qwen-plus",
-                }
-                logger.info(
-                    "对话引擎 → Gateway 不可用，降级直连 %s",
-                    provider,
-                )
-                return ChatOpenAI(
-                    model=model_names.get(provider, "deepseek-chat"),
-                    api_key=api_key,
-                    base_url=base_urls.get(provider),
-                    temperature=0.7,
-                    max_tokens=2048,
-                    streaming=True,
-                    timeout=30.0,
-                )
-
-        # 全部不可用 → 抛出明确的错误
-        raise ConnectionError(
-            "LLM Gateway 未运行，且未配置任何 API key。"
-            "请启动 Gateway (llm-gateway) 或在 .env 中配置 deepseek_api_key。"
+        logger.info(
+            "对话引擎 → 使用 Gateway (provider=%r, hint=%r)",
+            provider or "auto", hint or "balanced",
         )
 
+        llm = ChatOpenAI(
+            model=provider or "auto",
+            api_key="gateway",
+            base_url=_GATEWAY_URL,
+            temperature=0.7,
+            max_tokens=2048,
+            streaming=True,
+            timeout=120.0,
+            default_headers={
+                "X-Route-Hint": hint or "balanced",
+                "X-Agent-Type": "ConversationAgent",
+            },
+        )
+        return llm
+
     async def _check_gateway(self) -> bool:
-        """检查 LLM Gateway 是否可用（异步连接测试 + 30 秒缓存）"""
+        """检查 LLM Gateway 是否可用（异步，带缓存）
+
+        不只是测 TCP 连通，而是真正测 /v1/chat/completions 是否返回 200。
+        避免：TCP 能连上但 API 实际不可用（认证失败、限流、模型过期等）。
+        """
         import asyncio
         now = asyncio.get_event_loop().time()
         # 缓存未过期且上次检查有效 → 直接返回缓存值
         if self._gateway_up is not None and (now - self._gateway_checked_at) < self._GATEWAY_CACHE_TTL:
             return self._gateway_up
         try:
-            _, writer = await asyncio.wait_for(
-                asyncio.open_connection("localhost", 9010), timeout=1.0,
-            )
-            writer.close()
-            await writer.wait_closed()
-            self._gateway_up = True
-        except (OSError, asyncio.TimeoutError, Exception):
+            import httpx
+            async with httpx.AsyncClient(timeout=5.0) as client:
+                resp = await client.post(
+                    f"{_GATEWAY_URL}/v1/chat/completions",
+                    json={
+                        "model": "auto",
+                        "messages": [{"role": "user", "content": "ping"}],
+                        "max_tokens": 1,
+                    },
+                    headers={"X-Route-Hint": "simple"},
+                )
+                self._gateway_up = resp.status_code < 500
+                if not self._gateway_up:
+                    logger.warning(
+                        "Gateway /v1/chat/completions 返回 %d: %s",
+                        resp.status_code, resp.text[:200],
+                    )
+        except Exception as e:
             self._gateway_up = False
+            logger.warning("Gateway 健康检查失败: %s", e)
         self._gateway_checked_at = now
         return self._gateway_up is True
 
@@ -449,11 +475,43 @@ class ConversationEngine:
             yield {"type": "text", "content": f"抱歉，我暂时遇到了问题: {e}"}
             return
 
-        # 5. 提取 trigger：只从 tool_call 提取（v3 协议已完全移除 [GENERATE] 文本标记）。
+        # 5. 提取 trigger：只从 tool_call 提取。
         trigger: Optional[GenerateTrigger] = None
+        _user_msg = (ctx.message or "").strip()
         if tool_call_payload:
             try:
                 trigger = GenerateTrigger.from_dict(tool_call_payload)
+                # ── 关键防御：tool_call 的 topic 与当前用户消息严重不匹配时，用当前消息覆盖 ──
+                # 典型场景：LLM 的 tool_call 携带了上一轮的历史 topic，但文本回复说的是新主题
+                # 例：tool_call topic="降噪耳机"，但 LLM 文本说"聊聊 AI 工具改变工作流"
+                _user_topic_candidate = _user_msg
+                if _user_topic_candidate and trigger.topic:
+                    _user_topic_stripped = re.sub(
+                        r'^\[[^\]]+\]\s*', '', _user_topic_candidate
+                    ).strip()
+                    if _user_topic_stripped:
+                        # 检查 tool_call topic 是否与当前用户消息相关
+                        # 真正的相关：包含关系 或 共同关键词（不含纯动作词）
+                        _common_kw = [
+                            "AI", "工具", "工作流", "耳机", "降噪", "推荐",
+                            "分享", "生活", "日常", "科技", "产品", "测评",
+                        ]
+                        _has_common_kw = any(
+                            kw in _user_topic_stripped and kw in trigger.topic
+                            for kw in _common_kw
+                        )
+                        _is_related = (
+                            _user_topic_stripped in trigger.topic
+                            or trigger.topic in _user_topic_stripped
+                            or _has_common_kw
+                        )
+                        if not _is_related and len(_user_topic_stripped) > 5:
+                            logger.warning(
+                                "tool_call topic 与当前用户消息不匹配，覆盖 trigger topic "
+                                "(tool_call_topic=%r → user_msg_topic=%r)",
+                                trigger.topic[:50], _user_topic_stripped[:50],
+                            )
+                            trigger.topic = _user_topic_stripped
                 logger.info(
                     "对话 LLM 通过 function calling 触发 trigger_generation "
                     "(action=%s, topic=%r, platform=%r)",
@@ -524,13 +582,29 @@ class ConversationEngine:
         # "重做"类关键词：用户想用相同主题再生成一次，必须保留上次 topic
         _redo_keywords = ["重新生成", "重新写", "重新", "重写", "再来", "新的一篇",
                           "再来一份", "重新来"]
-        # 简化：用户消息几乎完全是重做关键词（如 "重新生成"、"再写一份吧"）
+        # ── 关键修复：剥离 [目标平台：xxx] 前缀再做"重做"判断 ──
+        # 用户消息 "[目标平台：微博]\n重新生成" 长度 13，超过 8 字符阈值，
+        # 导致 _is_pure_redo=False → 走兜底 topic 提取 → 误把"重新生成"当主题。
+        # 先清洗再判断：用 _user_msg_clean 作为统一的清洗后消息。
+        _hint_strip_re = re.compile(r'^\[目标平台：[^\]]+\]\s*\n?')
+        _user_msg_clean = _hint_strip_re.sub('', _user_msg).strip()
+        # 简化：用户消息（剥前缀后）几乎完全是重做关键词（如 "重新生成"、"再写一份吧"）
         _is_pure_redo = (
-            len(_user_msg) <= 8
-            and any(_user_msg.strip() == kw or _user_msg.strip().startswith(kw)
+            0 < len(_user_msg_clean) <= 8
+            and any(_user_msg_clean == kw or _user_msg_clean.startswith(kw)
                     for kw in _redo_keywords)
         )
         _wants_generation = any(kw in _user_msg_lower for kw in _gen_keywords)
+
+        # ── 安全网：LLM 输出"够了/开始创作"但没调工具 ──
+        # 可能原因：Gateway 未正确透传 tool_calls、LLM 不支持工具调用。
+        # 当 LLM 明确表示已足够但没调工具时，进入兜底 pipeline。
+        _llm_ready_signal = (
+            not _wants_generation
+            and not trigger
+            and not IntentDetector.looks_like_followup_question(full_text)
+            and IntentDetector.looks_like_ready_to_generate(full_text)
+        )
 
         # ── 关键防御：LLM 已主动追问 = 规则 A 正常执行，不要被兜底覆盖 ──
         # 当用户消息里有生成关键词，但 LLM 正确表达了"信息不足、需要追问"
@@ -548,12 +622,20 @@ class ConversationEngine:
             )
             return
 
-        if _wants_generation:
-            logger.info("LLM 未调用 trigger_generation 但用户要求生成，自动触发 pipeline (msg_len=%s, user_msg=%s)",
-                        len(full_text), _user_msg[:50])
+        if _wants_generation or _llm_ready_signal:
+            if _llm_ready_signal:
+                logger.info(
+                    "安全网：LLM 输出含'足够/开始创作'信号但未调工具，自动触发 pipeline "
+                    "(full_text_preview=%r, topic_from=%s)",
+                    full_text[:80], "context_extraction",
+                )
+            else:
+                logger.info("LLM 未调用 trigger_generation 但用户要求生成，自动触发 pipeline (msg_len=%s, user_msg=%s)",
+                            len(full_text), _user_msg[:50])
 
             # ── 重做场景：保留上次的 topic，不要从 history 随便取 ──
-            if _is_pure_redo:
+            _topic: Optional[str] = None
+            if _is_pure_redo and not _llm_ready_signal:
                 def _get_last_topic_from_memory(ctx_obj):
                     return memory_manager.get_last_conversation_topic(
                         user_id=ctx_obj.user_id or "",
@@ -570,31 +652,86 @@ class ConversationEngine:
                     return
                 logger.info("重做场景，复用上次 topic=%r", _topic[:50])
             else:
-                # topic 提取：剥离用户输入里的"动作词"，剩余作为 topic 候选
-                _topic = _user_msg
-                for _pre in sorted(_gen_keywords, key=len, reverse=True):
-                    if _pre in _topic:
-                        _topic = _topic.replace(_pre, "").strip()
-                        break
+                # 兜底 topic 提取优先级（关键修复）：
+                #   1. 从 LLM 输出里识别"就以X为主题""以X为题"等显式信号
+                #      → 即使 LLM 没调工具，它可能已经说出主题
+                #   2. 从对话历史里找最近一条有实质内容的 user 消息
+                #      （排除"直接生成""开始创作"这种无意义短消息）
+                #   3. 才考虑剥离当前用户消息里的动作词（fallback）
 
-            # topic 太短 → 从对话历史里**安全**地提取
-            # 安全 = 排除 LLM 越权自写的元描述（## 思考、## 正文 等）
-            if not _topic or len(_topic) < 3:
-                _meta_re = re.compile(r'(?m)^#{1,3}\s*(思考|正文|标题|引言|结论)\s*[:：]?\s*')
-                # 按钮占位/系统消息（前端 useAgentStore 注水）：[内容生成]、[重写] 等
-                _placeholder_re = re.compile(r'^\[[^\]]+\]$')
-                for msg in reversed(ctx.history):
-                    if msg.get("role") == "user" and msg.get("content", "").strip():
-                        candidate = msg["content"].strip()
-                        # 跳过方括号占位（如 "[内容生成]"）—— 这是前端按钮注水消息
+                # 优先级 1: LLM 输出里识别显式主题
+                _llm_topic_re = re.compile(
+                    r'(?:就以|以|围绕|关于)(.{2,40}?)(?:为主题|为题|写|创作)',
+                    re.DOTALL,
+                )
+                _m = _llm_topic_re.search(full_text)
+                if _m:
+                    _topic = _m.group(1).strip().strip('"\'""''「」『』')
+                    logger.info("兜底：从 LLM 输出提取 topic=%r", _topic[:50])
+
+                # 优先级 2: 对话历史里找最近实质主题
+                if not _topic or len(_topic) < 3:
+                    _placeholder_re = re.compile(r'^\[[^\]]+\]$')
+                    # "纯动作词"检测：开始创作/直接生成/再来一份/重写/帮我写个...
+                    # 注意：中文里常带各种标点（吧/吧。/！/"等）+ 单引号 + 全角空格
+                    # 这里用 (主题内容) 与 (尾标点) 分开剥离，避免 误判
+                    #
+                    # 关键修复：增加"重新生成""重新写""新的一篇"这种 **两段动词组合**
+                    # 不被长尾巴（如"生成"作为第二段）漏判并误当 topic。
+                    _gen_action_only_re = re.compile(
+                        r'^[直接的马快立刻帮我给我]*(?:'
+                        r'生成|写|创作|开始|再来|重写|重新)'
+                        r'(?:一份|一篇|一下|个|吧|创作|写|生成)?'
+                        r'[的吧！!。.，,"\'\s]*$'
+                    )
+                    # 单独的"重做"动作短消息（如"重新生成""重新写""重写""再来"）
+                    _redo_only_re = re.compile(
+                        r'^[重新]*(?:'
+                        r'生成|写|创作|开始|再来|重写|重新)'
+                        r'(?:一份|一篇|一下|个|吧|创作|写|生成)?'
+                        r'[的吧！!。.，,"\'\s]*$'
+                    )
+                    _hint_re = re.compile(r'^\[目标平台：[^\]]+\]\s*\n?')
+                    for msg in reversed(ctx.history):
+                        if msg.get("role") != "user":
+                            continue
+                        candidate = msg.get("content", "").strip()
+                        if not candidate:
+                            continue
+                        # 剥 [目标平台：xxx] 前缀
+                        candidate = _hint_re.sub('', candidate).strip()
+                        # 跳过按钮占位
                         if _placeholder_re.match(candidate):
                             continue
-                        # 用户消息理论上不会带"## 思考："，但保险起见过滤
-                        candidate = _meta_re.sub('', candidate)
+                        # 跳过"直接生成""开始创作""开始写""重新生成""再来一份"等纯动作词
+                        # 注意两次用不同 regex，覆盖"直接+动作"和"重新+动作"两种模式
+                        if _gen_action_only_re.match(candidate):
+                            continue
+                        if _redo_only_re.match(candidate):
+                            logger.info("兜底：跳过历史中的纯重做动作词 msg=%r", candidate[:30])
+                            continue
+                        # 跳过太短/太长
                         candidate = re.sub(r'\s+', ' ', candidate).strip()
                         if 3 <= len(candidate) <= 200:
                             _topic = candidate
+                            logger.info("兜底：从对话历史提取 topic=%r", _topic[:50])
                             break
+
+                # 优先级 3: 剥离当前用户消息里的动作词（最后兜底）
+                if not _topic or len(_topic) < 3:
+                    _topic = _user_msg_clean  # 复用上面已清洗过的消息
+                    for _pre in sorted(_gen_keywords, key=len, reverse=True):
+                        if _pre in _topic:
+                            _topic = _topic.replace(_pre, "").strip()
+                    # 还要剥"重新""重新生成""重新写"等重做前缀
+                    for _pre in sorted(_redo_keywords, key=len, reverse=True):
+                        if _topic.startswith(_pre):
+                            _topic = _topic[len(_pre):].strip()
+                    # 还要剥"直接""马上""开始"等纯动作词
+                    for _pre in ["直接", "马上", "立刻", "快点", "快"]:
+                        if _topic.startswith(_pre):
+                            _topic = _topic[len(_pre):].strip()
+                    logger.info("兜底：从当前用户消息提取 topic=%r", _topic[:50])
 
             # 还提不出来 → 不要瞎猜，直接走追问而不是兜底
             if not _topic or len(_topic) < 3:

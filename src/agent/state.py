@@ -50,6 +50,9 @@ class AgentGraphState(TypedDict):
     _mcp_tools: list
     _streaming_mode: bool
 
+    # Plan validation
+    plan_valid: bool
+
     # Review / fix loop control
     _review_fix_cycles: int
     _loop_created_in_cycle: bool

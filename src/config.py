@@ -120,7 +120,7 @@ class Settings(BaseSettings):
 
     # ========== Agent 编排 ==========
     worker_max_retries: int = 3
-    orchestrator_timeout: float = 180.0
+    orchestrator_timeout: float = 300.0
     task_concurrency: int = 3
 
     # ========== MCP (Model Context Protocol) ==========

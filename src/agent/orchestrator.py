@@ -23,6 +23,14 @@ from .state import AgentGraphState
 from .schemas import AgentResult, AgentTask, ExecutionPlan, TaskStatus, UsageInfo
 from src.observability.metrics import record_agent_run
 from src.observability.agent_tracer import get_agent_tracer, AgentTracer
+from src.logging_shared.genai_records import HandoffRecord
+from src.logging_shared.genai_dispatcher import dispatch_handoff
+from src.logging_shared.trace_context_var import (
+    push_trace,
+    pop_trace,
+    new_span_id,
+    new_trace_id,
+)
 
 logger = structlog.get_logger(__name__)
 
@@ -100,6 +108,16 @@ class Orchestrator:
         http_trace_id = (context or {}).get("trace_id", "")
         trace_task_id = http_trace_id or task_id
 
+        # Phase 0 关键改动：push trace 上下文，让后续 handler 内 call_llm 自动拾起 trace 元数据
+        _trace_ctx_token = push_trace(
+            trace_id=http_trace_id or new_trace_id(),
+            span_id=new_span_id(),
+            parent_span_id=None,
+            agent_name="ManagerAgent",
+        )
+        effective_trace_id = _trace_ctx_token.trace_id
+        effective_root_span_id = _trace_ctx_token.span_id
+
         run_span_name = f"agent.run"
         skill_name = (context or {}).get("skill_name", "unknown")
 
@@ -156,6 +174,7 @@ class Orchestrator:
                         "_llm_models": self.chat_models,
                         "_mcp_tools": self.mcp_tools,
                         "_streaming_mode": True,
+                        "plan_valid": False,
                         "_review_fix_cycles": 0,
                         "_loop_created_in_cycle": False,
                         "_last_review_passed": False,
@@ -171,17 +190,36 @@ class Orchestrator:
                         # 而不是等 90s 心跳超时
                         error_msg = f"图执行失败: {type(graph_exc).__name__}: {str(graph_exc)[:200]}"
                         logger.error(
-                            "graph.ainvoke 抛出异常, 发布 SSE error",
-                            exception=str(graph_exc),
+                            "graph.ainvoke 抛出异常, 发布 SSE error: %s",
+                            str(graph_exc)[:200],
                         )
                         if _active_tq and _active_task_id:
                             try:
                                 _active_tq.fail_task(_active_task_id, error_msg)
                             except Exception as pub_exc:
                                 logger.warning(
-                                    "发布 graph 异常到 SSE 失败",
-                                    exception=str(pub_exc),
+                                    "发布 graph 异常到 SSE 失败: %s",
+                                    pub_exc,
                                 )
+
+                        # Phase 0 关键改动：失败也 dispatch handoff 记录 root-level 失败状态
+                        try:
+                            await dispatch_handoff(HandoffRecord(
+                                from_agent="ManagerAgent",
+                                to_agent="(failed)",
+                                handoff_reason="graph_exception",
+                                trace_id=effective_trace_id,
+                                span_id=effective_root_span_id,
+                                parent_span_id=None,
+                                task_id=_active_task_id or task_id,
+                                state_snapshot={
+                                    "error_type": type(graph_exc).__name__,
+                                    "error_message": str(graph_exc)[:500],
+                                    "skill_name": skill_name,
+                                },
+                            ))
+                        except Exception:
+                            pass
                         raise  # 仍抛给上层 except, 返回 AgentResult(FAILED)
 
                     elapsed = round(time.time() - start_time, 2)
@@ -209,6 +247,33 @@ class Orchestrator:
 
                     record_agent_run(status=status, skill_name=skill_name, duration_s=elapsed)
 
+                    # Phase 0 关键改动：图执行结束 → dispatch root handoff (Manager→User)
+                    try:
+                        completed_agents = [
+                            r.get("agent_type", "?")
+                            for r in final_state.get("task_results", {}).values()
+                        ]
+                        await dispatch_handoff(HandoffRecord(
+                            from_agent="ManagerAgent",
+                            to_agent="(response)",
+                            handoff_reason="graph_finished",
+                            trace_id=effective_trace_id,
+                            span_id=effective_root_span_id,
+                            parent_span_id=None,
+                            task_id=_active_task_id or task_id,
+                            state_snapshot={
+                                "status": status,
+                                "skill_name": skill_name,
+                                "completed_tasks_count": len(final_state.get("completed_task_ids", [])),
+                                "failed_tasks_count": len(final_state.get("failed_task_ids", [])),
+                                "completed_agents": completed_agents[:20],
+                                "error": (error or "")[:500] if isinstance(error, str) else "",
+                            },
+                            cost_so_far_usd=None,
+                        ))
+                    except Exception:
+                        pass
+
                     return AgentResult(
                         task_id=task_id,
                         status=result_status,
@@ -234,6 +299,24 @@ class Orchestrator:
                         _active_tq.fail_task(_active_task_id, f"图执行超时 ({timeout}s)")
                     except Exception:
                         pass
+                # Phase 0 关键改动：超时也要记录 root handoff
+                try:
+                    await dispatch_handoff(HandoffRecord(
+                        from_agent="ManagerAgent",
+                        to_agent="(timeout)",
+                        handoff_reason="graph_timeout",
+                        trace_id=effective_trace_id,
+                        span_id=effective_root_span_id,
+                        parent_span_id=None,
+                        task_id=_active_task_id or task_id,
+                        state_snapshot={
+                            "status": "timeout",
+                            "skill_name": skill_name,
+                            "elapsed_s": elapsed,
+                        },
+                    ))
+                except Exception:
+                    pass
                 return AgentResult(
                     task_id=task_id,
                     status=TaskStatus.FAILED,
@@ -247,7 +330,7 @@ class Orchestrator:
                 root_span.record_exception(e)
                 root_span.set_attribute("agent.status", "failed")
                 root_span.set_attribute("agent.error_type", type(e).__name__)
-                logger.error("图执行失败", exception=e, exc_info=True)
+                logger.error("图执行失败: %s", e, exc_info=True)
                 record_agent_run(status="failed", skill_name=skill_name, duration_s=elapsed)
                 # FIX A: 顶层异常兜底: 即使 graph_exc try-except 失败, 仍发 error event
                 if _active_tq and _active_task_id:
@@ -265,6 +348,12 @@ class Orchestrator:
                     error=str(e),
                     usage=UsageInfo(time_elapsed=elapsed),
                 )
+            finally:
+                # Phase 0 关键改动：清理 trace 上下文，避免 contextvar 污染
+                try:
+                    pop_trace(_trace_ctx_token)
+                except Exception:
+                    pass
 
     # ══════════════════════════════════════════════
     # 以下方法保留供 /agent/plan 和 /agent/repurpose 使用
@@ -304,7 +393,7 @@ class Orchestrator:
         )
         # FIX #1: 改走新 parse+reask, 不再用旧 _parse_plan_from_response
         from .parser import parse_plan_with_reask
-        from .plan_validator import validate_plan, plan_to_dict
+        from .plan_validator import plan_to_dict
 
         # Step 1: 理解（纯 LLM）
         understanding = None
@@ -329,7 +418,7 @@ class Orchestrator:
                 if not isinstance(understanding, dict) or "intent" not in understanding:
                     understanding = None
             except Exception as e:
-                logger.warning("编排器 LLM 理解失败", exception=str(e))
+                logger.warning("编排器 LLM 理解失败: %s", e)
 
         if not understanding:
             understanding = _build_fallback_understanding(user_request, context)
@@ -361,13 +450,12 @@ class Orchestrator:
                     timeout=60.0,
                 )
                 if parsed is not None:
-                    # Layer 3: 校验 + 自动修复依赖
-                    vresult = validate_plan(parsed)
-                    plan_dict = plan_to_dict(vresult.plan)
+                    # parse_plan_with_reask 已完成完整 reask 循环，返回的 plan 必然通过校验
+                    plan_dict = plan_to_dict(parsed)
                 else:
                     logger.warning("orchestrator: parse+reask 全部失败, 走 fallback")
             except Exception as e:
-                logger.warning("orchestrator LLM 规划失败", exception=str(e))
+                logger.warning("orchestrator LLM 规划失败: %s", e)
 
         if not plan_dict:
             plan_dict = _build_fallback_plan(user_request)

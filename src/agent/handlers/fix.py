@@ -169,5 +169,5 @@ Additional requirements:
         )
 
     except Exception as e:
-        logger.error("FixAgent 执行失败", exception=str(e), exc_info=True)
+        logger.error("FixAgent 执行失败: %s", e, exc_info=True)
         raise HandlerError(str(e), handler="FixAgent") from e

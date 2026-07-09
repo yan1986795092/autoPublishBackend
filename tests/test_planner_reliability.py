@@ -3,7 +3,7 @@
 测试矩阵:
 - Layer 1 (Schema): 校验 schema 失败 → ValidationError 抛出
 - Layer 2 (Parse+Reask): reask 路径 + 3 次失败后 fallback
-- Layer 3 (Validator): 缺 HotTopicAgent → 自动追加 (AirPods Pro 2 bug 修复)
+- Layer 3 (Validator): 拓扑校验
 - Layer 4 (FrozenPlan): retry→patch→replan 升级协议
 
 测试风格: pytest + AsyncMock, 不依赖外部服务。
@@ -216,50 +216,10 @@ class TestParseWithReask:
 
 
 class TestPlanValidator:
-    """Layer 3: 拓扑自动校验/修复 (AirPods Pro 2 bug 修复)
-
-    关键: 注入是"有条件的", 不是无脑追加。
-    - 下游 task 的 input/reasoning 提到搜索/最新/趋势 → 追加 WebSearch
-    - 没提 → 不追加 (避免 "帮我润色这段" 也触发 search)
-    """
-
-    def test_auto_inject_hot_topic_when_search_signal_present(self):
-        """核心 bug 修复: LLM 加了 WebSearch 且 input 中有搜索信号,
-        validator 应自动追加 HotTopicAgent (供 WritingAgent 分析用)"""
-        p = PlannerOutput(
-            goal="x",
-            tasks=[
-                AgentTaskSpec(
-                    id="s1", agent_type="WebSearch",
-                    input={"query": "test"},
-                ),
-                AgentTaskSpec(
-                    id="w1", agent_type="WritingAgent",
-                    dependencies=["s1"],
-                    input={"topic": "x", "keywords": ["最新", "趋势"]},
-                ),
-                AgentTaskSpec(
-                    id="r1", agent_type="ReviewAgent",
-                    dependencies=["w1"], input={"content": ""},
-                ),
-            ],
-        )
-        result = validate_plan(p)
-        assert result.valid
-        agent_types = {t.agent_type for t in result.plan.tasks}
-        assert "HotTopicAgent" in agent_types, (
-            "input 含 '最新/趋势' 触发信号时, 应自动追加 HotTopicAgent; "
-            f"实际 {agent_types}"
-        )
-
-        ht = next(t for t in result.plan.tasks if t.agent_type == "HotTopicAgent")
-        assert "s1" in ht.dependencies, (
-            f"HotTopicAgent 应依赖 s1 (WebSearch), 实际 deps={ht.dependencies}"
-        )
+    """Layer 3: 拓扑校验"""
 
     def test_no_auto_inject_when_no_search_signal(self):
-        """关键回归测试: 下游 task 无搜索信号时, validator 不应强制追加 WebSearch/HotTopicAgent.
-        避免 '帮我润色这段' 也触发网络搜索."""
+        """回归: 无搜索信号时 validator 不应自动追加任务"""
         p = PlannerOutput(
             goal="帮我润色这段文字",
             tasks=[
@@ -275,52 +235,9 @@ class TestPlanValidator:
         )
         result = validate_plan(p)
         agent_types = {t.agent_type for t in result.plan.tasks}
-        # 不应自动追加 WebSearch 或 HotTopicAgent
-        assert "WebSearch" not in agent_types, (
-            f"无搜索信号时不追加 WebSearch, 实际 {agent_types}"
-        )
-        assert "HotTopicAgent" not in agent_types
-        assert not result.auto_fixed, (
-            "无信号时不应触 auto_fixed"
-        )
-
-    def test_search_signal_via_reasoning_field(self):
-        """LLM 在 reasoning 里写'需要最新数据'也应触发追加"""
-        p = PlannerOutput(
-            goal="x",
-            tasks=[
-                AgentTaskSpec(
-                    id="w1", agent_type="WritingAgent",
-                    input={"topic": "x"},
-                    reasoning="需要最新数据支持文章论据",
-                ),
-            ],
-        )
-        result = validate_plan(p)
-        agent_types = {t.agent_type for t in result.plan.tasks}
-        # reasoning 有"最新" 应触发追加 WebSearch
-        assert "WebSearch" in agent_types
-
-    def test_dependency_completion_works_without_auto_inject(self):
-        """当 plan 里已经有上游任务时, validator 应补 dependency 关系 (不依赖信号)"""
-        p = PlannerOutput(
-            goal="x",
-            tasks=[
-                AgentTaskSpec(
-                    id="s1", agent_type="WebSearch", input={"query": "q"},
-                ),
-                AgentTaskSpec(
-                    id="w1", agent_type="WritingAgent", input={"topic": "x"},
-                    # 没显式声明依赖; 应被自动补
-                ),
-            ],
-        )
-        result = validate_plan(p)
-        w = next(t for t in result.plan.tasks if t.agent_type == "WritingAgent")
-        # Step 2 始终执行, 不依赖信号
-        assert "s1" in w.dependencies, (
-            f"WritingAgent 应被自动补上对 s1 的依赖, 实际 deps={w.dependencies}"
-        )
+        assert "WebSearch" not in agent_types
+        assert "SearchAnalyzer" not in agent_types
+        assert not result.auto_fixed
 
     def test_detects_duplicate_task_id(self):
         """重复 task id 应被检测为 issue"""
@@ -488,60 +405,10 @@ class TestFrozenPlanUpgrade:
 
 
 class TestEndToEnd:
-    """集成测试: 模拟 AirPods Pro 2 场景, 验证 HotTopicAgent 被自动注入"""
-
-    def test_airpods_scenario_hot_topic_auto_injected(self):
-        """模拟 AirPods Pro 2 场景, 验证 HotTopicAgent 在有搜索信号时被自动注入"""
-        raw_plan = {
-            "goal": "推荐 AirPods Pro 2 降噪耳机",
-            "tasks": [
-                {
-                    "id": "search-1",
-                    "agent_type": "WebSearch",
-                    "input": {"query": "AirPods Pro 2 评测"},
-                },
-                {
-                    "id": "write-1",
-                    "agent_type": "WritingAgent",
-                    "dependencies": ["search-1"],
-                    "input": {
-                        "topic": "AirPods Pro 2 降噪耳机深度体验分享",
-                        "keywords": ["最新", "趋势"],  # ← 搜索信号
-                    },
-                },
-                {
-                    "id": "review-1",
-                    "agent_type": "ReviewAgent",
-                    "dependencies": ["write-1"],
-                    "input": {"content": ""},
-                },
-                {
-                    "id": "fix-1",
-                    "agent_type": "FixAgent",
-                    "dependencies": ["review-1", "write-1"],
-                    "input": {"content": ""},
-                },
-            ],
-        }
-
-        parsed = PlannerOutput.model_validate(raw_plan)
-        assert parsed is not None
-
-        result = validate_plan(parsed)
-        assert result.valid
-        assert result.auto_fixed, "应检测到缺 HotTopicAgent 并自动注入"
-
-        agent_types = [t.agent_type for t in result.plan.tasks]
-        assert "HotTopicAgent" in agent_types
-
-        ht = next(t for t in result.plan.tasks if t.agent_type == "HotTopicAgent")
-        assert "search-1" in ht.dependencies
-
-        w = next(t for t in result.plan.tasks if t.agent_type == "WritingAgent")
-        assert ht.id in w.dependencies
+    """集成测试: parse + validate 链"""
 
     def test_polishing_no_search_anymore(self):
-        """关键回归: '帮我润色这段' 不应触发网络搜索"""
+        """回归: '帮我润色这段' 不应触发网络搜索"""
         raw_plan = {
             "goal": "帮我把这段文字改得优雅一些",
             "tasks": [
@@ -559,40 +426,13 @@ class TestEndToEnd:
         result = validate_plan(parsed)
         agent_types = {t.agent_type for t in result.plan.tasks}
         assert "WebSearch" not in agent_types
-        assert "HotTopicAgent" not in agent_types
+        assert "SearchAnalyzer" not in agent_types
         assert not result.auto_fixed
 
-    def test_layer2_then_layer3_pipeline_with_signal(self):
-        """完整 pipeline: 模拟 LLM 返回合法 JSON → parse → validate (有搜索信号)"""
-        # 模拟 LLM 响应
-        llm_response = json.dumps({
-            "goal": "test goal 最新动态",
-            "tasks": [
-                {
-                    "id": "s1", "agent_type": "WebSearch",
-                    "input": {"query": "q"},
-                },
-                {
-                    "id": "w1", "agent_type": "WritingAgent",
-                    "dependencies": ["s1"], "input": {"topic": "x"},
-                },
-            ],
-        })
-        llm_content = f"```json\n{llm_response}\n```"
-
-        parsed = parse_planner_response(llm_content)
-        assert parsed is not None
-
-        result = validate_plan(parsed)
-        assert result.valid
-        # goal 含"最新" → 触发追加 HotTopicAgent
-        agent_types = {t.agent_type for t in result.plan.tasks}
-        assert "HotTopicAgent" in agent_types
-
     def test_layer2_then_layer3_pipeline_no_signal(self):
-        """完整 pipeline: 无搜索信号时, 不应触发网络任务"""
+        """完整 pipeline: parse → validate, 无搜索信号时不触发网络任务"""
         llm_response = json.dumps({
-            "goal": "test goal",  # 无搜索关键词
+            "goal": "test goal",
             "tasks": [
                 {
                     "id": "w1", "agent_type": "WritingAgent",
@@ -605,7 +445,6 @@ class TestEndToEnd:
         parsed = parse_planner_response(llm_content)
         result = validate_plan(parsed)
         agent_types = {t.agent_type for t in result.plan.tasks}
-        # 不应触发 WebSearch 或 HotTopicAgent
         assert "WebSearch" not in agent_types
-        assert "HotTopicAgent" not in agent_types
+        assert "SearchAnalyzer" not in agent_types
         assert not result.auto_fixed

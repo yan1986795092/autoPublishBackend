@@ -130,6 +130,58 @@ class TestIntentDetectorRemovedMarkerMethods:
         assert "text" in params
 
 
+class TestLooksLikeReadyToGenerate:
+    """IntentDetector.looks_like_ready_to_generate 的判定测试
+
+    安全网：当 LLM 在文本中表示"够了/可以开始"但没调工具时，
+    引擎应主动触发 pipeline。
+    """
+
+    # ── 期望被识别为就绪信号（True） ──
+
+    def test_info_enough_and_start_creation(self):
+        """真实场景：'信息够了，开始创作！'"""
+        text = "明白了！轻快流行 + 走心治愈 + 独处时光，这组合太棒了～信息够了，开始创作！"
+        assert IntentDetector.looks_like_ready_to_generate(text) is True
+
+    def test_just_enough_info(self):
+        """'信息已经够了'"""
+        assert IntentDetector.looks_like_ready_to_generate("信息已经够了") is True
+
+    def test_can_start_writing(self):
+        """'可以开始写了'"""
+        assert IntentDetector.looks_like_ready_to_generate("好的，可以开始写了") is True
+
+    def test_ready_signal(self):
+        """'我已经了解清楚了，开始创作吧'"""
+        assert IntentDetector.looks_like_ready_to_generate("我已经了解清楚了，开始创作吧") is True
+
+    def test_have_enough(self):
+        """'够了，开始吧'"""
+        assert IntentDetector.looks_like_ready_to_generate("够了，开始吧") is True
+
+    # ── 期望不被识别为就绪信号（False） ──
+
+    def test_empty_text(self):
+        """空文本"""
+        assert IntentDetector.looks_like_ready_to_generate("") is False
+
+    def test_short_followup(self):
+        """追问文本不应被识别为就绪"""
+        text = "请告诉我您想写什么主题？发布在哪个平台？"
+        assert IntentDetector.looks_like_ready_to_generate(text) is False
+
+    def test_followup_question(self):
+        """追问文本含'需要了解更多'不应被识别"""
+        text = "请告诉我这款应用的核心卖点是什么？另外，目标读者是哪类人群？您先简单说说。"
+        assert IntentDetector.looks_like_ready_to_generate(text) is False
+
+    def test_greeting_not_ready(self):
+        """问候文本不应被识别"""
+        text = "您好！很高兴见到你！请问有什么我可以帮助您的吗？"
+        assert IntentDetector.looks_like_ready_to_generate(text) is False
+
+
 class TestTriggerExtractorAlias:
     """向后兼容：TriggerExtractor 别名 = IntentDetector"""
 

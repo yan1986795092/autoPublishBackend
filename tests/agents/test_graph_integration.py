@@ -237,7 +237,7 @@ class TestClassifyAndDecompose:
 
         assert agent_types[:5] == [
             "WebSearch",
-            "HotTopicAgent",
+            "SearchAnalyzer",
             "WritingAgent",
             "ReviewAgent",
             "FixAgent",

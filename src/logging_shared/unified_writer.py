@@ -138,7 +138,12 @@ class UnifiedEsWriter:
         self._write_fallback(index_type, docs)
 
     async def _try_es_bulk(self, index_type: str, docs: list[dict]) -> bool:
-        """批量写入 ES。成功返回 True。"""
+        """批量写入 ES。成功返回 True。
+
+        当 bulk 响应里 ``errors`` 为 true 时：
+          1. 把每条失败 item 的 reason 记到日志（最多 3 条，避免被埋点噪音覆盖）
+          2. 切换到 jsonl fallback，让数据不会丢
+        """
         es = await self._get_es_client()
         if not es:
             return False
@@ -148,13 +153,34 @@ class UnifiedEsWriter:
         for doc in docs:
             if "@timestamp" not in doc:
                 doc["@timestamp"] = datetime.now(timezone.utc).isoformat()
+            else:
+                # 兜底：如果 @timestamp 是 float（ES mapping 期望 ISO 字符串），转换它
+                ts = doc["@timestamp"]
+                if isinstance(ts, float) or (isinstance(ts, int) and not isinstance(ts, bool)):
+                    doc["@timestamp"] = datetime.fromtimestamp(ts, tz=timezone.utc).isoformat()
             operations.append({"index": {"_index": index_name}})
             operations.append(doc)
 
         try:
             resp = await es.bulk(operations=operations, refresh=False)
             if resp.get("errors"):
-                logger.warning("ES 批量写入 %s 存在错误", index_type)
+                # 抽取前 3 条失败详情（type/reason）便于排查 mapping/版本不兼容问题
+                errs = []
+                for item in resp.get("items", [])[:3]:
+                    op_result = item.get("index") or item.get("create") or item.get("update")
+                    if not op_result:
+                        continue
+                    err = op_result.get("error")
+                    if not err:
+                        continue
+                    errs.append(f"{op_result.get('status')}/{err.get('type')}: {err.get('reason', '')[:120]}")
+                logger.warning(
+                    "ES 批量写入 %s 存在错误（index=%s, docs=%d）：%s",
+                    index_type, index_name, len(docs),
+                    " | ".join(errs) or "未返回详细错误",
+                )
+                # 写入失败 — 仍然让上层 _flush 走 jsonl fallback，保证数据不丢
+                return False
             return True
         except Exception as exc:
             logger.warning("ES 批量写入 %s 失败: %s", index_type, exc)

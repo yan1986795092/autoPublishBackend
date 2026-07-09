@@ -147,15 +147,15 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             except Exception:
                 pass
 
-        # 输出 REQUEST 行 — 把请求体摘要放在 message 字段让 _render_system 显示
+        # Phase 2 关键改动：HTTP 行改 _type=http, 字段对齐 OTel
         try:
             self.logger.info(
                 f"REQUEST  {method} {path}",
-                _type="system",
+                _type="http",
                 event_name="http_request",
                 message=trace_ctx.request_summary or "",
-                method=method,
-                path=path,
+                http_method=method,
+                http_target=path,
                 trace_id=trace_id,
             )
         except UnicodeEncodeError:
@@ -180,12 +180,12 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             try:
                 log_method(
                     f"RESPONSE  {trace_ctx.to_response_line()}",
-                    _type="system",
+                    _type="http",
                     event_name="http_response",
                     message=trace_ctx.response_summary or "",
-                    method=method,
-                    path=path,
-                    status=status_code,
+                    http_method=method,
+                    http_target=path,
+                    http_status_code=status_code,
                     duration_ms=elapsed_ms,
                     trace_id=trace_id,
                 )
@@ -215,12 +215,12 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             try:
                 self.logger.error(
                     f"RESPONSE  {trace_ctx.to_response_line()}",
-                    _type="system",
+                    _type="http",
                     event_name="http_response_error",
                     message=trace_ctx.error or "",
-                    method=method,
-                    path=path,
-                    status=500,
+                    http_method=method,
+                    http_target=path,
+                    http_status_code=500,
                     duration_ms=elapsed_ms,
                     trace_id=trace_id,
                     error=error_info[:200],

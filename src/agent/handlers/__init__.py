@@ -6,7 +6,7 @@ from .diagram import handle_diagram
 from .code import handle_code
 from .web_search import handle_web_search, handle_url_crawl
 from .fix import handle_fix
-from .hot_topic import handle_hot_topic
+from .search_analyzer import handle_search_analyzer
 from .fallback import handle_fallback
 
 HANDLER_MAP = {
@@ -17,5 +17,5 @@ HANDLER_MAP = {
     "CodeAgent": handle_code,
     "WebSearch": handle_web_search,
     "URLCrawler": handle_url_crawl,
-    "HotTopicAgent": handle_hot_topic,
+    "SearchAnalyzer": handle_search_analyzer,
 }

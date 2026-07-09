@@ -4,7 +4,7 @@ Graph 结构 (PR-6 增加 validate_plan / replan_plan):
   understand_intent
        │ (direct)
        ▼
-  plan_tasks                     ← 内部已调 validate_plan (Layer 3) 自动修复
+  plan_tasks                     ← 内部调用 parse_plan_with_reask（已完成"解析+拓扑校验+LLM自纠"）
        │ (direct)
        ▼
   validate_plan_node             ← Layer 3 ValidationNode 入口 (拓扑二次校验)
@@ -31,9 +31,12 @@ Reference:
 
 from __future__ import annotations
 
+import logging
 from functools import lru_cache
 
 from langgraph.graph import END, StateGraph
+
+logger = logging.getLogger(__name__)
 from langgraph.graph.state import CompiledStateGraph
 
 from .nodes import (
@@ -55,7 +58,12 @@ def _after_validate(state: AgentGraphState) -> str:
     - plan_valid=True → 进入执行
     - plan_valid=False → 触发 replan
     """
-    if state.get("plan_valid", False):
+    plan_valid = state.get("plan_valid")
+    logger.info(
+        "_after_validate: plan_valid=%s (type=%s)",
+        plan_valid, type(plan_valid).__name__,
+    )
+    if plan_valid:
         return "execute"
     return "replan"
 

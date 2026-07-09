@@ -126,20 +126,15 @@ def save_content_from_agent_result(
 
             db.commit()
             logger.info(
-                "Content 创建成功",
-                content_id=content.id,
-                title=final_title[:50],
-                platform=final_platform,
-                source_task_id=source_task_id,
+                "Content 创建成功 | id=%s title=%s platform=%s source_task=%s",
+                content.id, final_title[:50], final_platform, source_task_id,
             )
             return content.id
         except Exception as e:
             db.rollback()
             logger.error(
-                "Content 创建失败",
-                exception=str(e),
-                user_id=user_id,
-                source_task_id=source_task_id,
+                "Content 创建失败 (user_id=%s, source_task_id=%s): %s",
+                user_id, source_task_id, e,
             )
             return None
 

@@ -1,12 +1,16 @@
-"""统一 structlog 配置（两服务共用）"""
-
 import logging
+import os
 import sys
 from typing import Literal
 
 import structlog
 
 from .rich_console import RichConsoleRenderer
+from .dispatcher import Dispatcher, set_dispatcher
+from .sinks.console import ConsoleSink as NewConsoleSink
+from .sinks.es import EsSink
+from .sinks.jsonfile import JsonFileSink
+from .redactor import DefaultRedactor
 
 
 class _DefaultColorFormatter(logging.Formatter):
@@ -95,6 +99,25 @@ def setup(
     for _name in ["elasticsearch", "elastic_transport", "opentelemetry",
                   "urllib3", "sqlalchemy.engine", "httpx", "httpcore"]:
         logging.getLogger(_name).setLevel(logging.WARNING)
+
+    # ── Phase 1: 同时装配新 Dispatcher (默认关闭, 用 LOG_NEW_DISPATCHER_ENABLED 启用) ──
+    if os.getenv("LOG_NEW_DISPATCHER_ENABLED", "false").lower() in ("true", "1", "yes"):
+        new_sinks = []
+        # production 只 WARN/ERROR 进 Console
+        from .sinks.console import ConsoleSink as _CSink
+        _console = _CSink(colors=not log_json)
+        new_sinks.append(_console)
+        if os.getenv("LOG_ES_ENABLED", "true").lower() not in ("false", "0", "no"):
+            new_sinks.append(EsSink(index_type="logs"))
+        if os.getenv("LOG_JSONFILE_ENABLED", "false").lower() in ("true", "1", "yes"):
+            new_sinks.append(JsonFileSink())
+        set_dispatcher(Dispatcher(sinks=new_sinks, redactor=DefaultRedactor()))
+        logger.info(
+            "新 Dispatcher 已启用 (sinks=%d)",
+            len(new_sinks),
+            _type="system",
+            event_name="dispatcher_enabled",
+        )
 
 
 def _add_service_context(logger, method_name, event_dict):

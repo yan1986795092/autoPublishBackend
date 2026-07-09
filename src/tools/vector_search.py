@@ -194,8 +194,25 @@ class VectorSearchTool:
         if not self._ensure_pgvector():
             return {"query": query, "matches": [], "total": 0, "fallback": "pgvector_unavailable"}
 
+        # 修复 BUG-Qwen-400：query 必须是字符串且非空，否则 Qwen 抛 'contents is neither
+        # str nor list of str' 400 错误，整批失败。统一清洗再交给 embed_query。
+        if not isinstance(query, str) or not query.strip():
+            logger.warning(
+                "VectorSearch search() 跳过：query 非法 (type=%s, empty=%s)",
+                type(query).__name__, not query,
+            )
+            return {"query": str(query) if query is not None else "",
+                    "matches": [], "total": 0, "fallback": "invalid_query"}
+        cleaned_query = "".join(
+            ch for ch in query if ch == "\n" or ch == "\t" or ch >= " "
+        ).strip()
+        if not cleaned_query:
+            return {"query": "", "matches": [], "total": 0, "fallback": "empty_query"}
+        if len(cleaned_query) > 8000:
+            cleaned_query = cleaned_query[:8000]
+
         try:
-            query_embedding = self._embeddings.embed_query(query)
+            query_embedding = self._embeddings.embed_query(cleaned_query)
             embedding_str = self._to_pgvector_str(query_embedding)
 
             db = SessionLocal()

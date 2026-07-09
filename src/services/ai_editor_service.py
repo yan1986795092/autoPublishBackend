@@ -54,12 +54,19 @@ class AIEditorService:
 
     async def _call(self, prompt: str) -> dict:
         """调用 LLM 并记录日志"""
+        _model = getattr(self._llm, "model_name", getattr(self._llm, "model", "unknown"))
         t0 = time.time()
         llm_result = await self._llm.ainvoke([{"role": "user", "content": prompt}])
         elapsed = time.time() - t0
         tokens = llm_result.response_metadata.get("token_usage", {})
+        _has_tc = bool(getattr(llm_result, "tool_calls", None))
+        logger.info(
+            "AIEditor LLM 调用: model=%s text_len=%s tool_calls=%s elapsed=%.3fs",
+            _model, len(llm_result.content or ""), "yes" if _has_tc else "no", elapsed,
+        )
         logger.info("ai_editor_llm_call",
                     action="llm_call",
+                    model=_model,
                     prompt_length=len(prompt),
                     response_length=len(llm_result.content),
                     elapsed=round(elapsed, 3),

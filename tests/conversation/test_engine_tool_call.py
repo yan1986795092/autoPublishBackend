@@ -43,11 +43,16 @@ class TestTriggerToolSchema:
         assert "" in length["enum"]
 
     def test_description_does_not_recommend_text_marker(self):
-        """v3：tool description 不再让 LLM 用 [GENERATE] 文本标记"""
+        """v3：tool description 必须明确告诉 LLM 必须用工具调用，且 [GENERATE] 已废弃"""
         desc = TRIGGER_TOOL_SCHEMA[0]["function"]["description"]
-        # 不应包含"用 [GENERATE] 标记"的措辞（虽然可能有"不要"的措辞）
-        # 这里只校验 description 提到了"必须用此函数调用"
-        assert "必须用此函数调用" in desc or "唯一方式" in desc
+        # 关键断言：description 强调必须调用工具
+        assert "必须调用" in desc or "实际执行工具调用" in desc, (
+            "tool description 必须明确告诉 LLM 触发创作必须用工具调用"
+        )
+        # 关键断言：description 明确 [GENERATE] 已废弃
+        assert "已废弃" in desc, (
+            "tool description 必须明确说明 [GENERATE] 文本标记已废弃"
+        )
 
 
 # ─────────────── chunk 工厂 ───────────────
@@ -164,7 +169,11 @@ class TestConversationEngineToolCallPath:
     @pytest.mark.asyncio
     async def test_tool_call_with_empty_topic_falls_back(self, engine, ctx):
         """tool_call 缺 topic（required）→ engine 忽略 tool_call
-        → 走到兜底分支（用户消息含"生成"关键词）→ 产出 _fallback=True 的 trigger。"""
+        → 可能走兜底分支（如果有有效 topic）→ 否则转追问。
+
+        v3 关键修复：兜底 topic 提取必须避免纯动作词，
+        因此当 ctx.message 是纯动作词且没有对话历史时，**应当转追问**而不是产出无效 trigger。
+        """
         text_chunk = _make_text_chunk("好！")
         tool_chunk = _make_tool_chunk(
             "trigger_generation",
@@ -185,19 +194,29 @@ class TestConversationEngineToolCallPath:
             async for ev in engine.chat(ctx):
                 events.append(ev)
 
-        # tool_call 路径不应产出非 fallback 触发器
+        # 关键：tool_call 路径不应产出非 fallback 触发器（缺 topic 不合法）
         tool_path_triggers = [
             e for e in events
             if e["type"] == "trigger" and not e["data"].get("_fallback")
         ]
         assert tool_path_triggers == []
 
-        # 兜底路径可能产出 _fallback=True 的 trigger（用户消息含"生成"关键词）
+        # 当前 ctx.message="[目标平台：微博]\n直接生成"，纯动作词 + 无历史 →
+        #   兜底 topic 提取失败，转追问（不产出 fallback trigger）
         fallback_triggers = [
             e for e in events
             if e["type"] == "trigger" and e["data"].get("_fallback")
         ]
-        assert len(fallback_triggers) == 1
+        # 不一定有 fallback trigger（取决于 topic 是否能提取出来）
+        # 但即使有，也不应是纯动作词
+        for t in fallback_triggers:
+            assert t["data"].get("topic") not in ("", "直接", "直接生成"), \
+                f"兜底触发器 topic 不应是纯动作词: {t['data'].get('topic')!r}"
+
+        # 应当有 text_cleanup 事件（让前端展示追问话）
+        cleanup_events = [e for e in events if e["type"] == "text_cleanup"]
+        # 至少有一个 text_cleanup（追问话） OR trigger（兜底成功）
+        assert cleanup_events or fallback_triggers
 
     @pytest.mark.asyncio
     async def test_other_tool_call_does_not_set_trigger_via_tool_path(self, engine, ctx):
@@ -349,3 +368,312 @@ class TestGenerateTriggerFromDict:
     def test_default_action(self):
         t = GenerateTrigger.from_dict({"topic": "测试"})
         assert t.action == "create"
+
+
+# ─────────────── 兜底分支 topic 提取（v3 关键修复）────────────────
+
+
+class TestFallbackTopicExtraction:
+    """当 LLM 没调工具但用户要求生成时，兜底 topic 提取的正确性。
+
+    场景：LLM 反复说"开始创作"但拒绝调工具 → 后端走兜底分支，
+    必须能从 LLM 输出 / 对话历史里提取出正确的 topic（而不是"直接开始"）。
+    """
+
+    @pytest.fixture
+    def engine(self):
+        from src.conversation.engine import ConversationEngine
+        return ConversationEngine()
+
+    @pytest.fixture
+    def ctx_with_history(self):
+        """模拟用户多轮对话：先问主题，再要求生成"""
+        return ConversationContext(
+            message="[目标平台：公众号]\n直接开始写",
+            conversation_id="conv-test",
+            user_id="user-test",
+            history=[
+                {"role": "user", "content": "[目标平台：公众号]\n聊聊 AI 工具如何改变了我的日常工作流"},
+                {"role": "assistant", "content": "好的，这个话题很有意思..."},
+                {"role": "user", "content": "[目标平台：公众号]\n开始创作"},
+                {"role": "assistant", "content": "好的，信息够了，开始创作！再确认一下..."},
+            ],
+            platform="wechat",
+            content_type="",
+            preferences={"tone": "friendly", "length": "medium", "audience": "intermediate"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_llm_explicit_topic_signal_in_output(self, engine, ctx_with_history):
+        """LLM 输出里包含'就以X为主题'信号时，topic 应当取 X。
+        复现真实场景：LLM 输出 '就以AI工具如何改变日常工作流为主题，采用第一人称个人经验分享的风格来写'"""
+        # LLM 自然语言说"开始创作"+ 显式说主题
+        text_chunk = _make_text_chunk(
+            '好的，那我来推断一下最合理的主题——就以"AI工具如何改变日常工作流"为主题，'
+            '采用第一人称个人经验分享的风格来写。开始创作！'
+        )
+
+        mock_llm = MagicMock()
+        async def fake_astream(messages):
+            yield text_chunk
+        bound_llm = MagicMock()
+        bound_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=bound_llm)
+
+        with patch.object(engine, "_get_llm", AsyncMock(return_value=mock_llm)):
+            events = []
+            async for ev in engine.chat(ctx_with_history):
+                events.append(ev)
+
+        # 兜底分支应触发，topic 应来自 LLM 输出的显式信号（去掉引号）
+        fallback_triggers = [
+            e for e in events
+            if e["type"] == "trigger" and e["data"].get("_fallback")
+        ]
+        assert len(fallback_triggers) == 1
+        topic = fallback_triggers[0]["data"]["topic"]
+        assert "AI工具" in topic or "日常工作流" in topic, \
+            f"topic 应该是 LLM 显式说的'AI工具如何改变日常工作流'，实际是 {topic!r}"
+        # 不应该是动作词
+        assert topic not in ("直接", "开始写", "开始", "直接开始")
+
+    @pytest.mark.asyncio
+    async def test_topic_from_history_when_llm_no_signal(self, engine, ctx_with_history):
+        """LLM 输出里没有'就以X为主题'信号 → 从对话历史找最近实质主题
+        排除 '直接生成''开始创作' 这种动作词消息。"""
+        # LLM 只说开始创作但没显式主题
+        text_chunk = _make_text_chunk("好的，信息够了，开始创作！")
+
+        mock_llm = MagicMock()
+        async def fake_astream(messages):
+            yield text_chunk
+        bound_llm = MagicMock()
+        bound_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=bound_llm)
+
+        with patch.object(engine, "_get_llm", AsyncMock(return_value=mock_llm)):
+            events = []
+            async for ev in engine.chat(ctx_with_history):
+                events.append(ev)
+
+        fallback_triggers = [
+            e for e in events
+            if e["type"] == "trigger" and e["data"].get("_fallback")
+        ]
+        assert len(fallback_triggers) == 1
+        topic = fallback_triggers[0]["data"]["topic"]
+        # 应该取历史里"聊聊 AI 工具..."那条
+        assert "AI工具" in topic or "日常工作流" in topic, \
+            f"topic 应该来自对话历史的实质内容，实际是 {topic!r}"
+
+    @pytest.mark.asyncio
+    async def test_topic_not_pure_action_words(self, engine, ctx_with_history):
+        """兜底触发不应产出纯动作词 topic（如'直接''开始''直接开始'）。"""
+        # 即使 LLM 输出简短、history 全是动作词，也应避免错误的纯动作 topic
+        ctx = ConversationContext(
+            message="[目标平台：公众号]\n直接",
+            conversation_id="conv-test",
+            user_id="user-test",
+            history=[
+                {"role": "user", "content": "[目标平台：公众号]\n直接"},
+                {"role": "assistant", "content": "好的，收到！"},
+                {"role": "user", "content": "[目标平台：公众号]\n直接生成"},
+                {"role": "assistant", "content": "好的，信息够了，开始创作！"},
+            ],
+            platform="wechat",
+            content_type="",
+            preferences={},
+        )
+
+        text_chunk = _make_text_chunk("好的，信息够了，开始创作！")
+        mock_llm = MagicMock()
+        async def fake_astream(messages):
+            yield text_chunk
+        bound_llm = MagicMock()
+        bound_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=bound_llm)
+
+        with patch.object(engine, "_get_llm", AsyncMock(return_value=mock_llm)):
+            events = []
+            async for ev in engine.chat(ctx):
+                events.append(ev)
+
+        # 要么产出有效 topic 的 trigger，要么不触发（转追问）
+        # 不应产出 topic="直接" 这种无效的纯动作词 trigger
+        invalid_topic_triggers = [
+            e for e in events
+            if e["type"] == "trigger"
+            and e["data"].get("topic") in ("直接", "直接开始", "开始", "开始写", "生成", "")
+        ]
+        assert invalid_topic_triggers == [], \
+            f"不应产出纯动作词 topic 的 trigger，实际: {invalid_topic_triggers}"
+
+
+# ─────────────── 安全网：LLM 就绪信号检测（_llm_ready_signal）────────────────
+
+
+class TestSafetyNetLlmReadySignal:
+    """对话引擎安全网：LLM 输出'够了/开始创作'但没调工具 → 自动触发 pipeline
+
+    场景：用户回答了 LLM 的追问（如专辑类型、风格），LLM 说"信息够了，开始创作"
+    但没调 trigger_generation 工具（可能因 Gateway 未透传 tool_calls）。
+    引擎应进入兜底分支，从上下文提取 topic 后触发 pipeline。
+    """
+
+    @pytest.fixture
+    def engine(self):
+        from src.conversation.engine import ConversationEngine
+        return ConversationEngine()
+
+    @pytest.fixture
+    def ctx_ready_to_generate(self):
+        """模拟用户已回答 LLM 的追问，LLM 确认已就绪的场景"""
+        return ConversationContext(
+            message="[目标平台：微博]\n轻快的流行       走心治愈        独处时光",
+            conversation_id="conv-safety",
+            user_id="user-safety",
+            history=[
+                {"role": "user", "content": "[目标平台：微博]\n今日份小确幸：通勤路上听完了整张专辑"},
+                {"role": "assistant", "content": "听起来是个很惬意的早晨呀！..."},
+                {"role": "user", "content": "[目标平台：微博]\n微博    写一篇更丰富的内容"},
+                {"role": "assistant", "content": "好嘞，明白了！...是什么类型的专辑呀？"},
+            ],
+            platform="weibo",
+            content_type="",
+            preferences={"tone": "friendly", "length": "medium", "audience": "intermediate"},
+        )
+
+    @pytest.mark.asyncio
+    async def test_llm_ready_signal_triggers_fallback(self, engine, ctx_ready_to_generate):
+        """LLM 说'信息够了，开始创作'但没调工具 → 安全网触发生成触发器
+
+        模拟日志中出现的真实场景：LLM 输出
+        '明白了！轻快流行 + 走心治愈 + 独处时光，这组合太棒了～信息够了，开始创作！'
+        """
+        text_chunk = _make_text_chunk(
+            "明白了！轻快流行 + 走心治愈 + 独处时光，"
+            "这组合太棒了～信息够了，开始创作！"
+        )
+
+        mock_llm = MagicMock()
+        async def fake_astream(messages):
+            yield text_chunk
+        bound_llm = MagicMock()
+        bound_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=bound_llm)
+
+        with patch.object(engine, "_get_llm", AsyncMock(return_value=mock_llm)):
+            events = []
+            async for ev in engine.chat(ctx_ready_to_generate):
+                events.append(ev)
+
+        # 应触发兜底分支 → 产出 _fallback=True 的 trigger
+        fallback_triggers = [
+            e for e in events
+            if e["type"] == "trigger" and e["data"].get("_fallback")
+        ]
+        assert len(fallback_triggers) == 1, (
+            f"安全网应产出 1 个 fallback trigger，实际: {len(fallback_triggers)}"
+        )
+        trigger = fallback_triggers[0]["data"]
+        assert trigger["action"] == "create"
+        # topic 应从上下文提取（消息中的有效内容）
+        assert trigger["topic"], "topic 不应为空"
+        # topic 应从上下文提取（历史中的实质内容或当前消息）
+        assert len(trigger["topic"]) >= 4, \
+            f"topic 应有实质内容，实际: {trigger['topic']!r}"
+        # platform 应从前端预选值覆盖
+        assert trigger["platform"] == "weibo"
+        # parameters 应包含 preferences 信息
+        assert "parameters" in trigger
+        assert trigger["parameters"]["tone"] == "friendly"
+
+    @pytest.mark.asyncio
+    async def test_llm_ready_signal_no_followup(self, engine, ctx_ready_to_generate):
+        """LLM 输出包含就绪信号但不含追问特征 → 安全网触发
+
+        验证：_llm_ready_signal 的正确性取决于
+        looks_like_followup_question 返回 False + looks_like_ready_to_generate 返回 True。
+        """
+        # "信息够了"（就绪信号）但没有问号（非追问）
+        text_chunk = _make_text_chunk("好的，信息够了，开始创作吧！")
+
+        mock_llm = MagicMock()
+        async def fake_astream(messages):
+            yield text_chunk
+        bound_llm = MagicMock()
+        bound_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=bound_llm)
+
+        with patch.object(engine, "_get_llm", AsyncMock(return_value=mock_llm)):
+            events = []
+            async for ev in engine.chat(ctx_ready_to_generate):
+                events.append(ev)
+
+        fallback_triggers = [
+            e for e in events
+            if e["type"] == "trigger" and e["data"].get("_fallback")
+        ]
+        assert len(fallback_triggers) >= 1, "安全网应产出 fallback trigger"
+
+    @pytest.mark.asyncio
+    async def test_normal_greeting_not_triggered(self, engine, ctx_ready_to_generate):
+        """普通问候不含就绪信号 → 安全网不应触发"""
+        text_chunk = _make_text_chunk("您好！很高兴见到你！有什么可以帮你的吗？")
+
+        mock_llm = MagicMock()
+        async def fake_astream(messages):
+            yield text_chunk
+        bound_llm = MagicMock()
+        bound_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=bound_llm)
+
+        with patch.object(engine, "_get_llm", AsyncMock(return_value=mock_llm)):
+            events = []
+            async for ev in engine.chat(ctx_ready_to_generate):
+                events.append(ev)
+
+        # 不应产出 trigger
+        triggers = [e for e in events if e["type"] == "trigger"]
+        assert triggers == [], f"问候文本不应触发 pipeline: {triggers}"
+
+    @pytest.mark.asyncio
+    async def test_user_says_generate_still_works(self, engine):
+        """用户说'直接生成'且 LLM 没调工具 → 仍通过 _wants_generation 进入兜底
+
+        验证：_wants_generation 路径不受安全网影响（互不阻塞）
+        """
+        ctx = ConversationContext(
+            message="直接生成",
+            conversation_id="conv-normal",
+            user_id="user-normal",
+            history=[
+                {"role": "user", "content": "聊聊 AI 工具如何改变了工作流"},
+                {"role": "assistant", "content": "很好的话题！"},
+            ],
+            platform="weibo",
+            content_type="",
+            preferences={},
+        )
+        text_chunk = _make_text_chunk("好的，开始创作！")
+
+        mock_llm = MagicMock()
+        async def fake_astream(messages):
+            yield text_chunk
+        bound_llm = MagicMock()
+        bound_llm.astream = fake_astream
+        mock_llm.bind_tools = MagicMock(return_value=bound_llm)
+
+        with patch.object(engine, "_get_llm", AsyncMock(return_value=mock_llm)):
+            events = []
+            async for ev in engine.chat(ctx):
+                events.append(ev)
+
+        fallback_triggers = [
+            e for e in events
+            if e["type"] == "trigger" and e["data"].get("_fallback")
+        ]
+        assert len(fallback_triggers) >= 1
+        topic = fallback_triggers[0]["data"]["topic"]
+        assert "AI" in topic or "工作流" in topic, \
+            f"topic 应从历史提取: {topic!r}"

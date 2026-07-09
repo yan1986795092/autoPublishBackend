@@ -16,7 +16,7 @@ templates = [
 - ReviewAgent：对内容进行质量、违禁词、事实准确性审查
 - PlatformAdapter：将内容格式转换为特定平台（微信、小红书、知乎）所需的格式
 - ImageAgent：生成图片和封面图
-- HotTopicAgent：分析社交平台的热门话题和热搜
+- SearchAnalyzer：分析搜索结果，提取关键主题、结构和洞察
 - CodeAgent：生成代码示例、教程和技术文档
 
 规则：
@@ -28,18 +28,18 @@ templates = [
 
 输出格式：
 ```json
-{
+{{
   "goal": "用户目标的摘要",
   "reasoning": "选择该计划的原因",
   "tasks": [
-    {
+    {{
       "agent_type": "WebSearch",
-      "input": {"query": "搜索查询"},
+      "input": {{"query": "搜索查询"}},
       "dependencies": [],
       "reasoning": "为什么需要此任务"
-    }
+    }}
   ]
-}```""",
+}}```""",
         description="Manager Agent 任务分解 System Prompt",
         version="2.0",
         role="ManagerAgent",

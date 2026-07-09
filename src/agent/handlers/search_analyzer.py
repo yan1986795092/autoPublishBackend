@@ -1,6 +1,6 @@
-"""HotTopicAgent — 基于 WebSearch 结果的热点话题分析
+"""SearchAnalyzer — 基于 WebSearch 结果的搜索结果分析
 
-依赖 WebSearch 的输出，分析搜索到的信息中的热点趋势、主题分布和关键洞察。
+依赖 WebSearch 的输出，分析搜索到的信息中的关键主题、结构和洞察。
 必须在 WebSearch 之后执行，不可独立使用。
 """
 
@@ -14,22 +14,22 @@ from ..result import agent_response
 from src.core.exceptions import HandlerError
 from src.logging_shared.config import get_logger
 
-logger = get_logger("agent.hot_topic")
+logger = get_logger("agent.search_analyzer")
 
-SYSTEM_PROMPT = """你是一个热点趋势分析专家。你的任务是基于搜索结果中的信息，识别和分析当前的热点话题与趋势。
+SYSTEM_PROMPT = """你是一个搜索结果分析专家。你的任务是基于搜索到的信息，提取关键主题、结构和洞察。
 
 分析要求：
-1. 从搜索结果中提取关键主题和趋势，不要依赖 LLM 训练数据中的记忆
+1. 从搜索结果中提取关键主题和结构，不要依赖 LLM 训练数据中的记忆
 2. 如果搜索结果为空或信息不足，如实说明，不要编造
 3. 按重要性对主题排序
-4. 输出结构化的分析结果
+4. 输出结构化的分析结果，方便后续内容创作使用
 
 输出格式：
 先输出分析摘要，然后列出关键发现。"""
 
 
-async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
-    """HotTopicAgent 主入口：分析搜索结果中的热点趋势"""
+async def handle_search_analyzer(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
+    """SearchAnalyzer 主入口：分析搜索结果中的关键主题和结构"""
     try:
         # 从依赖上下文中获取 WebSearch / URLCrawler 的搜索结果
         dep_context = task_input.get("_context", {})
@@ -42,25 +42,25 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | 
                 search_contents.append(content)
 
         combined_search = "\n\n---\n\n".join(search_contents)
-        topic = task_input.get("topic", "热点分析")
+        topic = task_input.get("topic", "搜索结果分析")
 
         # 降级：无搜索数据
         if not combined_search:
-            logger.warning("HotTopicAgent 未收到搜索数据，返回空分析")
+            logger.warning("SearchAnalyzer 未收到搜索数据，返回空分析")
             return agent_response(
-                "HotTopicAgent",
+                "SearchAnalyzer",
                 content="",
                 output_type="text",
                 output_extra={
                     "trends": [],
                     "keywords": [],
-                    "summary": "无搜索数据，无法进行热点分析",
+                    "summary": "无搜索数据，无法进行分析",
                     "has_data": False,
                 },
                 thinking_steps=[{
-                    "agent": "HotTopicAgent",
+                    "agent": "SearchAnalyzer",
                     "action": "跳过",
-                    "reasoning": "无搜索数据，跳过热点分析",
+                    "reasoning": "无搜索数据，跳过分析",
                     "output_summary": "无数据",
                     "status": "done",
                 }],
@@ -73,10 +73,10 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | 
 {combined_search[:8000]}
 
 请分析以上搜索结果，提取：
-1. 当前最热门的 3-5 个话题/趋势
-2. 每个话题的关键词
-3. 整体情感倾向（正面/中性/负面）
-4. 如果与产品推广相关，提取可用于推广的洞察
+1. 最相关的 3-5 个关键主题/方向
+2. 每个主题的关键信息
+3. 整体信息结构和脉络
+4. 可用于内容创作的核心素材
 直接输出分析结果，不要加「好的」等前缀。"""
 
         messages = [
@@ -86,25 +86,24 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | 
 
         llm_result = await call_llm(
             llm, messages,
-            agent_type="HotTopicAgent",
+            agent_type="SearchAnalyzer",
             stream=True,
             on_chunk=task_input.get("_on_llm_chunk"),
         )
 
         analysis = llm_result.content.strip()
 
-        # 从分析文本中简单提取关键词（也可以让 LLM 输出结构化 JSON，但为稳定性先保持纯文本）
+        # 从分析文本中简单提取关键词
         keywords = []
         for line in analysis.split("\n"):
             line = line.strip()
             if line.startswith("##") or line.startswith("**") or (line and line[0].isdigit()):
-                # 提取标题行中的关键词
                 clean = line.lstrip("#* .").strip()
                 if clean and len(clean) < 50:
                     keywords.append(clean)
 
         return agent_response(
-            "HotTopicAgent",
+            "SearchAnalyzer",
             content=analysis,
             output_type="text",
             tokens_used=llm_result.total_tokens,
@@ -117,9 +116,9 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | 
                 "has_data": True,
             },
             thinking_steps=[{
-                "agent": "HotTopicAgent",
+                "agent": "SearchAnalyzer",
                 "action": "分析完成",
-                "reasoning": f"分析 {len(search_contents)} 个搜索结果，识别 {len(keywords)} 个热点主题",
+                "reasoning": f"分析 {len(search_contents)} 个搜索结果，提取 {len(keywords)} 个关键主题",
                 "output_summary": f"分析了 {len(search_contents)} 条搜索结果",
                 "tokens_used": llm_result.total_tokens,
                 "status": "done",
@@ -127,5 +126,5 @@ async def handle_hot_topic(task_input: dict, llm: ChatOpenAI, mcp_tools: list | 
         )
 
     except Exception as e:
-        logger.error("HotTopicAgent 执行失败", exception=str(e), exc_info=True)
-        raise HandlerError(str(e), handler="HotTopicAgent") from e
+        logger.error("SearchAnalyzer 执行失败: %s", e, exc_info=True)
+        raise HandlerError(str(e), handler="SearchAnalyzer") from e

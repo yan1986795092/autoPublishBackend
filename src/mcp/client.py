@@ -245,7 +245,7 @@ class MCPClient:
 
             # 根据分类限制可见的 Agent 类型（防止污染非搜索 Agent 的 LLM 调用）
             if category == "search":
-                agent_types = ["WebSearch", "HotTopicAgent"]
+                agent_types = ["WebSearch", "SearchAnalyzer"]
             elif category == "media":
                 agent_types = ["ImageAgent"]
             elif category == "code":

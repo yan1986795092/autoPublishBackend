@@ -101,11 +101,6 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         builder = PromptBuilder()
         builder.system("system.reviewer")
 
-        # ── Skill system prompt injection ──
-        skill_system_prompt = task_input.get("_skill_system_prompt", "")
-        if skill_system_prompt:
-            builder.context(f"\n\n=== 创作指导 (Skill: {task_input.get('_skill_name', 'Custom')}) ===\n{skill_system_prompt}\n===")
-
         # 注入平台质量检查标准
         quality_context = ""
         if platform_quality:
@@ -247,7 +242,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                     fixed_content = fix_result.content.strip()
                     rewrite_applied = bool(fixed_content) and fixed_content != original_for_fix[:5000]
             except Exception as fix_err:
-                logger.warning("ReviewAgent 自动修正失败，跳过修正", exception=str(fix_err))
+                logger.warning("ReviewAgent 自动修正失败，跳过修正: %s", fix_err)
 
         # 汇总 token（审核 + 修正）
         total_tokens = llm_result.total_tokens + (fix_result.total_tokens if rewrite_applied else 0)
@@ -289,5 +284,5 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             }],
         )
     except Exception as e:
-        logger.error("ReviewAgent 执行失败", exception=str(e), exc_info=True)
+        logger.error("ReviewAgent 执行失败: %s", e, exc_info=True)
         raise HandlerError(str(e), handler="ReviewAgent") from e

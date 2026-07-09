@@ -45,13 +45,46 @@ _FOLLOWUP_QUESTION_PATTERNS = [
 _FOLLOWUP_QUESTION_MIN_HITS = 2  # 至少命中 2 个特征才认定为追问
 
 
+# ─────────────── 就绪信号检测 ───────────────
+
+# LLM 确认信息已足够、可以开始创作的信号特征
+# 用于安全网：当 LLM 明确表示已就绪但未调 trigger_generation 工具时触发兜底
+_READY_TO_GENERATE_PATTERNS = [
+    re.compile(r'信息[已经]?够[了]?'),
+    re.compile(r'可以[开始]?(创作|写了|生成|发布)'),
+    re.compile(r'开始创作'),
+    re.compile(r'开始写[吧作了]?'),
+    re.compile(r'准备好[了]?'),
+    re.compile(r'已经[了解知道].*[够充分]?'),
+    re.compile(r'[这那]就[开始直接]?[创作生成写]'),
+    re.compile(r'[没缺]?[问问题]?[了]?[，,]?可以[了]?[！!]?$'),  # "可以了！"
+    re.compile(r'够了'),
+]
+_READY_TO_GENERATE_MIN_HITS = 1  # 只需命中 1 个特征即可认定
+
+
 class IntentDetector:
     """对话 LLM 回复文本意图识别器
 
     v3 改造后已移除 [GENERATE] 文本标记相关方法。
     生成触发统一通过 trigger_generation 工具调用完成，
-    本类只保留两类纯文本意图判断。
+    本类增加纯文本意图判断以支持安全网兜底。
     """
+
+    @classmethod
+    def looks_like_ready_to_generate(cls, text: str) -> bool:
+        """检测 LLM 是否在文本中表达了"信息已足够，可以开始创作"的信号
+
+        用于安全网：当 LLM 未调用 trigger_generation 但文本里明确表示
+        "够了""可以开始"时，引擎应主动触发 pipeline 作为兜底。
+        避免因 Gateway 未透传 tool_calls 或 LLM 不支持工具调用导致用户卡住。
+
+        判定：命中 >= 1 个就绪信号特征。
+        """
+        if not text or len(text.strip()) < 5:
+            return False
+        hits = sum(1 for p in _READY_TO_GENERATE_PATTERNS if p.search(text))
+        return hits >= _READY_TO_GENERATE_MIN_HITS
 
     @classmethod
     def looks_like_unauthorized_write(cls, text: str) -> bool:

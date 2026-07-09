@@ -41,18 +41,16 @@ class AgentEventEmitter:
         return current
 
     def _truncate(self, text: str | None, max_length: int) -> str | None:
-        if text is None:
-            return None
-        if self._env == "production" and len(text) > max_length:
-            return text[:max_length] + "..."
+        """Phase 2 关键改动：production 不再静默截断 thought.
+
+        上下游依赖 thought 全部内容做 agent 决策，截断会误导 agent。
+        控制台/ES 端由 Sampler 显式控制采样率。
+        """
         return text
 
     def _truncate_dict(self, payload: dict[str, Any] | None, max_length: int) -> dict[str, Any] | None:
         if payload is None:
             return None
-        rendered = str(payload)
-        if self._env == "production" and len(rendered) > max_length:
-            return {"preview": rendered[:max_length] + "..."}
         return payload
 
     def _prepare_event(self, event: AgentEvent) -> dict[str, Any]:
@@ -87,51 +85,58 @@ class AgentEventEmitter:
         return event_dict
 
     def _emit_console(self, event_dict: dict[str, Any]) -> None:
-        """输出到控制台 — 直接输出完整内容，不截断
+        """输出到控制台 — Phase 2 关键改动：取消 production 静默.
 
-        生产环境只输出 WARNING/ERROR
+        取消 production 静默的理由：用户在事故复盘时，最需要看到的就是
+        生产上的 thought / tool_call。控制是否静默不再由 env 决定，
+        而由显式的 Sampler 配置（见 dispatcher.Sampler）。
         """
         level = str(event_dict.get("level", "INFO")).upper()
         event_type = event_dict.get("event_type", "")
 
+        # production 仅保留 ERROR/WARN 的 level 阈值 — 与 D2 一致
         if self._env == "production" and level not in ("WARNING", "ERROR"):
-            return
+            return  # D2 已选: production WARN/ERROR 进 stderr
 
         if self._env == "production":
             msg = event_dict.get("message", "") or event_type
             self._logger.warning("agent %s: %s", event_type, msg)
             return
 
+        # Phase 2 关键改动：字段对齐 OTel（向后兼容保留原字段名）
         console_event: dict[str, Any] = {
             "_type": "agent",
             "event_type": event_type,
-            "agent_name": event_dict.get("agent_name", ""),
+            "agent.name": event_dict.get("agent_name", ""),
             "run_id": event_dict.get("run_id", ""),
             "duration_ms": event_dict.get("duration_ms"),
             "token_usage": event_dict.get("token_usage"),
-            "tool_name": event_dict.get("tool_name", ""),
-            "llm_model": event_dict.get("llm_model", ""),
+            "tool.name": event_dict.get("tool_name", ""),
+            "gen_ai.model": event_dict.get("llm_model", ""),
             "error_type": event_dict.get("error_type", ""),
             "error_message": event_dict.get("error_message", ""),
             "trace_id": event_dict.get("trace_id", ""),
             "level": level,
+            "agent_name": event_dict.get("agent_name", ""),  # 别名兼容
         }
 
         # 直接输出完整内容，不截断
         if event_type == "thought":
             thought = event_dict.get("thought", "")
             if thought:
-                console_event["thought"] = thought
+                console_event["agent.thought_summary"] = thought
 
         elif event_type == "tool_call":
             tool_name = event_dict.get("tool_name", "")
             tool_input = event_dict.get("tool_input")
             if tool_input is not None:
+                console_event["tool.params"] = tool_input
                 console_event["message"] = str(tool_input)
 
         elif event_type == "tool_result":
             output = event_dict.get("tool_output", "")
             if output:
+                console_event["tool.output_summary"] = output
                 console_event["message"] = output
 
         elif event_type in ("agent_start", "plan", "agent_finish"):
@@ -142,6 +147,7 @@ class AgentEventEmitter:
         try:
             self._logger.info(event_type, **console_event)
         except UnicodeEncodeError:
+            # Phase 3 删除: 暂时保留, 但 Phase 3 替换为 [log-encoding-error] 警告
             pass
 
 

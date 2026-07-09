@@ -27,7 +27,7 @@ AGENT_NAMESPACE_MAP: dict[str, str] = {
     "DiagramAgent": "content",
     "PlatformAdapter": "template",
     "ImageAgent": "content",
-    "HotTopicAgent": "knowledge",
+    "SearchAnalyzer": "knowledge",
     "CodeAgent": "content",
     "TranslationAgent": "content",
 }
@@ -322,6 +322,25 @@ class MemoryManager:
                 raw_topic[:50], cleaned_topic[:50],
             )
             return
+
+        # ── 新增：过滤"纯动作"topic ──
+        # 兜底分支可能会把"重新生成""直接生成""开始创作""再来"这种动作词当 topic，
+        # 一旦存进记忆，下次"重新生成"就会读到这种垃圾，形成死循环。
+        # 仅对兜底触发启用过滤（正常 LLM trigger 已通过规则 C 校验）。
+        _action_only_re = re.compile(
+            r'^[直接的马快立刻帮我给我]*(?:'
+            r'生成|写|创作|开始|再来|重写|重新)'
+            r'(?:一份|一篇|一下|个|吧|创作|写|生成)?'
+            r'[的吧！!。.，,"\'\s]*$'
+        )
+        _placeholder_re = re.compile(r'^\[[^\]]+\]$')
+        if _action_only_re.match(cleaned_topic) or _placeholder_re.match(cleaned_topic):
+            logger.info(
+                "MemoryManager: topic 为纯动作词或占位符，不写入记忆（避免污染）raw_topic=%r",
+                cleaned_topic[:50],
+            )
+            return
+
         # 写回清洗后的 topic
         preferences = {**preferences, "topic": cleaned_topic}
 
@@ -406,6 +425,17 @@ class MemoryManager:
         cached = self._local_preferences.get(cache_key, [])
         if not cached:
             return ""
+
+        # 过滤掉"纯动作词" / 占位符（如 历史中污染的 "重新生成"、"直接生成" 等）
+        # 避免重做循环死锁。保留真正的 topic。
+        _action_only_re = re.compile(
+            r'^[直接的马快立刻帮我给我]*(?:'
+            r'生成|写|创作|开始|再来|重写|重新)'
+            r'(?:一份|一篇|一下|个|吧|创作|写|生成)?'
+            r'[的吧！!。.，,"\'\s]*$'
+        )
+        _placeholder_re = re.compile(r'^\[[^\]]+\]$')
+
         # 倒序找最新一条含 topic= 的偏好
         for entry in reversed(cached):
             if not isinstance(entry, str):
@@ -415,6 +445,8 @@ class MemoryManager:
                 if part.startswith("主题="):
                     topic = part[len("主题="):].strip()
                     if topic and topic != "null":
+                        if _action_only_re.match(topic) or _placeholder_re.match(topic):
+                            continue
                         return topic
         return ""
 

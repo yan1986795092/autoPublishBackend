@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+import time
 from typing import Any
 import uuid
 
@@ -38,7 +39,7 @@ class TokenUsage:
 
 @dataclass
 class AgentEvent:
-    timestamp: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
+    timestamp: float = field(default_factory=time.time)
     session_id: str = ""
     run_id: str = ""
     step_index: int = 0
@@ -63,7 +64,7 @@ class AgentEvent:
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
-            "@timestamp": self.timestamp,
+            "@timestamp": datetime.fromtimestamp(self.timestamp, tz=timezone.utc).isoformat(),
             "timestamp": self.timestamp,
             "session_id": self.session_id,
             "run_id": self.run_id,

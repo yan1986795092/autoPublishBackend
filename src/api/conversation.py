@@ -9,7 +9,7 @@ import json
 import logging
 from typing import Optional
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Request
 from pydantic import BaseModel, Field
 from sse_starlette.sse import EventSourceResponse
 from sqlalchemy.orm import Session
@@ -20,6 +20,8 @@ from src.models import User, ChatConversation, ChatMessageRecord
 from src.conversation import ConversationEngine
 from src.memory.manager import memory_manager
 from src.core.request_guards import ensure_conversation_owner
+from src.agent.stream_core import run_agent_sse_generator
+from src.agent.api import _init_stream_context, AgentStreamRequest
 
 logger = logging.getLogger(__name__)
 
@@ -98,15 +100,18 @@ class ChatRequest(BaseModel):
 @router.post("/chat")
 async def conversation_chat(
     request: ChatRequest,
+    http_request: Request,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    """对话聊天端点 — SSE 流式回复
+    """对话聊天端点 — SSE 流式回复（v4 直连 Agent Pipeline）
 
     输入用户消息，返回 SSE 流：
-    - type: text → 对话文本片段（流式）
-    - type: text_cleanup → 移除 [GENERATE] 标记后的完整文本
-    - type: trigger → 生成触发指令（前端收到后调 /agent/stream）
+    - event: text → 对话文本片段（流式）
+    - event: text_cleanup → 移除标记后的完整文本
+    - event: message_start → Agent Pipeline 开始
+    - event: text_delta / stage / reasoning_delta / artifact → 生成事件
+    - event: message_end / done → 结束
 
     如果未传 conversation_id，自动创建新对话。
     """
@@ -244,20 +249,58 @@ async def conversation_chat(
                     "trigger": trigger_data,
                     "type": trigger_data.get("action", "create"),
                 }, ensure_ascii=False)
-                db.commit()
+                try:
+                    db.commit()
+                except Exception as commit_err:
+                    logger.warning("result_json 持久化失败，不阻塞 trigger 推送: %s", commit_err)
 
                 # 记住用户偏好（按 conversation_id 隔离）
-                await memory_manager.remember_conversation_preference(
-                    user_id=current_user.id,
-                    preferences=trigger_data,
-                    conversation_id=conversation_id,
+                # 注意：此方法可能抛异常（如 Qwen Embedding 初始化失败），
+                # 必须 try/except 包裹，不能阻塞后续 trigger 推送。
+                try:
+                    await memory_manager.remember_conversation_preference(
+                        user_id=current_user.id,
+                        preferences=trigger_data,
+                        conversation_id=conversation_id,
+                    )
+                    logger.info("对话偏好已记录，准备推送 trigger 事件到前端")
+                except Exception as mem_err:
+                    logger.warning("记录对话偏好失败，不阻塞 trigger 推送: %s", mem_err)
+
+                # ── 触发 Agent Pipeline（不再返回 trigger 事件给前端转发）──
+                # v4 重构：对话引擎识别到 trigger 后，后端直连 Agent Pipeline，
+                # 所有事件（message_start, plan, text_delta, artifact 等）
+                # 走同一条 SSE 流推给前端，消除 trigger 事件丢失风险。
+                logger.info(
+                    "对话引擎触发 Agent Pipeline: action=%s topic=%r",
+                    trigger_data.get("action"), str(trigger_data.get("topic", ""))[:60],
                 )
 
-                # 返回 trigger 事件给前端
-                yield {
-                    "event": "trigger",
-                    "data": json.dumps(trigger_data, ensure_ascii=False),
-                }
+                # 提取 trace_id 用于端到端关联
+                http_trace_id = http_request.headers.get("X-Trace-Id", "")
+
+                # 构建 AgentStreamRequest 复用 _init_stream_context
+                agent_req = AgentStreamRequest(
+                    prompt=trigger_data.get("_prompt") or trigger_data.get("topic", ""),
+                    platform=trigger_data.get("platform"),
+                    parameters=trigger_data.get("parameters"),
+                    trigger=trigger_data,
+                )
+                skill_context, user_prompt = _init_stream_context(
+                    request=agent_req,
+                    current_user=current_user,
+                    http_trace_id=http_trace_id,
+                )
+
+                # 直连 Agent Pipeline，通过同一条 SSE 流推送
+                async for agent_event in run_agent_sse_generator(
+                    user_prompt=user_prompt,
+                    skill_context=skill_context,
+                    current_user=current_user,
+                    http_trace_id=http_trace_id,
+                    conversation_id=conversation_id,
+                ):
+                    yield agent_event
 
             # 返回 done 事件
             yield {
@@ -269,10 +312,23 @@ async def conversation_chat(
             }
 
         except Exception as e:
-            logger.exception("对话引擎出错")
-            yield {
-                "event": "error",
-                "data": json.dumps({"message": str(e)}, ensure_ascii=False),
-            }
+            logger.exception("对话引擎出错: %s", e)
+            # 安全地尝试发 error 事件
+            try:
+                yield {
+                    "event": "error",
+                    "data": json.dumps({"message": str(e)}, ensure_ascii=False),
+                }
+                # 发一个 done 让前端能正常关闭状态
+                yield {
+                    "event": "done",
+                    "data": json.dumps({
+                        "conversation_id": conversation_id,
+                        "message_id": None,
+                    }, ensure_ascii=False),
+                }
+            except Exception:
+                # yield 本身失败时静默，不二次崩溃
+                pass
 
     return EventSourceResponse(event_generator())

@@ -108,7 +108,6 @@ class ContextBuilder:
             ("当前请求",   self._tier_current_query,  30,  100),
             ("最近对话",   self._tier_recent_history, 100, 800),
             ("相关内容",   self._tier_semantic,       200, 1500),
-            ("历史生成",   self._tier_history_gens,   100, 1000),
         ]
 
         for name, fn, min_tok, max_tok in tiers:
