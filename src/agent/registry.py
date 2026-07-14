@@ -1,9 +1,12 @@
 """Agent Registry — 基于 AgentCard 模式的统一注册中心
 
-将分散在各处的 Agent 元数据（描述、模型分配、前端展示、类别）集中管理。
-新 Agent 只需在此注册，其余模块自动感知。
+每个 Agent 的 input_schema / output_schema 是唯一的数据契约。
+orchestrator 按 schema 装配输入，handler 只消费 schema 声明的字段。
 
-灵感来自 Google A2A 协议的 AgentCard，但适配同进程调用场景（无 HTTP 开销）。
+source 规则:
+  "param:xxx"   — 从 task input params 原样取
+  "consume"     — 沿依赖链 BFS 找最近产出该字段名的任务
+  "meta"        — 从 task 元数据取（如 _review_round）
 """
 
 from __future__ import annotations
@@ -12,33 +15,31 @@ from typing import Literal, Any
 
 # ── 类型 ──
 
-AgentCategory = Literal["search", "writing", "review", "fix", "code", "diagram", "analysis"]
+AgentCategory = Literal["search", "writing", "review", "fix", "code", "diagram", "analysis", "title_tag"]
 
 
 @dataclass
 class AgentCard:
-    """Agent 能力自描述卡片（同进程版 AgentCard）
-
-    对应 A2A AgentCard 的核心字段，移除 url/streaming 等 HTTP 相关字段。
-    """
+    """Agent 能力自描述卡片"""
 
     # 身份
-    name: str                                                # "WritingAgent"
-    description: str                                         # 给人看的描述
+    name: str
+    description: str
 
     # 分类（用于依赖链推断）
-    category: AgentCategory                                  # "writing" | "review" | ...
+    category: AgentCategory
 
     # 模型分配
-    model: str                                               # "deepseek-chat" | "glm-4-flash"
+    model: str
 
     # 前端展示
-    stage_label: str                                         # "创作初稿中"
-    stage_icon: str                                          # "✍️"
-    stage_color: str                                         # "amber"
+    stage_label: str
+    stage_icon: str
+    stage_color: str
 
-    # 技能定义（JSON Schema，供 LLM 了解精确参数格式，替代"猜字段"）
+    # 输入契约（JSON Schema 格式 + 扩展 source/consume）
     input_schema: dict[str, Any] = field(default_factory=dict)
+    # 输出契约（JSON Schema 格式，字段名即产出物名）
     output_schema: dict[str, Any] = field(default_factory=dict)
 
 
@@ -46,39 +47,31 @@ class AgentCard:
 
 _REGISTRY: dict[str, AgentCard] = {}
 
-# 类别 → 依赖规则：下游类自动依赖上游类的最新任务
-# 搜索 → 写作/代码 → 审核 → 修复
 CATEGORY_DEPENDENCY_RULES: dict[AgentCategory, list[AgentCategory]] = {
-    "writing":  ["search", "analysis"],  # writing 依赖搜索和热点分析
-    "code":     ["search"],
-    "review":   ["writing"],
-    "fix":      ["writing", "review"],
-    "analysis": ["search"],              # 热点分析依赖搜索
+    "title_tag": ["writing"],
+    "review":    ["writing", "title_tag"],
+    "fix":       ["writing", "review"],
+    "analysis":  ["search"],
 }
 
 
 def register(card: AgentCard) -> None:
-    """注册一个 AgentCard"""
     _REGISTRY[card.name] = card
 
 
 def get(name: str) -> AgentCard | None:
-    """按 Agent 类型名获取卡片"""
     return _REGISTRY.get(name)
 
 
 def all() -> list[AgentCard]:
-    """获取所有注册的 Agent 卡片"""
     return list(_REGISTRY.values())
 
 
 def by_category(category: AgentCategory) -> list[AgentCard]:
-    """按类别获取 Agent 卡片列表"""
     return [c for c in _REGISTRY.values() if c.category == category]
 
 
 def categories() -> dict[AgentCategory, list[AgentCard]]:
-    """获取按类别分组的 Agent 列表"""
     result: dict[AgentCategory, list[AgentCard]] = {}
     for c in _REGISTRY.values():
         result.setdefault(c.category, []).append(c)
@@ -86,7 +79,6 @@ def categories() -> dict[AgentCategory, list[AgentCard]]:
 
 
 def format_agent_descriptions() -> str:
-    """生成给 LLM Planner 看的 Agent 描述文本（替代硬编码字符串）"""
     lines = []
     for card in _REGISTRY.values():
         parts = [f"- {card.name}：{card.description}"]
@@ -104,7 +96,6 @@ def format_agent_descriptions() -> str:
 
 
 def format_agent_schemas_for_prompt() -> str:
-    """为每个 Agent 生成 JSON Schema 描述，供 LLM 精确理解输入格式"""
     blocks = []
     for card in _REGISTRY.values():
         if card.input_schema:
@@ -118,7 +109,7 @@ def format_agent_schemas_for_prompt() -> str:
 
 register(AgentCard(
     name="WebSearch",
-    description="【实时联网搜索】通过搜索引擎获取最新信息。当你需要当前日期、实时新闻、最新数据、流行趋势、或任何 LLM 训练数据中不存在的信息时，必须用此 Agent。",
+    description="【实时联网搜索】通过搜索引擎获取最新信息。",
     category="search",
     model="deepseek-chat",
     stage_label="搜索资料中",
@@ -127,10 +118,17 @@ register(AgentCard(
     input_schema={
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "搜索关键词"},
-            "count": {"type": "integer", "description": "返回结果数量"},
+            "query": {"type": "string", "source": "param:query", "description": "搜索关键词"},
+            "count": {"type": "integer", "source": "param:count", "description": "返回结果数量", "optional": True},
         },
         "required": ["query"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "search_results": {"type": "array", "description": "搜索结果列表"},
+        },
+        "required": ["search_results"],
     },
 ))
 
@@ -145,15 +143,22 @@ register(AgentCard(
     input_schema={
         "type": "object",
         "properties": {
-            "url": {"type": "string", "description": "要抓取的网页地址"},
+            "url": {"type": "string", "source": "param:url", "description": "要抓取的网页地址"},
         },
         "required": ["url"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "crawled_content": {"type": "string", "description": "抓取到的页面内容"},
+        },
+        "required": ["crawled_content"],
     },
 ))
 
 register(AgentCard(
     name="WritingAgent",
-    description="内容写作（文章、文案、脚本）。内容创作的核心 Agent。",
+    description="内容写作（文章、文案、脚本）。只输出正文，不包含标题和标签。标题和标签由 TitleAgent 和 TagAgent 生成。",
     category="writing",
     model="deepseek-chat",
     stage_label="创作初稿中",
@@ -162,13 +167,71 @@ register(AgentCard(
     input_schema={
         "type": "object",
         "properties": {
-            "topic": {"type": "string", "description": "写作主题，核心必填参数"},
-            "content_type": {"type": "string", "enum": ["blog", "article", "copywriting", "wechat", "script", "tutorial"], "description": "内容类型"},
-            "tone": {"type": "string", "description": "语气风格，如 professional/friendly/humorous"},
-            "audience": {"type": "string", "description": "目标受众描述"},
-            "language": {"type": "string", "description": "输出语言"},
+            "topic": {"type": "string", "source": "param:topic", "description": "写作主题"},
+            "content_type": {"type": "string", "source": "param:content_type", "description": "内容类型: blog/article/wechat/...", "optional": True},
+            "platform": {"type": "string", "source": "param:platform", "description": "目标平台", "optional": True},
+            "tone": {"type": "string", "source": "param:tone", "description": "语气: professional/friendly/humorous/...", "optional": True},
+            "audience": {"type": "string", "source": "param:audience", "description": "目标受众: beginner/intermediate/expert", "optional": True},
+            "search_analysis": {"type": "string", "source": "consume", "description": "搜索结果分析（来自 SearchAnalyzer）", "optional": True},
         },
         "required": ["topic"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "article_body": {"type": "string", "description": "文章正文"},
+        },
+        "required": ["article_body"],
+    },
+))
+
+# ── TitleAgent：根据文章正文生成标题 ──
+register(AgentCard(
+    name="TitleAgent",
+    description="【标题生成】根据文章正文生成吸引人的标题。可独立使用（内容管理调用）。",
+    category="title_tag",
+    model="deepseek-chat",
+    stage_label="生成标题中",
+    stage_icon="🏷️",
+    stage_color="amber",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "article_body": {"type": "string", "source": "consume", "description": "文章正文"},
+        },
+        "required": ["article_body"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "article_title": {"type": "string", "description": "文章标题"},
+        },
+        "required": ["article_title"],
+    },
+))
+
+# ── TagAgent：根据文章正文生成标签 ──
+register(AgentCard(
+    name="TagAgent",
+    description="【标签生成】根据文章正文提取关键词标签。可独立使用（内容管理调用）。",
+    category="title_tag",
+    model="deepseek-chat",
+    stage_label="生成标签中",
+    stage_icon="🔖",
+    stage_color="amber",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "article_body": {"type": "string", "source": "consume", "description": "文章正文"},
+        },
+        "required": ["article_body"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "tags": {"type": "array", "items": {"type": "string"}, "description": "标签列表"},
+        },
+        "required": ["tags"],
     },
 ))
 
@@ -183,9 +246,20 @@ register(AgentCard(
     input_schema={
         "type": "object",
         "properties": {
-            "content": {"type": "string", "description": "待审核的内容"},
-            "rules": {"type": "array", "items": {"type": "string"}, "description": "审核规则列表"},
+            "article_body": {"type": "string", "source": "consume", "description": "待审核的文章正文"},
+            "platform": {"type": "string", "source": "param:platform", "description": "目标平台", "optional": True},
         },
+        "required": ["article_body"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "review_text": {"type": "string", "description": "审核结论 + 主要问题 + 改进建议"},
+            "passed": {"type": "boolean", "description": "审核是否通过"},
+            "score": {"type": "integer", "description": "总分 0-100"},
+            "suggestions": {"type": "array", "items": {"type": "string"}, "description": "改进建议列表"},
+        },
+        "required": ["review_text", "passed", "score"],
     },
 ))
 
@@ -200,9 +274,18 @@ register(AgentCard(
     input_schema={
         "type": "object",
         "properties": {
-            "content": {"type": "string", "description": "原始内容"},
-            "feedback": {"type": "string", "description": "审核反馈意见"},
+            "article_body": {"type": "string", "source": "consume", "description": "原文（WritingAgent 初稿 或 上一轮 FixAgent 润色版）"},
+            "review_text": {"type": "string", "source": "consume", "description": "审核意见（ReviewAgent 输出）"},
+            "platform": {"type": "string", "source": "param:platform", "description": "目标平台", "optional": True},
         },
+        "required": ["article_body", "review_text"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "article_body": {"type": "string", "description": "润色后的文章正文"},
+        },
+        "required": ["article_body"],
     },
 ))
 
@@ -217,10 +300,17 @@ register(AgentCard(
     input_schema={
         "type": "object",
         "properties": {
-            "topic": {"type": "string", "description": "图表主题"},
-            "diagram_type": {"type": "string", "enum": ["flowchart", "mindmap", "knowledge_graph", "sequence"], "description": "图表类型"},
+            "topic": {"type": "string", "source": "param:topic", "description": "图表主题"},
+            "diagram_type": {"type": "string", "source": "param:diagram_type", "enum": ["flowchart", "mindmap", "knowledge_graph", "sequence"], "description": "图表类型", "optional": True},
         },
         "required": ["topic"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "diagram": {"type": "string", "description": "图表定义（Mermaid/JSON）"},
+        },
+        "required": ["diagram"],
     },
 ))
 
@@ -235,10 +325,17 @@ register(AgentCard(
     input_schema={
         "type": "object",
         "properties": {
-            "task": {"type": "string", "description": "编程任务详细描述"},
-            "language": {"type": "string", "description": "编程语言"},
+            "topic": {"type": "string", "source": "param:topic", "description": "编程任务描述"},
+            "language": {"type": "string", "source": "param:language", "description": "编程语言", "optional": True},
         },
-        "required": ["task"],
+        "required": ["topic"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "code_block": {"type": "string", "description": "生成的代码"},
+        },
+        "required": ["code_block"],
     },
 ))
 
@@ -250,11 +347,26 @@ register(AgentCard(
     stage_label="规划任务中",
     stage_icon="📋",
     stage_color="slate",
+    input_schema={
+        "type": "object",
+        "properties": {
+            "user_request": {"type": "string", "source": "param:user_request", "description": "用户原始请求"},
+            "platform": {"type": "string", "source": "param:platform", "description": "目标平台", "optional": True},
+        },
+        "required": ["user_request"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "plan": {"type": "object", "description": "任务规划"},
+        },
+        "required": ["plan"],
+    },
 ))
 
 register(AgentCard(
     name="SearchAnalyzer",
-    description="【搜索结果分析】基于 WebSearch 获取的搜索结果，提取关键主题、结构和洞察，为内容创作提供素材基础。必须依赖 WebSearch 的输出，不可独立使用。",
+    description="【搜索结果分析】基于 WebSearch 获取的搜索结果，提取关键主题、结构和洞察。",
     category="analysis",
     model="deepseek-chat",
     stage_label="整合分析中",
@@ -263,8 +375,16 @@ register(AgentCard(
     input_schema={
         "type": "object",
         "properties": {
-            "topic": {"type": "string", "description": "分析主题"},
-            "platform": {"type": "string", "description": "关注的社交平台"},
+            "topic": {"type": "string", "source": "param:topic", "description": "分析主题"},
+            "search_results": {"type": "array", "source": "consume", "description": "搜索结果（来自 WebSearch）", "optional": True},
         },
+        "required": ["topic"],
+    },
+    output_schema={
+        "type": "object",
+        "properties": {
+            "search_analysis": {"type": "string", "description": "搜索结果分析"},
+        },
+        "required": ["search_analysis"],
     },
 ))

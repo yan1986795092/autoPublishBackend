@@ -125,6 +125,9 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
             "query": query,
             "original_query": original_query,
         },
+        output_fields={
+            "search_results": results,
+        },
         thinking_steps=[{
             "agent": "WebSearch",
             "action": "搜索完成",

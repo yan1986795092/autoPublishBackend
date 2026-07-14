@@ -17,12 +17,12 @@ Graph 结构 (PR-6 增加 validate_plan / replan_plan):
   schedule_and_execute
        │ (conditional: should_continue_or_finish)
        ├── execute → execute_task_batch
-       └── done → merge_and_finish
+       └── done → preview_sync
   execute_task_batch
        │ (conditional: should_continue_or_finish)
        ├── schedule → schedule_and_execute
-       └── done → merge_and_finish
-  merge_and_finish → END
+       └── done → preview_sync
+  preview_sync → merge_and_finish → END
 
 Reference:
 - LangGraph ValidationNode pattern
@@ -46,6 +46,7 @@ from .nodes import (
     replan_plan_node,
     schedule_and_execute,
     execute_task_batch,
+    preview_sync_node,
     merge_and_finish,
     should_continue_or_finish,
 )
@@ -91,6 +92,7 @@ def build_agent_graph() -> CompiledStateGraph:
     builder.add_node("replan_plan", replan_plan_node)
     builder.add_node("schedule_and_execute", schedule_and_execute)
     builder.add_node("execute_task_batch", execute_task_batch)
+    builder.add_node("preview_sync", preview_sync_node)
     builder.add_node("merge_and_finish", merge_and_finish)
 
     builder.set_entry_point("understand_intent")
@@ -116,15 +118,16 @@ def build_agent_graph() -> CompiledStateGraph:
     builder.add_conditional_edges(
         "schedule_and_execute",
         should_continue_or_finish,
-        {"execute": "execute_task_batch", "done": "merge_and_finish"},
+        {"execute": "execute_task_batch", "done": "preview_sync"},
     )
 
     builder.add_conditional_edges(
         "execute_task_batch",
         should_continue_or_finish,
-        {"execute": "schedule_and_execute", "done": "merge_and_finish"},
+        {"execute": "schedule_and_execute", "done": "preview_sync"},
     )
 
+    builder.add_edge("preview_sync", "merge_and_finish")
     builder.add_edge("merge_and_finish", END)
 
     return builder.compile(

@@ -136,14 +136,24 @@ async def parse_plan_with_reask(
     if not available_agents_desc:
         available_agents_desc = "\n".join(c.name for c in _all_cards())
 
-    # 第一次调用：只有 system + user prompt
+    # 第一次调用：与 reask 相同严格的 system prompt，避免首轮格式错误
+    available_agents_list = "\n".join(c.name for c in _all_cards())
+    _STRICT_SYSTEM = (
+        "你是任务规划 Agent。基于用户请求输出严格的 JSON 计划。\n"
+        "重要规则：\n"
+        "- 直接输出纯 JSON，不要加 ```json 或任何 Markdown 代码块标记\n"
+        "- 不要输出任何解释文字或前缀\n"
+        "- 字符串必须用双引号，不能使用单引号\n"
+        "- agent_type 必须从可用 Agent 列表中选择\n"
+        "- 每个 task 的 id 必须是唯一字符串（如 task-1, task-2）\n"
+        "- dependencies 用 id 字符串引用，如 [\"task-1\"]\n"
+        "- 至少有一个根任务（dependencies=[]）\n"
+        "- 不要在 JSON 外面加任何标记或说明\n\n"
+        f"可用 Agent：\n{available_agents_list}\n\n"
+        "JSON Schema：\n" + schema_json
+    )
     messages = [
-        SystemMessage(
-            content=(
-                "你是任务规划 Agent。基于用户请求输出严格的 JSON 计划，"
-                "schema 如下:\n```json\n" + schema_json + "\n```"
-            )
-        ),
+        SystemMessage(content=_STRICT_SYSTEM),
         HumanMessage(content=user_prompt),
     ]
 

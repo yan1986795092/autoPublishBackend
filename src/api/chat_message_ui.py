@@ -75,9 +75,34 @@ def build_render_payload(content: str, result: Any) -> dict[str, Any] | None:
     return payload or None
 
 
-def infer_message_kind(role: str, status: str | None, content: str, result: Any, task_id: str | None, plan: Any) -> str:
+def has_generation_parts(parts: Any) -> bool:
+    """检查 parts 是否包含生成类内容（artifact / text / code / image 等）。
+
+    注意：PartWriter 持久化的文本内容是 text 类型（非 artifact），
+    但含有实际生成内容，应视为生成消息。
+    """
+    if not isinstance(parts, list):
+        return False
+    for part in parts:
+        if not isinstance(part, dict):
+            continue
+        t = part.get("type", "")
+        if t in ("artifact", "code", "image", "social_post", "tutorial", "blog"):
+            return True
+        # text 类型但含实际生成内容（非空）也视为生成消息
+        if t == "text" and bool(part.get("content")):
+            return True
+    return False
+
+
+def infer_message_kind(role: str, status: str | None, content: str, result: Any, task_id: str | None, plan: Any, parts: Any = None) -> str:
     if role != "assistant":
         return role
+
+    # parts 含 artifact/text → generation（优先于 trigger-only 判断）
+    # 修复：部分历史消息的 result_json 只有 trigger，但 parts 中有实际生成内容
+    if has_generation_parts(parts):
+        return "generation"
 
     if is_trigger_only_result(result):
         return "conversation"
@@ -102,8 +127,16 @@ def build_message_ui_fields(
     result: Any,
     task_id: str | None,
     plan: Any,
+    parts: Any = None,
+    is_generation_explicit: bool | None = None,  # [Task 5 / Phase 4] 显式标记
 ) -> dict[str, Any]:
-    kind = infer_message_kind(role, status, content, result, task_id, plan)
+    # [Task 5 / Phase 4] 显式标记优先于字段探测
+    # 来源：DB 列 is_generation / SSE 完成时记录的 stream_status
+    # 若调用方提供了 is_generation_explicit，直接使用，避免 kind 推导不确定性
+    if is_generation_explicit is not None:
+        kind = "generation" if is_generation_explicit else "conversation"
+    else:
+        kind = infer_message_kind(role, status, content, result, task_id, plan, parts)
 
     if role == "user":
         render_mode = "bubble"

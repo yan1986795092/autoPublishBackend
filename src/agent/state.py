@@ -63,3 +63,6 @@ class AgentGraphState(TypedDict):
 
     # Latest review feedback for FixAgent
     _review_feedback_for_fix: str
+
+    # Preview sync data (title + tags + body, from preview_sync_node)
+    _preview_data: dict

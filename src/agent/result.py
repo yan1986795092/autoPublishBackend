@@ -36,6 +36,7 @@ def agent_response(
     content: str = "",
     output_type: OutputType = "text",
     output_extra: dict | None = None,
+    output_fields: dict[str, Any] | None = None,
     error: str | None = None,
     tokens_used: int = 0,
     prompt_tokens: int = 0,
@@ -50,9 +51,13 @@ def agent_response(
     Args:
         agent_type: Agent 类型名
         status: 执行状态
-        content: 主要文本输出（下游依赖 context 从此读取）
+        content: 主要文本输出
         output_type: 输出类型
         output_extra: output 中的额外字段
+        output_fields: 命名产出物字段（用于 consume 解析的关键索引）。
+                       每个 handler 按 schema 填充此字典，下游 consume
+                       解析时从 output_fields 按字段名查找。
+                       例: WritingAgent → {"article_body": "...", "article_title": "..."}
         error: 错误信息（status=failed 时必填）
         tokens_used: LLM token 用量
         prompt_tokens: prompt token 数
@@ -69,6 +74,8 @@ def agent_response(
     }
     if output_extra:
         output.update(output_extra)
+    if output_fields:
+        output["output_fields"] = output_fields
 
     result: dict[str, Any] = {
         "status": status,

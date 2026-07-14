@@ -137,6 +137,12 @@ class RichConsoleRenderer:
         error = self._pop(d, "error", "")
         detail = self._pop(d, "detail", "")
         message = self._pop(d, "message", "")
+        # P0.4 新增：请求上下文字段
+        session_id = self._pop(d, "session_id", "")
+        client_ip = self._pop(d, "client_ip", "")
+        business_code = self._pop(d, "business_code", "")
+        request_size = self._pop(d, "request_size", 0)
+        response_size = self._pop(d, "response_size", 0)
 
         t = Text()
         t.append("🌐  ", Style(color="cyan"))
@@ -175,6 +181,16 @@ class RichConsoleRenderer:
             t.append(f"[trace:{trace_id[:12]}]  ", Style(color="blue", dim=True))
         if user_id:
             t.append(f"user={user_id}  ", Style(color="green", dim=True))
+        if session_id:
+            t.append(f"sess={session_id[:8]}  ", Style(color="cyan", dim=True))
+        if client_ip:
+            t.append(f"[ip:{client_ip}]  ", Style(color="grey50", dim=True))
+        if business_code:
+            t.append(f"biz={business_code}  ", Style(color="cyan", bold=True))
+        if request_size:
+            t.append(f"req={request_size}B  ", Style(dim=True))
+        if response_size:
+            t.append(f"res={response_size}B  ", Style(dim=True))
         if error:
             t.append(f" ERR:{error[:120]}", Style(color="red", bold=True))
         elif detail:
@@ -203,6 +219,11 @@ class RichConsoleRenderer:
         event_name = self._pop(d, "event_name", "")  # 兜底显示用
         level = self._pop(d, "level", "INFO").upper()
         trace_id = self._pop(d, "trace_id", "")
+        # P0.4 新增：请求上下文字段
+        user_id = self._pop(d, "user_id", "")
+        session_id = self._pop(d, "session_id", "")
+        client_ip = self._pop(d, "client_ip", "")
+        business_code = self._pop(d, "business_code", "")
 
         # 兜底：编排异常 logger 经常没传 agent_name / message，但有 agent_type / event_name
         if not message and event_name:
@@ -258,6 +279,16 @@ class RichConsoleRenderer:
         # Trace ID
         if trace_id:
             t.append(f"[trace:{trace_id[:12]}]  ", Style(color="blue", dim=True))
+
+        # P0.4 新增：请求上下文
+        if user_id:
+            t.append(f"[user:{user_id[:12]}]  ", Style(color="green", dim=True))
+        if session_id:
+            t.append(f"[sess:{session_id[:8]}]  ", Style(color="cyan", dim=True))
+        if business_code:
+            t.append(f"biz={business_code}  ", Style(color="cyan", bold=True))
+        if client_ip:
+            t.append(f"[ip:{client_ip}]  ", Style(color="grey50", dim=True))
 
         # 耗时
         if duration_ms:

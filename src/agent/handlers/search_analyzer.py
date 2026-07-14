@@ -31,18 +31,32 @@ SYSTEM_PROMPT = """你是一个搜索结果分析专家。你的任务是基于�
 async def handle_search_analyzer(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     """SearchAnalyzer 主入口：分析搜索结果中的关键主题和结构"""
     try:
-        # 从依赖上下文中获取 WebSearch / URLCrawler 的搜索结果
-        dep_context = task_input.get("_context", {})
+        # ── 输入：只读 Schema 声明的字段 ──
+        # search_results 可能为空（当没有前置 WebSearch 或 WebSearch 未产出结果时）
+        search_results_raw: list | str = task_input.get("search_results", [])
+        topic: str = task_input.get("topic", "")
+
+        # 将 search_results 数组转为文本
         search_contents: list[str] = []
+        if isinstance(search_results_raw, list):
+            for item in search_results_raw:
+                if isinstance(item, dict):
+                    title = item.get("title", "")
+                    url = item.get("url", "")
+                    snippet = item.get("snippet", "") or item.get("content", "") or item.get("summary", "")
+                    parts = []
+                    if title:
+                        parts.append(f"[{title}]({url})" if url else title)
+                    if snippet:
+                        parts.append(snippet)
+                    if parts:
+                        search_contents.append(": ".join(parts))
+                elif isinstance(item, str):
+                    search_contents.append(item)
+        elif isinstance(search_results_raw, str):
+            search_contents.append(search_results_raw)
 
-        for _cid, cdata in dep_context.items():
-            agent = cdata.get("agent", "")
-            content = cdata.get("content", "")
-            if agent in ("WebSearch", "URLCrawler") and content:
-                search_contents.append(content)
-
-        combined_search = "\n\n---\n\n".join(search_contents)
-        topic = task_input.get("topic", "搜索结果分析")
+        combined_search = "\n\n".join(search_contents) if search_contents else ""
 
         # 降级：无搜索数据
         if not combined_search:
@@ -56,6 +70,9 @@ async def handle_search_analyzer(task_input: dict, llm: ChatOpenAI, mcp_tools: l
                     "keywords": [],
                     "summary": "无搜索数据，无法进行分析",
                     "has_data": False,
+                },
+                output_fields={
+                    "search_analysis": "",
                 },
                 thinking_steps=[{
                     "agent": "SearchAnalyzer",
@@ -114,6 +131,9 @@ async def handle_search_analyzer(task_input: dict, llm: ChatOpenAI, mcp_tools: l
                 "keywords": keywords[:10],
                 "summary": analysis[:200],
                 "has_data": True,
+            },
+            output_fields={
+                "search_analysis": analysis,
             },
             thinking_steps=[{
                 "agent": "SearchAnalyzer",

@@ -54,17 +54,10 @@ _FIX_USER_PROMPT = """请根据以下审核意见修改原文。
 
 async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     try:
-        content = task_input.get("content", "")
-        if not content:
-            dep_context = task_input.get("_context", {})
-            for cdata in dep_context.values():
-                if cdata.get("content"):
-                    content = cdata["content"]
-                    break
-
-        _actx = task_input.get("_agent_context", {})
-        content_type = _actx.get("content_type") or task_input.get("content_type", "general")
-        platform = _actx.get("platform") or task_input.get("platform", "")
+        # ── 输入：只读 Schema 声明的字段（article_body 已由 validate_input 保证存在） ──
+        content: str = task_input["article_body"]
+        platform: str = task_input.get("platform", "")
+        content_type: str = task_input.get("content_type", "general")
         banned_found = check_banned_words(content, platform) if content else []
         known_facts = task_input.get("known_facts")
 
@@ -75,6 +68,12 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                 output_extra={
                     "passed": False, "banned_words": [],
                     "factcheck": None, "suggestions": ["无内容可审核"],
+                },
+                output_fields={
+                    "review_text": "",
+                    "passed": False,
+                    "score": 0,
+                    "suggestions": [],
                 },
             )
 
@@ -140,7 +139,16 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         if review_round > 0:
             lc_messages.append(SystemMessage(content=(
                 f"注意：这是第 {review_round} 轮复审。内容是经过上一轮审核意见修改后的版本。\n"
-                f"请仔细检查修改是否到位。如果内容质量已达标，请明确给出通过结论。\n"
+                f"请仔细检查修改是否到位。如果内容质量已达标，请明确给出通过结论。\n\n"
+                f"【强制格式要求】即使内容已通过，也必须输出完整的评分格式：\n"
+                f"- 内容完整性：XX/25（扣分原因：...）\n"
+                f"- 逻辑连贯性：XX/25（扣分原因：...）\n"
+                f"- 语言表达：XX/25（扣分原因：...）\n"
+                f"- 合规与节奏：XX/25（扣分原因：...）\n"
+                f"- 总分：XX/100\n"
+                f"- 审核结论：通过 / 基本通过 / 需修改\n"
+                f"- 主要问题：（引用原文用「」，限 3 条）\n"
+                f"- 改进建议：（限 5 条，无则写'无'）\n"
                 f"请在你的回复末尾单独一行输出审核结论：**审核结论：通过** 或 **审核结论：需修改**"
             )))
 
@@ -273,6 +281,12 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                 "fixed_content": fixed_content if rewrite_applied else "",
                 "rewrite_applied": rewrite_applied,
                 "platform": platform,
+            },
+            output_fields={
+                "review_text": display_text,
+                "passed": passed,
+                "score": score,
+                "suggestions": suggestions[:5],
             },
             prompt_versions=composed.used_templates,
             thinking_steps=[{

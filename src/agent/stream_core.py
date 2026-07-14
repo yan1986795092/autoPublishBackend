@@ -56,20 +56,27 @@ async def run_agent_sse_generator(
         _message_id = message_id or str(uuid.uuid4())
 
         # 创建 message 记录，满足 chat_message_parts 外键约束
+        # 如果 message_id 已存在（由 conversation.py 预先创建），跳过
         if conversation_id:
+            existing = None
             try:
-                msg_record = ChatMessageRecord(
-                    id=_message_id,
-                    conversation_id=conversation_id,
-                    role="assistant",
-                    content="",
-                    status="running",
-                )
-                db.add(msg_record)
-                db.commit()
-            except Exception as msg_err:
-                logger.warning("创建 message_record 失败: %s", msg_err)
-                db.rollback()
+                existing = db.query(ChatMessageRecord).filter_by(id=_message_id).first()
+            except Exception:
+                pass
+            if not existing:
+                try:
+                    msg_record = ChatMessageRecord(
+                        id=_message_id,
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content="",
+                        status="running",
+                    )
+                    db.add(msg_record)
+                    db.commit()
+                except Exception as msg_err:
+                    logger.warning("创建 message_record 失败: %s", msg_err)
+                    db.rollback()
 
         part_writer = PartWriter(_message_id, db)
 
@@ -101,6 +108,15 @@ async def run_agent_sse_generator(
 
         task_id_str = task_queue.reserve_task_id()
         event_bus.subscribe(task_id_str, on_event)
+
+        # ── 累积 stages / reasoning / llm_chunks，消息结束时写入 result_json ──
+        # 让历史记录加载时能完整还原思考过程，不依赖 PartWriter 持久化
+        _accumulated_stages: list[dict] = []
+        _accumulated_reasoning: dict[str, list[dict]] = {}
+        _accumulated_llm_chunks: dict[str, list[dict]] = {}
+        _accumulated_thinking_steps: list[dict] = []
+        # 追踪是否已接收过 stages（用于 retry 时重置累积器）
+        _has_received_any_stage = False
 
         await task_queue.enqueue(
             prompt=user_prompt,
@@ -174,6 +190,17 @@ async def run_agent_sse_generator(
                         "tasks": data.get("tasks", []),
                     })
 
+                # ── 修复：检测到重试（已有 stages 后又来新 plan）→ 重置累积器 ──
+                # 避免重试 pipeline 的 stages 追加在旧 stages 后面，导致 result_json
+                # 中 stage 顺序错乱（如 WebSearch 出现在 FixAgent 之后）。
+                if _has_received_any_stage:
+                    logger.info("检测到重试 pipeline，重置 stage/reasoning/llmChunk 累积器")
+                    _accumulated_stages.clear()
+                    _accumulated_reasoning.clear()
+                    _accumulated_llm_chunks.clear()
+                    _accumulated_thinking_steps.clear()
+                    _has_received_any_stage = False
+
             # ── stage ──
             elif et == "stage":
                 agent = data.get("agent", "")
@@ -183,7 +210,7 @@ async def run_agent_sse_generator(
                 round_ = data.get("reviewRound", 0)
                 duration_ms = data.get("duration_ms")
                 error_msg = data.get("error")
-                part_id = data.get("part_id") or f"tool_{agent}_{round_}_{int(time.time() * 1000)}"
+                part_id = data.get("part_id") or f"tool_{agent}_{round_}"
 
                 if status == "running" and part_writer:
                     await part_writer.append_tool_call(part_id, agent, label, icon, round_)
@@ -201,6 +228,28 @@ async def run_agent_sse_generator(
                         **({"error": error_msg} if error_msg else {}),
                     }, ensure_ascii=False),
                 }
+
+                # P0: 累积 stage，写入 result_json
+                _stage_entry: dict = {
+                    "agent": agent,
+                    "label": label,
+                    "icon": icon,
+                    "status": "completed" if status in ("done", "completed") else ("failed" if status == "error" else "running"),
+                    "reviewRound": round_,
+                }
+                if duration_ms:
+                    _stage_entry["duration"] = duration_ms
+                if error_msg:
+                    _stage_entry["error"] = error_msg
+                # 覆盖已存在的同名 stage（running → completed）
+                for i, s in enumerate(_accumulated_stages):
+                    if s["agent"] == agent and s.get("reviewRound", 0) == round_:
+                        _accumulated_stages[i] = _stage_entry
+                        break
+                else:
+                    _accumulated_stages.append(_stage_entry)
+
+                _has_received_any_stage = True
 
                 if status in ("done", "completed", "error") and part_writer:
                     state = "error" if error_msg else "done"
@@ -223,19 +272,18 @@ async def run_agent_sse_generator(
             # ── llm_chunk → text_delta ──
             elif et == "llm_chunk":
                 delta = data.get("chunk") or data.get("delta") or data.get("content") or ""
-                if delta and part_writer:
-                    await part_writer.append_text("text_main", delta)
-                # 把 agent / channel / round 透传给前端，让 useConversationChat
-                # 能把流式文本路由到对应 agent 的 llmChunks[agent]，StageTimeline
-                # 才能实时显示中间产物。
-                agent = data.get("agent", "")
+                agent = data.get("agent", "unknown")
                 channel = data.get("channel", "body")
                 review_round = data.get("_review_round", 0)
+                # 按 agent + round 分拆 text part，多轮审核/润色的内容各自独立
+                text_part_id = f"text_{agent}_{review_round}" if review_round else f"text_{agent}"
+                if delta and part_writer:
+                    await part_writer.append_text(text_part_id, delta)
                 yield {
                     "event": "text_delta",
                     "data": json.dumps(
                         {
-                            "part_id": "text_main",
+                            "part_id": text_part_id,
                             "delta": delta,
                             **({"agent": agent} if agent else {}),
                             **({"channel": channel} if channel else {}),
@@ -244,6 +292,15 @@ async def run_agent_sse_generator(
                         ensure_ascii=False,
                     ),
                 }
+                # P0: 累积 llm_chunk，写入 result_json
+                if delta and agent != "unknown":
+                    if agent not in _accumulated_llm_chunks:
+                        _accumulated_llm_chunks[agent] = []
+                    _accumulated_llm_chunks[agent].append({
+                        "agent": agent,
+                        "content": delta,
+                        "timestamp": int(time.time() * 1000),
+                    })
 
             # ── reasoning → reasoning_delta ──
             elif et == "reasoning":
@@ -265,6 +322,124 @@ async def run_agent_sse_generator(
                         "agent": agent,
                         "delta": content,
                         **({"round": round_} if round_ else {}),
+                    }, ensure_ascii=False),
+                }
+                # P0: 累积 reasoning，写入 result_json
+                if content:
+                    rkey = f"{agent}|{round_}" if round_ is not None else agent
+                    if rkey not in _accumulated_reasoning:
+                        _accumulated_reasoning[rkey] = []
+                    _accumulated_reasoning[rkey].append({
+                        "agent": agent,
+                        "content": content,
+                        "timestamp": int(time.time() * 1000),
+                    })
+
+            # ── agent_start → stage (running) ──
+            # [修复] SearchAnalyzer 等 agent 第一条日志是 agent_start，不是 stage。
+            # 透传为 stage 事件让前端能感知 agent 开始。
+            elif et == "agent_start":
+                agent = data.get("agent_name", data.get("agent", "unknown"))
+                label = data.get("label", agent)
+                # 使用和 stage 事件一致的 server_id 格式（不含时间戳），
+                # 避免和后续 stage(running) 重复创建两个 tool_call part
+                part_id = f"tool_{agent}_0"
+                if part_writer:
+                    await part_writer.append_tool_call(part_id, agent, label, "⚙️", 0)
+                yield {
+                    "event": "stage",
+                    "data": json.dumps({
+                        "part_id": part_id,
+                        "agent": agent,
+                        "label": label,
+                        "icon": "⚙️",
+                        "status": "running",
+                        "round": 0,
+                    }, ensure_ascii=False),
+                }
+                # P0: 累积 agent_start 为 running stage
+                _accumulated_stages.append({
+                    "agent": agent,
+                    "label": label,
+                    "icon": "⚙️",
+                    "status": "running",
+                    "reviewRound": 0,
+                })
+                _has_received_any_stage = True
+
+            # ── agent_event → 透传到 SSE ──
+            # [修复] WritingAgent 中间产物日志（"📎 工具结果"、"✅ 完成"、"● agent_event"）
+            # 不再仅打日志，而是透传到前端让用户看到每个 agent 的完成状态。
+            elif et == "agent_event":
+                content = data.get("content", "") or data.get("message", "")
+                if not content:
+                    content = str(data)
+                agent = data.get("agent", "unknown")
+                part_id = _make_part_id(f"event_{agent}")
+                yield {
+                    "event": "agent_event",
+                    "data": json.dumps({
+                        "part_id": part_id,
+                        "agent": agent,
+                        "content": content,
+                    }, ensure_ascii=False),
+                }
+
+            # ── thinking_step → 累积到 result_json ──
+            # 每个 agent 完成时记录的步骤，包含 input_summary / output_summary / reasoning
+            elif et == "thinking_step":
+                step_data = data.get("thinking_step", data)
+                if isinstance(step_data, dict) and step_data.get("agent"):
+                    _accumulated_thinking_steps.append({
+                        "agent": step_data.get("agent", ""),
+                        "action": step_data.get("action", ""),
+                        "reasoning": step_data.get("reasoning", ""),
+                        "input_summary": step_data.get("input_summary", ""),
+                        "output_summary": step_data.get("output_summary", ""),
+                        "tokens_used": step_data.get("tokens_used", 0),
+                        "time_elapsed": step_data.get("time_elapsed", 0),
+                        "status": step_data.get("status", "done"),
+                    })
+
+            # ── preview_sync → 推送到前端预览面板 ──
+            elif et == "preview_sync":
+                yield {
+                    "event": "preview_sync",
+                    "data": json.dumps(data, ensure_ascii=False),
+                }
+                # 同时写入 PartWriter（让历史消息能还原预览数据）
+                if part_writer and data.get("body"):
+                    await part_writer.append("artifact", "preview_sync", {
+                        "artifact_type": "preview_sync",
+                        "body": data.get("body", ""),
+                        "title": data.get("title", ""),
+                        "tags": data.get("tags", []),
+                    })
+
+            # ── task_partial → artifact（部分结果）──
+            # [修复] 第一轮 pipeline 完成后，虽然 task_partial 被 worker 标记为失败重试，
+            # 但内容已生成；直接 yield artifact 让用户能看到中间产物。
+            elif et == "task_partial":
+                output = data.get("output", {})
+                full_text = output.get("full_text") or output.get("content", "")
+                if full_text and part_writer:
+                    # 追加而非覆盖（多轮生成时追加）
+                    await part_writer.append("artifact", "artifact_partial", {
+                        "artifact_type": _infer_artifact_type(output),
+                        "body": full_text,
+                        "title": output.get("title"),
+                        "platform": output.get("platform"),
+                        "structured": output.get("structured"),
+                    })
+                yield {
+                    "event": "artifact",
+                    "data": json.dumps({
+                        "part_id": "artifact_partial",
+                        "artifact_type": _infer_artifact_type(output),
+                        "body": full_text,
+                        "title": output.get("title"),
+                        "platform": output.get("platform"),
+                        "structured": output.get("structured"),
                     }, ensure_ascii=False),
                 }
 
@@ -292,6 +467,7 @@ async def run_agent_sse_generator(
                         "structured": output.get("structured"),
                     }, ensure_ascii=False),
                 }
+                # 更新消息正文 + result_json（含 accumulated stages/reasoning/llmChunks）
                 if part_writer:
                     await part_writer.finalize()
                 task = task_queue.get_task(task_id_str)
@@ -303,6 +479,25 @@ async def run_agent_sse_generator(
                         "time_elapsed": res.get("usage", {}).get("time_elapsed"),
                         "model": res.get("usage", {}).get("model"),
                     }
+                if conversation_id and full_text:
+                    try:
+                        result_payload = {
+                            "_stages": _accumulated_stages,
+                            "_reasoningChunks": _accumulated_reasoning,
+                            "_llmChunks": _accumulated_llm_chunks,
+                            "_thinkingSteps": _accumulated_thinking_steps,
+                            "output": output,
+                            "usage": usage,
+                        }
+                        db.query(ChatMessageRecord).filter_by(id=_message_id).update({
+                            "content": full_text,
+                            "status": "completed",
+                            "result_json": json.dumps(result_payload, ensure_ascii=False),
+                        })
+                        db.commit()
+                    except Exception:
+                        db.rollback()
+
                 yield {
                     "event": "message_end",
                     "data": json.dumps({
@@ -366,6 +561,25 @@ async def run_agent_sse_generator(
                     "time_elapsed": res.get("usage", {}).get("time_elapsed"),
                     "model": res.get("usage", {}).get("model"),
                 }
+                # P0: 更新 result_json（含 accumulated stages/reasoning/llmChunks）
+                if conversation_id and full_text:
+                    try:
+                        result_payload = {
+                            "_stages": _accumulated_stages,
+                            "_reasoningChunks": _accumulated_reasoning,
+                            "_llmChunks": _accumulated_llm_chunks,
+                            "_thinkingSteps": _accumulated_thinking_steps,
+                            "output": output,
+                            "usage": usage,
+                        }
+                        db.query(ChatMessageRecord).filter_by(id=_message_id).update({
+                            "content": full_text,
+                            "status": "completed",
+                            "result_json": json.dumps(result_payload, ensure_ascii=False),
+                        })
+                        db.commit()
+                    except Exception:
+                        db.rollback()
                 yield {
                     "event": "message_end",
                     "data": json.dumps({

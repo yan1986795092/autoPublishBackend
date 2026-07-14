@@ -61,6 +61,23 @@ class AgentEvent:
     llm_provider: str | None = None
     service: str = "autopublish-api"
     trace_id: str = field(default_factory=lambda: uuid.uuid4().hex[:16])
+    # ── P0 新增：请求级上下文字段 ──
+    user_id: str = ""
+    client_ip: str = ""
+    http_method: str = ""
+    http_path: str = ""
+    business_code: str = ""
+    request_body_summary: str = ""
+    response_body_summary: str = ""
+    # ── P2.2 新增：三层 Agent 日志字段 ──
+    # 任务层
+    total_cost_usd: float | None = None
+    final_status: str | None = None
+    task_duration_ms: float | None = None
+    # 步骤层
+    decision_reason: str | None = None
+    # 工具层
+    standardized_error_code: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         result: dict[str, Any] = {
@@ -76,6 +93,18 @@ class AgentEvent:
             "message": self.message,
             "service": self.service,
             "trace_id": self.trace_id,
+            # P0 新增：请求上下文（始终输出，空字符串说明无）
+            "user_id": self.user_id,
+            "client_ip": self.client_ip,
+            "http_method": self.http_method,
+            "http_path": self.http_path,
+            "business_code": self.business_code,
+            # P2.2 新增：三层 Agent 日志字段
+            "total_cost_usd": self.total_cost_usd,
+            "final_status": self.final_status,
+            "task_duration_ms": self.task_duration_ms,
+            "decision_reason": self.decision_reason,
+            "standardized_error_code": self.standardized_error_code,
         }
         optional_fields = {
             "thought": self.thought,
@@ -88,6 +117,9 @@ class AgentEvent:
             "error_stack": self.error_stack,
             "llm_model": self.llm_model,
             "llm_provider": self.llm_provider,
+            # P0 新增：可选摘要
+            "request_body_summary": self.request_body_summary or None,
+            "response_body_summary": self.response_body_summary or None,
         }
         for key, value in optional_fields.items():
             if value is not None:

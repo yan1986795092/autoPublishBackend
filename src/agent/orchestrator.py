@@ -247,6 +247,29 @@ class Orchestrator:
 
                     record_agent_run(status=status, skill_name=skill_name, duration_s=elapsed)
 
+                    # P0.6: ManagerAgent 级 SUMMARY 日志
+                    _completed = len(final_state.get("completed_task_ids", []))
+                    _failed = len(final_state.get("failed_task_ids", []))
+                    # P2.3: 估算总成本（$0.001/1K tokens 粗略估算）
+                    _est_cost = round(total_tokens * 0.001 / 1000, 6) if total_tokens else None
+                    logger.info(
+                        "📊 ManagerAgent 运行完成",
+                        _type="agent",
+                        event_name="orchestrator_summary",
+                        status=status,
+                        final_status=status,
+                        skill_name=skill_name,
+                        total_duration_ms=round(elapsed * 1000, 1),
+                        task_duration_ms=round(elapsed * 1000, 1),
+                        total_tokens=total_tokens,
+                        total_cost_usd=_est_cost,
+                        completed_tasks=_completed,
+                        failed_tasks=_failed,
+                        trace_id=effective_trace_id,
+                        task_id=_active_task_id or task_id,
+                        user_request=user_request[:100],
+                    )
+
                     # Phase 0 关键改动：图执行结束 → dispatch root handoff (Manager→User)
                     try:
                         completed_agents = [

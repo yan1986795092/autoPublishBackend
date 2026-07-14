@@ -73,3 +73,50 @@ def get_current_trace() -> TraceContextVar | None:
     返回 None 表示没有显式 push；call_llm 会自动生成 trace/span（向后兼容路径）。
     """
     return _current_trace.get()
+
+
+def to_worker_payload() -> dict | None:
+    """将当前 trace 上下文序列化为可 pickle 的 dict（用于跨线程/进程传递）。
+
+    在提交后台任务前调用，将返回的 dict 随 task 一起传递。
+    在 worker 端用 ``restore_trace_in_worker(payload)`` 恢复。
+    """
+    cur = _current_trace.get()
+    if cur is None:
+        return None
+    return {
+        "trace_id": cur.trace_id,
+        "span_id": cur.span_id,
+        "parent_span_id": cur.parent_span_id,
+        "agent_name": cur.agent_name,
+        "source": cur.source,
+        "raw": cur.raw,
+    }
+
+
+def restore_trace_in_worker(payload: dict | None) -> TraceContextVar | None:
+    """在 worker 线程/进程中从 ``to_worker_payload()`` 的返回值恢复 trace 上下文。
+
+    用法::
+
+        # 提交方
+        payload = to_worker_payload()
+        await task_queue.put({"task": ..., "trace_ctx": payload})
+
+        # Worker 端
+        payload = task.get("trace_ctx")
+        restore_trace_in_worker(payload)
+        # 之后 get_current_trace() 返回正确的 TraceContextVar
+    """
+    if payload is None:
+        return None
+    ctx = TraceContextVar(
+        trace_id=payload.get("trace_id", new_trace_id()),
+        span_id=payload.get("span_id", new_span_id()),
+        parent_span_id=payload.get("parent_span_id"),
+        agent_name=payload.get("agent_name", "worker"),
+        source=payload.get("source", "auto"),
+        raw=payload.get("raw", False),
+    )
+    _current_trace.set(ctx)
+    return ctx

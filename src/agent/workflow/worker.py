@@ -49,12 +49,11 @@ def _apply_retry_strategy(skill_context: Optional[dict], attempt: int) -> tuple[
 
     new_ctx = dict(skill_context or {})
     if prompt_suffix:
-        # 追加到 topic（ManagerAgent 会把它传给 WritingAgent）
-        original_topic = new_ctx.get("topic", "")
-        if original_topic:
-            new_ctx["topic"] = original_topic + prompt_suffix
-        else:
-            new_ctx["topic"] = prompt_suffix
+        # ── 修复：不污染 topic，改为独立字段 ──
+        # 旧逻辑将 prompt_suffix 追加到 topic，导致系统提示泄漏到所有 Agent 的
+        # 任务描述中（包括 WebSearch、SearchAnalyzer 等），引发 prompt 污染。
+        # 改为 _retry_reminder 字段，让 Agent handler 按需读取。
+        new_ctx["_retry_reminder"] = prompt_suffix.strip()
     return new_ctx, model_override
 
 
@@ -203,9 +202,9 @@ class AgentWorker:
                         _type="worker",
                     )
                 if ctx_with_strategy and ctx_with_strategy is not async_task.skill_context:
-                    # 用加固后的 topic 覆盖 context.topic
-                    if "topic" in ctx_with_strategy:
-                        context["topic"] = ctx_with_strategy["topic"]
+                    # 注入 retry_reminder（不再污染 topic，避免系统提示泄漏到所有 Agent）
+                    if "_retry_reminder" in ctx_with_strategy:
+                        context["_retry_reminder"] = ctx_with_strategy["_retry_reminder"]
                 result = await orchestrator.run(
                     user_request=async_task.prompt,
                     context=context,
@@ -229,11 +228,28 @@ class AgentWorker:
                     # 再次调用会导致 UNIQUE constraint failed (与 SSE 路径冲突)。
                     return  # 完全成功，退出重试循环
 
-                # partial 状态: 有输出但质量不足，记录警告但不退出重试
+                # partial 状态: 有输出但质量不足
                 if result.status.value == "partial":
                     last_error = result.error or "partial_result"
+                    # ── 关键修复：partial 但有有效内容 → 标记为 completed，不触发全量重试 ──
+                    # 典型场景：SearchAnalyzer 失败但 WritingAgent 已成功生成正文，
+                    # 重跑整条 pipeline 浪费 3x+ token 且等更久，用户体验差。
+                    result_dict = result.to_dict()
+                    result_output = result_dict.get("output", {}) or {}
+                    _has_content = bool(
+                        result_output.get("full_text") or result_output.get("content")
+                    )
+                    if _has_content:
+                        logger.info(
+                            "部分结果包含有效内容，标记为完成，不触发重试",
+                            task_id=async_task.id,
+                            _type="worker",
+                            event_name="task_partial_accepted",
+                        )
+                        task_queue.complete_task(async_task.id, result_dict)
+                        return
                 logger.warning(
-                    "任务产生部分结果",
+                    "任务产生部分结果（无有效内容）",
                     task_id=async_task.id,
                     attempt=attempt + 1,
                     error=last_error,

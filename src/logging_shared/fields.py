@@ -40,6 +40,19 @@ SOURCE_APP = "source_app"
 USER_ID = "user_id"
 CONTENT_TYPE = "content_type"
 
+# P1.1 新增：OTel 对齐字段
+CLIENT_IP = "client_ip"
+TENANT_ID = "tenant_id"
+SESSION_ID = "session_id"
+BUSINESS_CODE = "business_code"
+USER_AGENT = "user_agent"
+REFERER = "referer"
+TASK_ID = "task_id"
+ERROR_CODE = "error_code"
+REQUEST_SIZE = "request_size"
+RESPONSE_SIZE = "response_size"
+DECISION_REASON = "decision_reason"
+
 # 事件类型
 LLM_REQUEST_START = "llm_request_start"
 LLM_REQUEST_END = "llm_request_end"

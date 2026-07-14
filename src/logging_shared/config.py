@@ -100,10 +100,9 @@ def setup(
                   "urllib3", "sqlalchemy.engine", "httpx", "httpcore"]:
         logging.getLogger(_name).setLevel(logging.WARNING)
 
-    # ── Phase 1: 同时装配新 Dispatcher (默认关闭, 用 LOG_NEW_DISPATCHER_ENABLED 启用) ──
-    if os.getenv("LOG_NEW_DISPATCHER_ENABLED", "false").lower() in ("true", "1", "yes"):
+    # ── Phase 3: 同时装配新 Dispatcher (默认启用, 用 LOG_NEW_DISPATCHER_DISABLED 选择退出) ──
+    if os.getenv("LOG_NEW_DISPATCHER_DISABLED", "false").lower() not in ("true", "1", "yes"):
         new_sinks = []
-        # production 只 WARN/ERROR 进 Console
         from .sinks.console import ConsoleSink as _CSink
         _console = _CSink(colors=not log_json)
         new_sinks.append(_console)
@@ -112,12 +111,8 @@ def setup(
         if os.getenv("LOG_JSONFILE_ENABLED", "false").lower() in ("true", "1", "yes"):
             new_sinks.append(JsonFileSink())
         set_dispatcher(Dispatcher(sinks=new_sinks, redactor=DefaultRedactor()))
-        logger.info(
-            "新 Dispatcher 已启用 (sinks=%d)",
-            len(new_sinks),
-            _type="system",
-            event_name="dispatcher_enabled",
-        )
+        _log = logging.getLogger("logging.config")
+        _log.info("新 Dispatcher 已启用 (sinks=%d)", len(new_sinks))
 
 
 def _add_service_context(logger, method_name, event_dict):

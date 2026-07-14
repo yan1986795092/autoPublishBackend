@@ -7,12 +7,16 @@ from .code import handle_code
 from .web_search import handle_web_search, handle_url_crawl
 from .fix import handle_fix
 from .search_analyzer import handle_search_analyzer
+from .title import handle_title
+from .tags import handle_tags
 from .fallback import handle_fallback
 
 HANDLER_MAP = {
     "WritingAgent": handle_writing,
     "ReviewAgent": handle_review,
     "FixAgent": handle_fix,
+    "TitleAgent": handle_title,
+    "TagAgent": handle_tags,
     "DiagramAgent": handle_diagram,
     "CodeAgent": handle_code,
     "WebSearch": handle_web_search,

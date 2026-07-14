@@ -103,6 +103,7 @@ def _build_message_response(
         result=result,
         task_id=task_id,
         plan=plan,
+        parts=parts,
     )
     return MessageResponse(
         id=id,
@@ -205,6 +206,7 @@ async def list_conversations(
         latest_msg_subq.c.created_at,
     ).filter(latest_msg_subq.c.rn == 1).all()
 
+    # 批量查询 last_message 的 parts（与 get_conversation 保持一致）
     last_msgs: dict[str, any] = {row.conversation_id: row for row in latest_msg_alias}
 
     result = []
@@ -212,16 +214,24 @@ async def list_conversations(
         last_msg = last_msgs.get(conv.id)
         last_msg_response = None
         if last_msg:
-            last_result = json.loads(last_msg.result_json) if last_msg.result_json else None
-            last_plan = json.loads(last_msg.plan_json) if last_msg.plan_json else None
-            last_msg_response = _build_message_response(
+            # 列表页只返回轻量级 last_message：截取前 200 字预览，不含 result/parts
+            preview = last_msg.content[:200] + ("..." if last_msg.content and len(last_msg.content) > 200 else "") if last_msg.content else ""
+            preview_kind = "generation" if last_msg.result_json and json.loads(last_msg.result_json).get("output") else "conversation"
+            last_msg_response = MessageResponse(
                 id=last_msg.id,
                 role=last_msg.role,
-                content=last_msg.content,
+                content=preview,
                 status=last_msg.status,
-                result=last_result,
+                result=None,
                 task_id=last_msg.task_id,
-                plan=last_plan,
+                plan=None,
+                kind=preview_kind if last_msg.role == "assistant" else last_msg.role,
+                render_mode="bubble",
+                render_payload=None,
+                is_generation=preview_kind == "generation",
+                is_conversation=preview_kind != "generation",
+                generation_meta=None,
+                parts=[],
                 created_at=last_msg.created_at.isoformat() if last_msg.created_at else "",
             )
 
@@ -451,6 +461,18 @@ async def delete_conversation(
 
     if not conversation:
         raise HTTPException(status_code=404, detail="对话不存在")
+
+    # 先手动删除所有消息的 parts（避免 NOT NULL 约束冲突）
+    from src.models import ChatMessageRecord, ChatMessagePart
+    msg_ids = db.query(ChatMessageRecord.id).filter(
+        ChatMessageRecord.conversation_id == conversation_id
+    ).all()
+    msg_id_list = [row[0] for row in msg_ids]
+    if msg_id_list:
+        db.query(ChatMessagePart).filter(
+            ChatMessagePart.message_id.in_(msg_id_list)
+        ).delete(synchronize_session=False)
+    db.flush()
 
     db.delete(conversation)
     db.commit()

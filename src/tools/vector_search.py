@@ -5,6 +5,7 @@ import json
 import logging
 from typing import Any, Optional
 
+import httpx
 from sqlalchemy import text
 
 from src.database import SessionLocal
@@ -45,6 +46,66 @@ def _resolve_embedding_config():
     )
 
 
+# DashScope 原生 embedding 端点
+_DASHSCOPE_EMBEDDING_URL = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
+
+
+class _DashScopeEmbedder:
+    """DashScope 原生 embedding 封装，替代 LangChain OpenAIEmbeddings。
+
+    DashScope 的 text-embedding-v3 不在 /v1/embeddings 兼容端点开放，
+    必须用原生端点 POST .../text-embedding/text-embedding。
+    """
+
+    def __init__(self, api_key: str, model: str, dim: int):
+        self._api_key = api_key
+        self._model = model
+        self._dim = dim
+
+    def embed_query(self, text: str) -> list[float]:
+        return self._embed_single(text)
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        return self._embed_batch(texts)
+
+    def _embed_single(self, text: str) -> list[float]:
+        # 单条: input.texts 是数组，批量: input 直接是数组
+        resp = httpx.post(
+            _DASHSCOPE_EMBEDDING_URL,
+            json={"input": {"texts": [text]}, "model": self._model, "parameters": {"dimension": self._dim}},
+            headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
+            timeout=30.0,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"DashScope embedding failed {resp.status_code}: {resp.text[:300]}")
+        data = resp.json()
+        emb = data.get("output", {}).get("embeddings", [{}])[0].get("embedding")
+        if not emb or len(emb) != self._dim:
+            raise RuntimeError(f"DashScope embedding dim mismatch or empty: {data}")
+        return emb
+
+    def _embed_batch(self, texts: list[str]) -> list[list[float]]:
+        # DashScope: 单条和批量都用 {"input": {"texts": [...]}}
+        resp = httpx.post(
+            _DASHSCOPE_EMBEDDING_URL,
+            json={"input": {"texts": texts}, "model": self._model, "parameters": {"dimension": self._dim}},
+            headers={"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"},
+            timeout=60.0,
+        )
+        if resp.status_code != 200:
+            raise RuntimeError(f"DashScope batch embedding failed {resp.status_code}: {resp.text[:200]}")
+        data = resp.json()
+        # 响应格式: {"output": {"embeddings": [{"embedding": [...], "text_index": 0}, ...]}
+        embeddings_out = data.get("output", {}).get("embeddings", [])
+        if not embeddings_out:
+            raise RuntimeError(f"DashScope batch embedding format error: {data}")
+        results = []
+        for item in embeddings_out:
+            emb = item.get("embedding", [])
+            results.append(emb if emb else [0.0] * self._dim)
+        return results
+
+
 class VectorSearchTool:
     """语义向量搜索工具，使用 PostgreSQL + pgvector + Qwen Embedding"""
 
@@ -70,7 +131,11 @@ class VectorSearchTool:
             return False
 
     def _ensure_embeddings(self):
-        """按 settings.embedding_provider 初始化 embedder。"""
+        """按 settings.embedding_provider 初始化 embedder。
+
+        注意：DashScope 的 text-embedding-v3 不在 /v1/embeddings 兼容端点开放，
+        LangChain OpenAIEmbeddings 会失败。统一使用自定义 DashScope 原生 API embedder。
+        """
         if self._embeddings is not None:
             return
 
@@ -86,24 +151,95 @@ class VectorSearchTool:
             )
             return
 
-        try:
-            from langchain_openai import OpenAIEmbeddings
-
-            self._embeddings = OpenAIEmbeddings(
-                model=model_name,
-                openai_api_key=api_key,
-                openai_api_base=base_url,
-            )
-            logger.info(
-                "VectorSearch: 使用 %s Embedding（模型=%s, 维度=%d）",
-                label, model_name, dim,
-            )
-        except Exception as e:
-            logger.warning("%s Embedding 初始化失败: %s", label, e)
+        # 使用自定义 DashScope 原生 embedder（不接受 LangChain OpenAIEmbeddings）
+        self._embeddings = _DashScopeEmbedder(api_key, model_name, dim)
+        logger.info(
+            "VectorSearch: 使用 DashScope Embedding（模型=%s, 维度=%d）",
+            model_name, dim,
+        )
 
     @property
     def embedding_dim(self) -> int:
         return self._embedding_dim or 1024
+
+    def _embed_query_fallback(self, text: str) -> list[float] | None:
+        """直连 HTTP 调 DashScope 原生 Embedding API（langchain 失败时兜底）"""
+        api_key, base_url, model_name, dim, label = _resolve_embedding_config()
+        if not api_key:
+            return None
+        # DashScope 原生 embedding 端点（不是 /v1/embeddings 兼容端点）
+        url = "https://dashscope.aliyuncs.com/api/v1/services/embeddings/text-embedding/text-embedding"
+        try:
+            resp = httpx.post(
+                url,
+                json={"input": {"texts": [text]}, "model": model_name, "parameters": {"dimension": dim}},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=30.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "DashScope embedding fallback HTTP %d: %s",
+                    resp.status_code, resp.text[:300],
+                )
+                return None
+            data = resp.json()
+            # DashScope 原生格式: {"output": {"embeddings": [{"text": "...", "embedding": [...]}]}}
+            embeddings = data.get("output", {}).get("embeddings", [])
+            if embeddings and len(embeddings) > 0:
+                emb = embeddings[0].get("embedding")
+                if emb and len(emb) == (dim or 1024):
+                    return emb
+                # 兼容另一种格式：embedding 直接在 output 下
+                emb = data.get("output", {}).get("embedding")
+                if emb and len(emb) == (dim or 1024):
+                    return emb
+            logger.warning("DashScope embedding fallback 返回格式异常: %s", str(data)[:200])
+            return None
+        except Exception as e:
+            logger.warning("DashScope embedding fallback 异常: %s", e)
+            return None
+
+    def _embed_documents_fallback(self, texts: list[str]) -> list[list[float]] | None:
+        """直连 HTTP 批量嵌入（langchain 失败时兜底）"""
+        api_key, base_url, model_name, dim, label = _resolve_embedding_config()
+        if not api_key:
+            return None
+        try:
+            resp = httpx.post(
+                _DASHSCOPE_EMBEDDING_URL,
+                json={"input": {"texts": texts}, "model": model_name, "parameters": {"dimension": dim}},
+                headers={
+                    "Authorization": f"Bearer {api_key}",
+                    "Content-Type": "application/json",
+                },
+                timeout=60.0,
+            )
+            if resp.status_code != 200:
+                logger.warning(
+                    "DashScope documents embedding fallback HTTP %d: %s",
+                    resp.status_code, resp.text[:300],
+                )
+                return None
+            data = resp.json()
+            embeddings_out = data.get("output", {}).get("embeddings", [])
+            if not embeddings_out:
+                logger.warning("DashScope batch embedding fallback 返回格式异常: %s",
+                             str(data)[:200])
+                return None
+            results = []
+            for item in embeddings_out:
+                emb = item.get("embedding", [])
+                if emb and len(emb) == (dim or 1024):
+                    results.append(emb)
+                else:
+                    results.append([0.0] * (dim or 1024))
+            return results if results else None
+        except Exception as e:
+            logger.warning("DashScope documents embedding fallback 异常: %s", e)
+            return None
 
     def _to_pgvector_str(self, embedding: list[float]) -> str:
         return "[" + ",".join(str(x) for x in embedding) + "]"
@@ -122,9 +258,7 @@ class VectorSearchTool:
         if not self._ensure_pgvector():
             return False
 
-        # 修复 BUG-2：清洗输入 — Qwen Embedding 拒绝非 str / 空字符串 / 控制字符，
-        #     直接传会让 API 抛 'contents is neither str nor list of str' 然后整批失败。
-        #     过滤非字符串 + 空串 + 过长文本（>8000 字符 Qwen 也会拒）。
+        # 清洗输入 — 过滤非字符串 + 空串 + 过长文本（>8000 DashScope 截断）
         cleaned_texts: list[str] = []
         cleaned_metas: list[dict] = []
         for i, t in enumerate(texts):
@@ -144,40 +278,46 @@ class VectorSearchTool:
             logger.warning("VectorSearch 全部文本清洗后为空，跳过写入")
             return False
 
+        # 获取嵌入：优先用 embedder（DashScope 原生 API），失败时用 fallback
+        embeddings: list[list[float]] | None = None
         try:
             embeddings = self._embeddings.embed_documents(cleaned_texts)
-            metas_to_use = cleaned_metas if cleaned_metas else ([{}] * len(cleaned_texts))
-
-            db = SessionLocal()
-            try:
-                for i, doc_text in enumerate(cleaned_texts):
-                    embedding_str = self._to_pgvector_str(embeddings[i])
-                    meta_json = json.dumps(metas_to_use[i], ensure_ascii=False) if metas_to_use[i] else "{}"
-                    namespace = metas_to_use[i].get("namespace", "general") if metas_to_use[i] else "general"
-
-                    db.execute(
-                        text(
-                            "INSERT INTO vector_search (text, metadata, embedding, namespace) "
-                            f"VALUES (:text, CAST(:metadata AS jsonb), '{embedding_str}'::vector, :namespace)"
-                        ),
-                        {
-                            "text": doc_text,
-                            "metadata": meta_json,
-                            "namespace": namespace,
-                        },
-                    )
-                db.commit()
-                return True
-            except Exception as e:
-                db.rollback()
-                logger.warning("VectorSearch 写入失败: %s", e)
+        except Exception as embed_err:
+            logger.warning("VectorSearch embed_documents 失败，尝试 fallback: %s", embed_err)
+            embeddings = self._embed_documents_fallback(cleaned_texts)
+            if embeddings is None:
+                logger.warning("VectorSearch 嵌入全部失败，跳过写入")
                 return False
-            finally:
-                db.close()
 
+        metas_to_use = cleaned_metas if cleaned_metas else ([{}] * len(cleaned_texts))
+
+        db = SessionLocal()
+        try:
+            for i, doc_text in enumerate(cleaned_texts):
+                emb = embeddings[i] if i < len(embeddings) else [0.0] * self.embedding_dim
+                embedding_str = self._to_pgvector_str(emb)
+                meta_json = json.dumps(metas_to_use[i], ensure_ascii=False) if metas_to_use[i] else "{}"
+                namespace = metas_to_use[i].get("namespace", "general") if metas_to_use[i] else "general"
+
+                db.execute(
+                    text(
+                        "INSERT INTO vector_search (text, metadata, embedding, namespace) "
+                        f"VALUES (:text, CAST(:metadata AS jsonb), '{embedding_str}'::vector, :namespace)"
+                    ),
+                    {
+                        "text": doc_text,
+                        "metadata": meta_json,
+                        "namespace": namespace,
+                    },
+                )
+            db.commit()
+            return True
         except Exception as e:
-            logger.warning("VectorSearch 嵌入生成失败: %s", e)
+            db.rollback()
+            logger.warning("VectorSearch 写入失败: %s", e)
             return False
+        finally:
+            db.close()
 
     # ── 检索 ──────────────────────────────────────────────
 
@@ -213,6 +353,13 @@ class VectorSearchTool:
 
         try:
             query_embedding = self._embeddings.embed_query(cleaned_query)
+        except Exception as embed_err:
+            logger.warning("VectorSearch embed_query 失败，尝试 fallback: %s", embed_err)
+            query_embedding = self._embed_query_fallback(cleaned_query)
+            if query_embedding is None:
+                return {"query": query, "matches": [], "total": 0, "error": f"embedding failed: {embed_err}"}
+
+        try:
             embedding_str = self._to_pgvector_str(query_embedding)
 
             db = SessionLocal()

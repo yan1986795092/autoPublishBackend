@@ -27,6 +27,13 @@ class TraceContext:
     response_summary: str = ""
     status_code: int = 0
     error: str = ""
+    # ── P0.5 新增：请求上下文 ──
+    user_id: str = ""
+    session_id: str = ""
+    client_ip: str = ""
+    tenant_id: str = ""
+    request_size: int = 0
+    response_size: int = 0
 
     def add_event(self, name: str, **kwargs: Any) -> None:
         self.events.append({"name": name, "time": time.time(), **kwargs})

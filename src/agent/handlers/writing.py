@@ -18,59 +18,27 @@ logger = get_logger("agent.writing")
 
 async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     try:
-        # 优先从 _agent_context 读结构化参数，fallback 到 task_input 顶层
-        _actx = task_input.get("_agent_context", {})
-        topic = _actx.get("topic") or task_input.get("topic", task_input.get("query", ""))
-        content_type = _actx.get("content_type") or task_input.get("content_type", "blog")
-        style = _actx.get("style") or task_input.get("style", "")
-        platform = _actx.get("platform") or task_input.get("platform", "")
-        platform_name = ""
-
-        # ── 关键校验：topic 是必填变量，空值会导致模板占位符原样发给 LLM ──
-        if not topic or not str(topic).strip():
-            logger.error("WritingAgent 收到空 topic，拒绝执行", task_input_keys=list(task_input.keys()))
-            raise HandlerError("WritingAgent 缺少必填参数 topic", handler="WritingAgent")
+        # ── 输入：只读 Schema 声明的字段（必填字段已由 validate_input 保证存在） ──
+        topic: str = task_input["topic"]
+        content_type: str = task_input.get("content_type", "blog")
+        style: str = task_input.get("style", "")
+        platform: str = task_input.get("platform", "")
+        platform_name: str = ""
+        # consume 字段：由依赖链自动注入
+        search_analysis: str = task_input.get("search_analysis", "")
 
         # ── 平台深度配置加载 ──
         profile = get_profile(platform) if platform else None
         if profile:
             platform_name = profile.get("name", platform)
-            # 如果 task_input 没有显式 content_type，从 profile 映射
-            # 使用 platform code 作为 content_type（兼容现有 CONTENT_TYPE_PROMPTS）
             content_type = platform
 
-        # ── 构建上下文 ──
-        dep_context = task_input.get("_context", {})
+        # ── 构建搜索/上游素材上下文 ──
         context_str_parts = []
-        # 给第一个依赖更多 token（主内容），其余适当减少
-        dep_items = list(dep_context.items())
-        for idx, (_cid, cdata) in enumerate(dep_items):
-            raw = cdata.get("content")
-            if raw:
-                char_limit = 3000 if idx == 0 else 1500
-                # 支持纯字符串和结构化内容（如 MCP 工具返回的 [{"type":"text","text":"..."}]）
-                if isinstance(raw, str):
-                    text = raw[:char_limit]
-                elif isinstance(raw, list):
-                    parts = []
-                    for item in raw:
-                        if isinstance(item, dict):
-                            if "text" in item:
-                                parts.append(str(item["text"]))
-                            elif "structured_content" in item:
-                                sc = item["structured_content"]
-                                if isinstance(sc, dict) and "result" in sc:
-                                    parts.append(str(sc["result"]))
-                        elif isinstance(item, str):
-                            parts.append(item)
-                    text = "\n".join(parts)[:char_limit]
-                elif isinstance(raw, dict):
-                    text = str(raw.get("result", raw))[:char_limit]
-                else:
-                    text = str(raw)[:char_limit]
-                context_str_parts.append(text)
+        if search_analysis:
+            context_str_parts.append(search_analysis[:3000])
 
-        # 记忆上下文（由 nodes.py 统一注入，handler 不主动检索）
+        # 记忆上下文（由 nodes.py 统一注入）
         memory_context = task_input.get("_memory_context", "")
 
         # ── 用 PromptBuilder 构建 ──
@@ -163,6 +131,7 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
 
         platform_display = f"（{platform_name}）" if platform_name else ""
         from ..result import agent_response
+
         return agent_response(
             "WritingAgent",
             content=content,
@@ -171,6 +140,9 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
             prompt_tokens=llm_result.prompt_tokens,
             completion_tokens=llm_result.completion_tokens,
             output_extra={"content_type": content_type, "platform": platform},
+            output_fields={
+                "article_body": content,
+            },
             prompt_versions=composed.used_templates,
             thinking_steps=[{
                 "agent": "WritingAgent", "action": "写作完成",

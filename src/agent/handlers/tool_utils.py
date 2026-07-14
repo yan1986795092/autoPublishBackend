@@ -25,6 +25,7 @@ from src.logging_shared.genai_dispatcher import (
     dispatch_completion,
     serialize_messages,
 )
+from src.logging_shared.error_codes import ErrorCode
 from src.logging_shared.trace_context_var import (
     TraceContextVar,
     get_current_trace,
@@ -273,7 +274,24 @@ async def call_llm(
         duration_ms = (time.perf_counter() - start) * 1000
         model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
         provider = getattr(llm, "model_kwargs", {}).get("provider", "") or "unknown"
-        logger.warning(f"LLM {model_name} 调用出错: {exc}", _type="llm", model=model_name, duration_ms=round(duration_ms, 2))
+        # P2.3: 将异常映射为标准错误码
+        _exc_name = type(exc).__name__
+        if "RateLimit" in _exc_name or "rate_limit" in str(exc).lower():
+            _error_code = ErrorCode.LLM_RATE_LIMIT
+        elif "Timeout" in _exc_name or "timeout" in str(exc).lower():
+            _error_code = ErrorCode.LLM_TIMEOUT
+        elif "Auth" in _exc_name or "Unauthorized" in _exc_name or "401" in str(exc):
+            _error_code = ErrorCode.LLM_AUTH_ERROR
+        elif "Quota" in _exc_name or "quota" in str(exc).lower():
+            _error_code = ErrorCode.LLM_QUOTA_EXCEEDED
+        else:
+            _error_code = ErrorCode.LLM_INVALID_RESPONSE
+        logger.warning(
+            f"LLM {model_name} 调用出错: {exc}",
+            _type="llm", model=model_name,
+            duration_ms=round(duration_ms, 2),
+            error_code=_error_code.value,
+        )
 
         # Phase 0 关键改动：失败也 dispatch 一条 CompletionRecord，finish_reason=error
         try:

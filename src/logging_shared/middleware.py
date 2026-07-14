@@ -73,6 +73,12 @@ def _build_trace_span(
             {"key": "http.url", "vType": "STRING", "vStr": url},
             {"key": "http.status_code", "vType": "INT64", "vInt": status_code},
             {"key": "service.name", "vType": "STRING", "vStr": service_name},
+            # P1.2: OTel 对齐标签（与 Jaeger 命名共存）
+            {"key": "otel.trace_id", "vType": "STRING", "vStr": trace_id},
+            {"key": "otel.span_id", "vType": "STRING", "vStr": span_id},
+            {"key": "otel.http.method", "vType": "STRING", "vStr": method},
+            {"key": "otel.http.target", "vType": "STRING", "vStr": path},
+            {"key": "otel.http.status_code", "vType": "INT64", "vInt": status_code},
         ],
         "logs": [],
         "process": {"serviceName": service_name, "tags": []},
@@ -118,12 +124,40 @@ class LoggingMiddleware(BaseHTTPMiddleware):
         method = request.method
         path = request.url.path
 
+        # ── P0.5：捕获请求上下文字段 ──
+        user_id = getattr(request.state, "user_id", "") or request.headers.get("X-User-Id", "")
+        session_id = getattr(request.state, "session_id", "") or request.headers.get("X-Session-Id", "")
+        tenant_id = request.headers.get("X-Tenant-Id", "")
+        # client_ip: 优先 X-Forwarded-For，其次 X-Real-IP，最后直连 IP
+        forwarded = request.headers.get("X-Forwarded-For", "")
+        client_ip = forwarded.split(",")[0].strip() if forwarded else ""
+        if not client_ip:
+            client_ip = request.headers.get("X-Real-IP", "")
+        if not client_ip and request.client:
+            client_ip = request.client.host or ""
+        # P1.2: 补充 user_agent / referer / query_string
+        user_agent = request.headers.get("User-Agent", "")
+        referer = request.headers.get("Referer", "")
+        query_string = str(request.query_params) if request.query_params else ""
+
         structlog.contextvars.clear_contextvars()
         structlog.contextvars.bind_contextvars(
-            **{TRACE_ID: trace_id, "service": self.service_name}
+            **{
+                TRACE_ID: trace_id,
+                "service": self.service_name,
+                "user_id": user_id,
+                "session_id": session_id,
+                "client_ip": client_ip,
+                "tenant_id": tenant_id,
+                "user_agent": user_agent[:128] if user_agent else "",
+            }
         )
 
         request.state.trace_id = trace_id
+        request.state.user_id = user_id
+        request.state.session_id = session_id
+        request.state.client_ip = client_ip
+        request.state.tenant_id = tenant_id
 
         # ── 静默路径：不输出日志，只设 trace_id ──
         if _is_silent(method, path):
@@ -135,7 +169,11 @@ class LoggingMiddleware(BaseHTTPMiddleware):
             return response
 
         # ── 业务路径：创建 TraceContext 并输出日志 ──
-        trace_ctx = TraceContext(trace_id=trace_id, method=method, path=path)
+        trace_ctx = TraceContext(
+            trace_id=trace_id, method=method, path=path,
+            user_id=user_id, session_id=session_id,
+            client_ip=client_ip, tenant_id=tenant_id,
+        )
         request.state.trace_ctx = trace_ctx
 
         # 尝试读取请求体摘要（仅 POST/PUT/PATCH）
@@ -144,6 +182,7 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 body = await request.body()
                 text = body.decode("utf-8", errors="replace")[:200]
                 trace_ctx.request_summary = text.replace("\n", " ").strip()
+                trace_ctx.request_size = len(body)
             except Exception:
                 pass
 
@@ -157,9 +196,17 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                 http_method=method,
                 http_target=path,
                 trace_id=trace_id,
+                user_id=user_id or None,
+                session_id=session_id or None,
+                client_ip=client_ip or None,
+                request_size=trace_ctx.request_size or None,
+                user_agent=user_agent[:128] or None,
+                referer=referer[:256] or None,
+                query_string=query_string[:256] or None,
             )
-        except UnicodeEncodeError:
-            pass  # Windows GBK 终端无法渲染部分 Unicode 字符，静默忽略
+        except UnicodeEncodeError as _exc:
+            import sys as _sys
+            _sys.stderr.write(f"[log-encoding-error] REQUEST trace={trace_id[:12]} method={method} path={path} err={_exc}\n")
 
         try:
             response = await call_next(request)
@@ -169,6 +216,26 @@ class LoggingMiddleware(BaseHTTPMiddleware):
 
             trace_ctx.status_code = status_code
             trace_ctx.response_summary = _summarize_response(response)
+
+            # P0.5：捕获响应大小
+            content_length = response.headers.get("content-length")
+            if content_length:
+                trace_ctx.response_size = int(content_length)
+
+            # P0.5：从响应头或响应体提取 business_code
+            business_code = response.headers.get("X-Business-Code", "")
+            if not business_code and response.headers.get("content-type", "").startswith("application/json"):
+                try:
+                    body = response.body
+                    if body:
+                        import json as _json
+                        _parsed = _json.loads(body)
+                        bc = _parsed.get("code") or _parsed.get("business_code") or _parsed.get("status")
+                        if bc and isinstance(bc, str):
+                            business_code = str(bc)
+                        trace_ctx.response_size = len(body)
+                except Exception:
+                    pass
 
             # 4xx/5xx 用更高的日志级别
             log_method = self.logger.info
@@ -188,9 +255,16 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     http_status_code=status_code,
                     duration_ms=elapsed_ms,
                     trace_id=trace_id,
+                    user_id=user_id or None,
+                    session_id=session_id or None,
+                    client_ip=client_ip or None,
+                    request_size=trace_ctx.request_size or None,
+                    response_size=trace_ctx.response_size or None,
+                    business_code=business_code or None,
                 )
-            except UnicodeEncodeError:
-                pass
+            except UnicodeEncodeError as _exc:
+                import sys as _sys
+                _sys.stderr.write(f"[log-encoding-error] RESPONSE trace={trace_id[:12]} status={status_code} err={_exc}\n")
 
             # ES trace span（始终写入，不受静默影响）
             span = _build_trace_span(
@@ -224,9 +298,13 @@ class LoggingMiddleware(BaseHTTPMiddleware):
                     duration_ms=elapsed_ms,
                     trace_id=trace_id,
                     error=error_info[:200],
+                    user_id=user_id or None,
+                    session_id=session_id or None,
+                    client_ip=client_ip or None,
                 )
-            except UnicodeEncodeError:
-                pass
+            except UnicodeEncodeError as _exc:
+                import sys as _sys
+                _sys.stderr.write(f"[log-encoding-error] RESPONSE_ERROR trace={trace_id[:12]} err={_exc}\n")
 
             span = _build_trace_span(
                 method=method, path=path, url=str(request.url),

@@ -1,6 +1,11 @@
-"""CodeAgent — 代码示例生成、技术文档、沙箱执行
+"""CodeAgent — 代码示例生成、技术文档
 
-使用 PromptEngine 构建 prompt，支持工具调用。
+输入（由 Schema 约束）:
+  topic    — 编程任务描述（必填）
+  language — 编程语言（可选，默认 python）
+
+产出:
+  code_block — 生成的代码
 """
 
 import logging
@@ -19,17 +24,16 @@ logger = logging.getLogger(__name__)
 
 async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
     try:
-        topic = task_input.get("topic", task_input.get("query", ""))
-        language = task_input.get("language", "python")
-        run_code = task_input.get("run_code", False)
+        # ── 输入：只读 Schema 声明的字段 ──
+        topic: str = task_input["topic"]
+        language: str = task_input.get("language", "python")
+        run_code: bool = task_input.get("run_code", False)
 
-        # ── 用 PromptBuilder 构建 ──
+        # ── 业务逻辑 ──
         builder = PromptBuilder()
         builder.system("system.role", {"role": "技术写作者", "description": f"生成{language}代码示例"})
-
         builder.instructions("code.task", {"topic": topic, "language": language})
 
-        # 注入工具描述
         tool_descriptions = task_input.get("_tool_descriptions", "")
         if tool_descriptions:
             builder.context(f"\n可用工具：\n{tool_descriptions}")
@@ -46,34 +50,7 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
         content = extract_output(response_text)
         tokens = estimate_tokens(response_text)
 
-        output: dict = {
-            "content": content,
-            "language": language,
-            "type": "text",
-            "stats": {"code_blocks": content.count("```") // 2},
-        }
-
-        # 沙箱执行
-        if run_code and content:
-            code = _extract_code_block(content, language)
-            if code:
-                runner = CodeRunner()
-                if language in ("python", "py"):
-                    run_result = await runner.run_python(code)
-                elif language in ("javascript", "js", "node"):
-                    run_result = await runner.run_javascript(code)
-                    run_result.language = "javascript"
-                else:
-                    run_result = await runner.run_python(code)
-
-                output["execution"] = {
-                    "success": run_result.success,
-                    "stdout": run_result.stdout,
-                    "stderr": run_result.stderr,
-                    "error": run_result.error,
-                    "execution_time_ms": run_result.execution_time_ms,
-                }
-
+        # ── 产出 ──
         from ..result import agent_response
 
         return agent_response(
@@ -81,14 +58,16 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
             content=content,
             output_type="code",
             tokens_used=tokens,
-            output_extra=output,
+            output_extra={"language": language, "stats": {"code_blocks": content.count("```") // 2}},
+            output_fields={
+                "code_block": content,
+            },
             prompt_versions=composed.used_templates,
             thinking_steps=[{
                 "agent": "CodeAgent",
-                "action": "代码执行完成" if run_code else "代码生成完成",
+                "action": "代码生成完成",
                 "reasoning": f"生成 {language} 代码：{topic[:30]}...",
-                "output_summary": f"生成代码块 {content.count('```') // 2} 个" +
-                    (f"，执行结果：{'成功 ✓' if output.get('execution', {}).get('success') else '失败 ✗'}" if run_code else ""),
+                "output_summary": f"生成代码块 {content.count('```') // 2} 个",
                 "tokens_used": tokens,
                 "status": "done",
             }],
@@ -96,25 +75,3 @@ async def handle_code(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None 
     except Exception as e:
         logger.error("CodeAgent 执行失败: %s", e, exc_info=True)
         raise HandlerError(str(e), handler="CodeAgent") from e
-
-
-def _extract_code_block(text: str, language: str) -> str:
-    """从 markdown 响应中提取代码块"""
-    lang_markers = {
-        "python": ["```python", "```py", "```"],
-        "py": ["```python", "```py", "```"],
-        "javascript": ["```javascript", "```js", "```node", "```"],
-        "js": ["```javascript", "```js", "```node", "```"],
-        "node": ["```javascript", "```js", "```node", "```"],
-    }
-    markers = lang_markers.get(language, ["```"])
-
-    for marker in markers:
-        if marker in text:
-            parts = text.split(marker, 1)
-            if len(parts) > 1:
-                after = parts[1]
-                if "```" in after:
-                    return after.split("```", 1)[0].strip()
-
-    return text.strip()

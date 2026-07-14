@@ -293,11 +293,13 @@ async def conversation_chat(
                 )
 
                 # 直连 Agent Pipeline，通过同一条 SSE 流推送
+                # 传入 asst_msg.id 让 parts 写入同一消息（否则 stream_core 会新建消息）
                 async for agent_event in run_agent_sse_generator(
                     user_prompt=user_prompt,
                     skill_context=skill_context,
                     current_user=current_user,
                     http_trace_id=http_trace_id,
+                    message_id=asst_msg.id,
                     conversation_id=conversation_id,
                 ):
                     yield agent_event

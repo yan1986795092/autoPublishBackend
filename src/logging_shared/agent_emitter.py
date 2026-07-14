@@ -5,8 +5,10 @@ from typing import Any, Callable
 
 from .agent_events import AgentEvent, TokenUsage, calculate_cost_usd
 from .config import get_logger
-from .agent_events import AgentEvent, TokenUsage, calculate_cost_usd
-from .config import get_logger
+from .fields import (
+    CLIENT_IP, USER_ID, BUSINESS_CODE, ERROR_CODE,
+    REQUEST_SIZE, RESPONSE_SIZE,
+)
 
 
 class AgentEventEmitter:
@@ -72,6 +74,13 @@ class AgentEventEmitter:
         event_dict = self._prepare_event(event)
         self._emit_console(event_dict)
         (es_writer or self._es_writer)(event_dict)
+        # P3.3: 双写到新 Dispatcher
+        try:
+            from .adapters import agent_event_to_logrecord
+            from .dispatcher import get_dispatcher
+            get_dispatcher().emit(agent_event_to_logrecord(event))
+        except Exception:
+            pass  # Dispatcher 异常不阻塞业务
         return event_dict
 
     def emit_sync(
@@ -82,26 +91,23 @@ class AgentEventEmitter:
         event_dict = self._prepare_event(event)
         self._emit_console(event_dict)
         (es_writer or self._es_writer)(event_dict)
+        # P3.3: 双写到新 Dispatcher
+        try:
+            from .adapters import agent_event_to_logrecord
+            from .dispatcher import get_dispatcher
+            get_dispatcher().emit(agent_event_to_logrecord(event))
+        except Exception:
+            pass  # Dispatcher 异常不阻塞业务
         return event_dict
 
     def _emit_console(self, event_dict: dict[str, Any]) -> None:
-        """输出到控制台 — Phase 2 关键改动：取消 production 静默.
+        """输出到控制台 — 统一结构化路径。
 
-        取消 production 静默的理由：用户在事故复盘时，最需要看到的就是
-        生产上的 thought / tool_call。控制是否静默不再由 env 决定，
-        而由显式的 Sampler 配置（见 dispatcher.Sampler）。
+        所有环境走同一套结构化输出（_type="agent" + 全字段）。
+        level 过滤由 structlog filter_by_level 处理，emitter 不重复判断。
         """
         level = str(event_dict.get("level", "INFO")).upper()
         event_type = event_dict.get("event_type", "")
-
-        # production 仅保留 ERROR/WARN 的 level 阈值 — 与 D2 一致
-        if self._env == "production" and level not in ("WARNING", "ERROR"):
-            return  # D2 已选: production WARN/ERROR 进 stderr
-
-        if self._env == "production":
-            msg = event_dict.get("message", "") or event_type
-            self._logger.warning("agent %s: %s", event_type, msg)
-            return
 
         # Phase 2 关键改动：字段对齐 OTel（向后兼容保留原字段名）
         console_event: dict[str, Any] = {
@@ -118,6 +124,12 @@ class AgentEventEmitter:
             "trace_id": event_dict.get("trace_id", ""),
             "level": level,
             "agent_name": event_dict.get("agent_name", ""),  # 别名兼容
+            # P0 新增：请求上下文字段（使用 fields.py 常量）
+            USER_ID: event_dict.get("user_id", ""),
+            CLIENT_IP: event_dict.get("client_ip", ""),
+            "http_method": event_dict.get("http_method", ""),
+            "http_path": event_dict.get("http_path", ""),
+            BUSINESS_CODE: event_dict.get("business_code", ""),
         }
 
         # 直接输出完整内容，不截断
@@ -146,9 +158,9 @@ class AgentEventEmitter:
 
         try:
             self._logger.info(event_type, **console_event)
-        except UnicodeEncodeError:
-            # Phase 3 删除: 暂时保留, 但 Phase 3 替换为 [log-encoding-error] 警告
-            pass
+        except UnicodeEncodeError as _exc:
+            import sys as _sys
+            _sys.stderr.write(f"[log-encoding-error] agent_emit event={event_type} trace={console_event.get('trace_id','')[:12]} err={_exc}\n")
 
 
 _emitter_singleton: AgentEventEmitter | None = None

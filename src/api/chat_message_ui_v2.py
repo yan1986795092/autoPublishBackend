@@ -4,6 +4,7 @@
   1. migrate_legacy_result_to_parts() — 旧 result_json 读取时转换为一个 fake artifact part
   2. build_message_parts() — 从 DB 读 parts，或走迁移 shim
   3. build_message_response_v2() — 返回带 parts[] 的 MessageResponse
+  4. text→artifact 升级器（Task 2） — 通用升级函数，stream_core.py result 事件已用近似实现
 """
 
 from __future__ import annotations
@@ -11,7 +12,72 @@ import json
 import logging
 from typing import Any, Optional
 
+from .message_part_schema import ArtifactPart, ArtifactType, PartState, MessagePart
+
 logger = logging.getLogger(__name__)
+
+
+# 升级触发阈值（spec §2.3）：正文 >= 300 字才升级为 artifact
+UPGRADE_MIN_CONTENT_LENGTH = 300
+
+# 触发升级的 agent 类型（内容生成类，不是 reasoning 类）
+UPGRADE_ELIGIBLE_AGENTS = frozenset({
+    "WritingAgent", "FixAgent", "SEOAgent", "CodeAgent", "DiagramAgent", "ReviewAgent",
+})
+
+
+def should_upgrade_text_to_artifact(part: dict, agent_type: str = "") -> bool:
+    """判断 text part 是否应该升级为 artifact。
+
+    规则（来自 writing-engine spec §2.3）：
+    - type == "text"
+    - agent 属于内容生成类（WritingAgent / FixAgent / SEOAgent / CodeAgent / DiagramAgent / ReviewAgent）
+    - content 长度 >= 300 字（短文案可能是临时回答）
+
+    Args:
+        part: 单个 part dict（包含 type/content/agent）
+        agent_type: 当 part 自身缺 agent 字段时的兜底
+
+    Returns:
+        是否应该升级
+    """
+    if not isinstance(part, dict):
+        return False
+    if part.get("type") != "text":
+        return False
+    content = part.get("content", "")
+    if not isinstance(content, str) or len(content) < UPGRADE_MIN_CONTENT_LENGTH:
+        return False
+    agent = part.get("agent") or agent_type or ""
+    if agent not in UPGRADE_ELIGIBLE_AGENTS:
+        return False
+    return True
+
+
+def upgrade_text_to_artifact(
+    part: dict,
+    *,
+    title: str = "",
+    platform: str = "",
+    artifact_type: str = ArtifactType.BLOG.value,
+) -> dict:
+    """将 text part 升级为 artifact part（保持 id 不变）。
+
+    注：实际生产环境升级点在 stream_core.py:283（result 事件触发）。
+    本函数作为通用升级器，用于：
+    - 迁移 shim（老数据没 artifact 时回填）
+    - 单测
+    """
+    new_part = ArtifactPart(
+        id=part.get("id", ""),
+        state=PartState.DONE.value,
+        artifact_type=artifact_type,
+        body=part.get("content", ""),
+        title=title,
+        platform=platform,
+        structured=part.get("structured"),
+    )
+    return new_part.to_dict()
 
 
 def migrate_legacy_result_to_parts(result_json_str: str | None) -> list[dict]:
@@ -89,6 +155,22 @@ def migrate_legacy_result_to_parts(result_json_str: str | None) -> list[dict]:
                 "platform": output.get("platform"),
                 "structured": output.get("structured"),
             })
+
+    # 4. [Task 3] trigger-only 兜底
+    # 场景：result_json 只有 trigger（如用户触发创作但 pipeline 失败未生成 output），没有 output。
+    # 老逻辑：parts = [] → 前端按 conversation 气泡渲染 → 用户看到结果丢失
+    # 新设计：不再强制 shim 构造 artifact（避免凭空捏造内容），交给 Phase 4 的 is_generation 字段处理。
+    # Phase 4 会在 message 上显式标记 is_generation=True，前端按 generation 卡片渲染 + 显示 trigger 元信息。
+    # 此处仅留注释，不构造 part，保持数据真实性。
+    if not any(p["type"] == "artifact" for p in parts):
+        trigger = result.get("trigger")
+        if isinstance(trigger, dict) and trigger:
+            # 触发器存在但无 output → 用户触发了创作但结果丢失（极少发生）
+            # 由 Phase 4 的 is_generation 显式标记 + 前端 generation 卡片兜底渲染
+            logger.debug(
+                "migrate_legacy_result_to_parts: trigger-only 场景，由 Phase 4 is_generation 处理",
+                trigger_keys=list(trigger.keys()),
+            )
 
     # 4. plan（从 plan_json — 作为独立 part）
     plan_json_str = result.get("plan_json") or result.get("_plan")

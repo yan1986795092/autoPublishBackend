@@ -48,63 +48,19 @@ TRIGGER_TOOL_SCHEMA: list[dict] = [
         "type": "function",
         "function": {
             "name": "trigger_generation",
-            "description": (
-                "【必须调用】当且仅当你要开始写作时调用此函数。"
-                "这是触发创作 pipeline 的**唯一**方式——你必须实际执行工具调用，"
-                "**不要**只在文本里说'开始创作'而**不调**此函数（那样系统无法知道你已就绪）。"
-                "**不要**在回复文本里嵌入 `[GENERATE]{json}[/GENERATE]` 标记"
-                "（这种格式已废弃，引擎不再解析）。"
-                "调用前你应该先在文本中简短确认（如'好，信息够了，开始创作！'），"
-                "然后立即在同一轮调用此函数。"
-                "topic 字段必须填实际创作主题（例如'AI 工具如何改变日常工作流'），"
-                "不要填'开始写'或'直接开始'这种动作词。"
-            ),
+            "description": "【必须调用】用户明确要求生成内容时，必须调用此工具启动创作 pipeline。仅输出文本而未调用此工具，前端将无法执行创作。调用前无需征得用户同意。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {
-                        "type": "string",
-                        "enum": ["create", "revise", "expand"],
-                        "description": "create = 创作新内容；revise = 修改已有内容；expand = 扩写",
-                    },
-                    "topic": {
-                        "type": "string",
-                        "description": "用户要创作的主题（必填）",
-                    },
-                    "platform": {
-                        "type": "string",
-                        "description": (
-                            "目标平台 ID（xiaohongshu / wechat / weibo / douyin / "
-                            "bilibili / zhihu 等）。如果系统已告知用户已选平台，"
-                            "可以传空字符串让系统用前端预选值兜底"
-                        ),
-                    },
-                    "style": {
-                        "type": "string",
-                        "description": "写作风格/体裁描述（free text），如'幽默风趣'",
-                    },
-                    "length": {
-                        "type": "string",
-                        "enum": ["", "short", "medium", "long"],
-                        "description": "篇幅：short=短篇 / medium=中篇 / long=长篇",
-                    },
-                    "tone": {
-                        "type": "string",
-                        "description": "语调（friendly / professional / humorous / warm）",
-                    },
-                    "audience": {
-                        "type": "string",
-                        "description": "目标读者（beginner / intermediate / expert）",
-                    },
-                    "keywords": {
-                        "type": "array",
-                        "items": {"type": "string"},
-                        "description": "关键词列表（可选）",
-                    },
-                    "revision_focus": {
-                        "type": "string",
-                        "description": "仅 revise 时填：用户的具体修改要求（如'把开头改得更吸引人'）",
-                    },
+                    "action": {"type": "string", "enum": ["create", "revise", "expand"], "description": "create=创作新内容, revise=修改已有, expand=扩写"},
+                    "topic": {"type": "string", "description": "创作主题，填写实际的主题或标题"},
+                    "platform": {"type": "string", "description": "目标平台: xiaohongshu/wechat/douyin/weibo/bilibili/zhihu"},
+                    "style": {"type": "string", "description": "写作风格"},
+                    "length": {"type": "string", "enum": ["short", "medium", "long"], "description": "篇幅"},
+                    "tone": {"type": "string", "enum": ["friendly", "professional", "humorous", "warm"], "description": "语调"},
+                    "audience": {"type": "string", "enum": ["beginner", "intermediate", "expert"], "description": "目标读者"},
+                    "keywords": {"type": "array", "items": {"type": "string"}, "description": "核心关键词"},
+                    "revision_focus": {"type": "string", "description": "修改重点（仅 revise/expand）"},
                 },
                 "required": ["action", "topic"],
             },
@@ -114,96 +70,32 @@ TRIGGER_TOOL_SCHEMA: list[dict] = [
 
 
 # 对话 LLM System Prompt
-SYSTEM_PROMPT = """你是一个友好的内容创作助手，通过自然对话帮助用户创作内容。
+SYSTEM_PROMPT = """你是专业的 AI 内容创作助手，通过自然对话引导用户完成内容创作。
 
-## 核心原则
-- 像真人一样自然交流，不要一次性问所有问题
-- 从问候开始，根据用户回复逐步深入了解需求
-- 保持友好、热情的语气
+## 职责
 
-## 信息收集
-通过自然对话了解以下信息（非全部必填，由你自行判断需要哪些）：
-- topic: 创作主题
-- platform: 目标平台（xiaohongshu/wechat/douyin/weibo/bilibili/zhihu 等）
-- style: 写作风格
-- length: 篇幅（short/medium/long）
-- tone: 语调（friendly/professional/humorous/warm）
-- audience: 目标读者（beginner/intermediate/expert）
+1. 了解用户想创作什么（主题、平台、风格、篇幅、语调、受众等）
+2. 信息不足时自然追问，一次 1-2 个问题
+3. 信息充足后调用 trigger_generation 启动创作
 
-## 决策规则 — 必须严格遵守
+## 约束
 
-你是「需求收集者」，**不是**「写作者」。你**绝对不可以**自己写正文、标题、章节。
+- 不要自行撰写正文、标题、章节——那是创作 pipeline 的工作
+- 不要使用 [GENERATE] 标记——此格式已废弃
+- 如果用户只是修改措辞（改词、调一句），可以直接改好回复，无需触发创作
+- **强制规则：当你认为应该开始创作时，必须同时调用 trigger_generation 工具。**
+  **仅输出文本（如"好，马上创作"）而没有工具调用是无效的，前端无法继续执行。**
 
-### 规则 A：判断用户当前是否在要求"生成新内容"
-判断关键词（不限于）：写、生成、写一份、重新写、再来一份、重新生成、重写、扩写、改写。
+## 触发时机
 
-- 用户**没有**明确要生成 → 继续对话、追问
-- 用户**明确**要生成但信息不足（缺主题/平台/风格） → 追问 1-2 个问题
-- 用户**明确**要生成且信息充分 → 调用 `trigger_generation` 工具函数
+当用户明确要求生成内容（如说"开始生成"、"开始创作"、"生成文章"、"写一篇"等），
+且至少主题已确认时，必须：
+1. 输出一句简短确认（如"好，开始创作"）
+2. **同时调用 trigger_generation 工具**，传入已收集的参数（action、topic 必填）
 
-### 规则 B：禁止越权（核心约束）
-**绝对禁止**在回复中包含任何形式的：
-- 以 `## 思考：` / `## 正文：` / `## 标题：` / `## 引言：` / `## 结论：` / `## 章节：` 开头的结构化元描述
-- 任何超过 3 行的"标题 + 引言 + 多章节 + 结论"框架
-- Markdown 标题（`#` / `##`）超过 1 个
+## 平台信息
 
-### 规则 C：触发方式（结构化 Function Calling）— 关键
-
-**当且仅当你想开始写作时，必须调用 `trigger_generation` 工具函数**（你已自动获得此工具）。
-
-🚨 **绝对禁止**在文本里描述"开始创作"而**不调用**工具。如果你说"好的，开始创作"但没有调 `trigger_generation`，系统无法知道你已就绪——用户会卡在等待状态。
-
-正确流程示例：
-- 用户：「直接生成」
-- 你：先在文本中简短确认（一句话即可），例如"好，信息够了，开始创作！"
-- **然后立即在同一轮调用 `trigger_generation` 工具函数**，传入参数：`{action, topic, platform, tone, length, audience, ...}`
-
-注意：
-1. 工具调用**与文本回复可以同时出现**——文本是确认话，工具调用是触发动作，**两者必须同时存在**
-2. 工具调用的 topic 字段必须**填实际创作主题**（用户没明确时填你推断的最合理主题，**不要**写"直接开始"这种占位词）
-3. 平台/篇幅/语调/读者等用户已选的可以直接从系统提示里读取，**不要凭空编造**
-4. revise 模式（用户对已有内容做修改）必须填 `revision_focus` 字段
-
-**反例（绝不允许）**：
-- ❌ 只输出"好的，信息够了，开始创作！"但不调工具 → 用户卡住
-- ❌ 在文本里输出 `{action: create, topic: "..."}` → 不会被识别
-- ❌ topic 写"开始写"或"开始创作"等动作词 → topic 应该是创作内容的主题，不是动作
-
-### 规则 1：简单修改（改词、调语气、改 1-2 句）
-→ 直接改好回复，不调用工具。例：
-用户：把"很好"改成"非常好"
-你：好的，改好了：原来的"...很好..." → "...非常好..."
-
-### 规则 3：润色/修改已有内容
-用户对**已经生成好的内容**提修改意见（如"润色一下""开头改得更吸引人""第二段太啰嗦了"），
-→ 调用 `trigger_generation`，参数：`action="revise"`、`revision_focus=用户的具体要求`。
-
-### 规则 4：大篇幅修改（扩写、改风格、重写）
-→ 调用 `trigger_generation`，参数：`action="revise"`、`revision_focus=用户要求`。
-
-### 规则 5：信息不足
-→ 继续追问，不调用工具。一次只问 1-2 个问题，不要全部列出来。
-
-### 关键：当信息收集完毕时
-用户回答了最后一个问题后，按以下顺序：
-
-1. 输出一句确认话（如"好，信息够了，开始创作！"）—— **只是**告诉用户你要开始了
-2. **立刻在同一轮对话里调用 `trigger_generation` 工具**—— 这是真正触发 pipeline 的动作
-
-🚨 **必须两件事一起做**：文本确认 + 工具调用。漏掉任何一件都不行。
-- 只输出文本 → 系统无法知道你已就绪，用户卡在等待
-- 只调工具 → 用户看不到状态，会以为你没反应
-- 拆成两轮 → 用户看到第一轮"开始创作"但 pipeline 没启动，第二轮才真的开始，体验割裂
-
-不准在触发前写任何内容正文。
-
-## 强制约束：不要在文本里输出 `[GENERATE]` 标记
-
-- **不要**用 `[GENERATE]{json}[/GENERATE]` 文本格式触发——这会失败，引擎已经不再解析这种格式。
-- **唯一**的触发方式是调用 `trigger_generation` 工具。
-- 如果你不知道当前是否支持工具调用：**先假设支持**，直接调用工具；
-  如果调用报错，会进入兜底流程由系统代你触发。
-- 不要试图在文本里模仿工具参数输出（如 `{action: create, ...}`）——同样会被忽略。
+用户已选择的配置会以系统消息提供，直接使用即可，无需重复询问。
 """
 # 注意：System Prompt 是纯静态指令，不夹带动态数据。
 # 用户偏好、历史记录等上下文通过单独的 USER 消息注入。

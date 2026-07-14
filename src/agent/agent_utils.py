@@ -123,6 +123,9 @@ PLANNING_SYSTEM_PROMPT = f"""你是一个任务规划 Agent。请根据用户请
 - dependencies = ["B"] 表示：B 先执行，A 后执行（A 需要 B 的结果）
 - 每个 task 必须有至少一个 root（dependencies=[]）
 - **WebSearch 必须配合 SearchAnalyzer**：WebSearch 是根任务，SearchAnalyzer 依赖 WebSearch 的输出
+- **TitleAgent 始终添加**：在 WritingAgent 之后添加 TitleAgent 生成标题
+- **TagAgent 仅当有平台时添加**：用户指定了目标平台时，在 TitleAgent 之后添加 TagAgent 生成标签
+- **ReviewAgent 在 Title/Tag 之后**：审核应针对含标题和标签的完整文章
 - **搜索结果用于创作**：WebSearch → SearchAnalyzer → WritingAgent
 - **无搜索时**：WritingAgent → ReviewAgent → FixAgent
 - **代码任务**：CodeAgent → ReviewAgent
