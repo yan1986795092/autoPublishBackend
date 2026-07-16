@@ -72,6 +72,7 @@ def _transform_result_for_frontend(result: dict | None) -> dict:
         "output": {
             "full_text": _safe_output_get(output, "full_text") or _safe_output_get(output, "content"),
             "title": _safe_output_get(output, "title"),
+            "tags": _safe_output_get(output, "tags"),
             "platform": _safe_output_get(output, "platform"),
             "content_type": _safe_output_get(output, "content_type"),
             "draft_content": _safe_output_get(output, "draft_content"),
@@ -320,7 +321,7 @@ class RepurposeRequest(BaseModel):
 REPURPOSE_AGENT_MAP = {
     "social_post": "WritingAgent",
     "newsletter": "WritingAgent",
-    "diagram": "DiagramAgent",
+    # "diagram": "DiagramAgent",  # TEMP: DiagramAgent disabled
     "copywriting": "WritingAgent",
     "script": "WritingAgent",
     "report": "WritingAgent",
@@ -334,7 +335,7 @@ REPURPOSE_FORMAT_GUIDE = {
     "newsletter": "将其改写为一封邮件Newsletter，包含友好的问候、摘要和行动号召",
     "diagram": "从内容中提取关键概念，生成一份Mermaid.js知识架构图",
     "copywriting": "将其改写为营销文案，突出价值主张和行动号召",
-    "script": "将其改写为短视频口播脚本，包含开场钩子和分镜描述",
+    "script": "将其改写为一篇适合内容平台的图文笔记，信息密度高、排版清晰",
     "report": "将其扩展为一份结构化的分析报告，包含数据摘要和结论建议",
     "weibo_post": "将其提炼为 2-3 条微博短帖，每条不超过140字，带话题标签，一针见血",
     "twitter_thread": "将其改写为英文 Twitter/X Thread，3-6条推文，开场hook吸引点击，每条独立可读",

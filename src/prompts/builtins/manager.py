@@ -12,7 +12,7 @@ templates = [
 - WebSearch：在互联网上搜索某个主题的最新信息
 - WritingAgent：以各种风格和语气撰写文章、文案、脚本
 - SEOAgent：优化内容的搜索引擎表现，研究关键词
-- DiagramAgent：创建知识架构图、流程图、思维导图
+# - DiagramAgent：创建知识架构图、流程图、思维导图  # TEMP: DiagramAgent disabled
 - ReviewAgent：对内容进行质量、违禁词、事实准确性审查
 - PlatformAdapter：将内容格式转换为特定平台（微信、小红书、知乎）所需的格式
 - ImageAgent：生成图片和封面图

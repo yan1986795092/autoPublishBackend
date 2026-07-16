@@ -50,6 +50,8 @@ def build_render_payload(content: str, result: Any) -> dict[str, Any] | None:
         review = output.get("review_content")
         title = output.get("title")
         platform = output.get("platform")
+        tags = output.get("tags")
+        structured = output.get("structured")
         if body:
             payload["body"] = body
             payload["preview_text"] = body
@@ -61,6 +63,12 @@ def build_render_payload(content: str, result: Any) -> dict[str, Any] | None:
             payload["title"] = title
         if platform:
             payload["platform"] = platform
+        # 真实透传：merge_and_finish 现在直接把 tags 合到 final_output.structured 里，
+        # 但 output.tags 也保留（不删除，便于非 parts 路径直接读）。
+        if isinstance(tags, list) and tags:
+            payload["tags"] = [str(t) for t in tags if t]
+        if isinstance(structured, dict) and structured:
+            payload["structured"] = structured
 
     if result.get("_draftContent") and not payload.get("draft"):
         payload["draft"] = result["_draftContent"]

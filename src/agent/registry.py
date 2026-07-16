@@ -132,29 +132,30 @@ register(AgentCard(
     },
 ))
 
-register(AgentCard(
-    name="URLCrawler",
-    description="抓取并提取指定 URL 的内容。",
-    category="search",
-    model="deepseek-chat",
-    stage_label="搜索资料中",
-    stage_icon="🔍",
-    stage_color="blue",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "url": {"type": "string", "source": "param:url", "description": "要抓取的网页地址"},
-        },
-        "required": ["url"],
-    },
-    output_schema={
-        "type": "object",
-        "properties": {
-            "crawled_content": {"type": "string", "description": "抓取到的页面内容"},
-        },
-        "required": ["crawled_content"],
-    },
-))
+# TEMP: URLCrawler disabled
+# register(AgentCard(
+#     name="URLCrawler",
+#     description="抓取并提取指定 URL 的内容。",
+#     category="search",
+#     model="deepseek-chat",
+#     stage_label="搜索资料中",
+#     stage_icon="🔍",
+#     stage_color="blue",
+#     input_schema={
+#         "type": "object",
+#         "properties": {
+#             "url": {"type": "string", "source": "param:url", "description": "要抓取的网页地址"},
+#         },
+#         "required": ["url"],
+#     },
+#     output_schema={
+#         "type": "object",
+#         "properties": {
+#             "crawled_content": {"type": "string", "description": "抓取到的页面内容"},
+#         },
+#         "required": ["crawled_content"],
+#     },
+# ))
 
 register(AgentCard(
     name="WritingAgent",
@@ -256,10 +257,9 @@ register(AgentCard(
         "properties": {
             "review_text": {"type": "string", "description": "审核结论 + 主要问题 + 改进建议"},
             "passed": {"type": "boolean", "description": "审核是否通过"},
-            "score": {"type": "integer", "description": "总分 0-100"},
             "suggestions": {"type": "array", "items": {"type": "string"}, "description": "改进建议列表"},
         },
-        "required": ["review_text", "passed", "score"],
+        "required": ["review_text", "passed"],
     },
 ))
 
@@ -289,30 +289,31 @@ register(AgentCard(
     },
 ))
 
-register(AgentCard(
-    name="DiagramAgent",
-    description="创建知识图谱、流程图、思维导图。",
-    category="diagram",
-    model="deepseek-chat",
-    stage_label="图表生成中",
-    stage_icon="📊",
-    stage_color="pink",
-    input_schema={
-        "type": "object",
-        "properties": {
-            "topic": {"type": "string", "source": "param:topic", "description": "图表主题"},
-            "diagram_type": {"type": "string", "source": "param:diagram_type", "enum": ["flowchart", "mindmap", "knowledge_graph", "sequence"], "description": "图表类型", "optional": True},
-        },
-        "required": ["topic"],
-    },
-    output_schema={
-        "type": "object",
-        "properties": {
-            "diagram": {"type": "string", "description": "图表定义（Mermaid/JSON）"},
-        },
-        "required": ["diagram"],
-    },
-))
+# TEMP: DiagramAgent disabled
+# register(AgentCard(
+#     name="DiagramAgent",
+#     description="创建知识图谱、流程图、思维导图。",
+#     category="diagram",
+#     model="deepseek-chat",
+#     stage_label="图表生成中",
+#     stage_icon="📊",
+#     stage_color="pink",
+#     input_schema={
+#         "type": "object",
+#         "properties": {
+#             "topic": {"type": "string", "source": "param:topic", "description": "图表主题"},
+#             "diagram_type": {"type": "string", "source": "param:diagram_type", "enum": ["flowchart", "mindmap", "knowledge_graph", "sequence"], "description": "图表类型", "optional": True},
+#         },
+#         "required": ["topic"],
+#     },
+#     output_schema={
+#         "type": "object",
+#         "properties": {
+#             "diagram": {"type": "string", "description": "图表定义（Mermaid/JSON）"},
+#         },
+#         "required": ["diagram"],
+#     },
+# ))
 
 register(AgentCard(
     name="CodeAgent",

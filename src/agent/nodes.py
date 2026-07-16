@@ -141,8 +141,9 @@ def _build_fallback_plan(user_request: str, platform_code: str | None = None) ->
     # 简易关键词 → Agent 映射
     if any(kw in text for kw in ["代码", "脚本", "程序", "写一个", "python", "java", "javascript", "function"]):
         suggested = ["code", "review"]
-    elif any(kw in text for kw in ["图表", "架构图", "流程图", "mermaid", "diagram"]):
-        suggested = ["writing", "diagram", "review"]
+    # TEMP: DiagramAgent disabled
+    # elif any(kw in text for kw in ["图表", "架构图", "流程图", "mermaid", "diagram"]):
+    #     suggested = ["writing", "diagram", "review"]
     elif any(kw in text for kw in ["搜索", "热点", "热搜", "查", "最新", "趋势", "news", "trending"]):
         suggested = ["search", "analysis", "writing", "review", "fix"]
     elif any(kw in text for kw in ["分析", "url", "链接", "网站", "网页", "抓取"]):
@@ -342,14 +343,6 @@ async def _publish_streaming_event(state: AgentGraphState, event_type: str, data
             elif event_type == "result":
                 # FIX: 节点出 content 也能走此 path (较少用, 但兜底)
                 task_queue.complete_task(task_id, data)
-            elif event_type == "preview_sync":
-                # PreviewSync 节点：直接发布到 EventBus，stream_core 识别并推送到前端预览
-                from .workflow.task_queue import event_bus, StreamEvent
-                await event_bus.publish(StreamEvent(
-                    task_id=task_id,
-                    event_type="preview_sync",
-                    data=data,
-                ))
         except Exception as e:
             logger.warning("发布流式事件失败 (event_type=%s): %s", event_type, e)
 
@@ -461,7 +454,10 @@ def _post_process_context(agent_type: str, result: dict, store: Any, state: Agen
 # ── 最小规则兜底：仅在 LLM 理解完全失败时使用 ──
 
 def _build_fallback_understanding(user_request: str, context: dict) -> dict:
-    """最小规则兜底：LLM 理解失败时，纯关键词检测语言和平台"""
+    """最小规则兜底：LLM 理解失败时，纯关键词检测语言和平台
+
+    注意：也使用前端 preferences 填充 slots，避免用户设置的参数丢失。
+    """
     text = user_request.strip()
     has_chinese = bool(re.search(r'[一-鿿]', text))
 
@@ -469,15 +465,21 @@ def _build_fallback_understanding(user_request: str, context: dict) -> dict:
     platform = context.get("platform") or detect_platform(text)
     platform_name = get_names_map().get(platform, "") if platform else ""
 
+    # 从前端 preferences 获取已设置的参数（兜底逻辑也要保留用户选择）
+    preferences = context.get("preferences", {})
+    _preference_tone = preferences.get("tone") if isinstance(preferences, dict) else None
+    _preference_audience = preferences.get("audience") if isinstance(preferences, dict) else None
+    _preference_length = preferences.get("length") if isinstance(preferences, dict) else None
+
     return {
         "intent": {"coarse": "CREATE", "fine": "generate content"},
         "slots": {
             "content_type": "文章",
             "domain": "其他",
             "creativity_level": "medium",
-            "length_hint": "medium",
-            "tone": None,
-            "audience": None,
+            "length_hint": _preference_length or "medium",
+            "tone": _preference_tone,
+            "audience": _preference_audience,
         },
         "missing_slots": [],
         "cleaned_prompt": user_request,
@@ -575,6 +577,40 @@ async def understand_intent(state: AgentGraphState) -> dict:
         span.set_attribute("agent.safety", str(understanding["safety"]))
         span.set_status("OK")
 
+        # ── 前端参数优先：preferences 兜底 LLM 解析值 ──────────────────────────────
+        # 前端 preferences（creativity/length/tone/audience）应优先于 LLM 独立解析的 slots
+        # 这样用户手动设置的参数不会被 LLM 的语义推断覆盖
+        # 注意：slots 仍用于 LLM 内部的 plan_tasks 决策，但 reasoning 输出优先用 preferences
+        preferences = context.get("preferences", {})
+        _preference_tone = preferences.get("tone") if isinstance(preferences, dict) else None
+        _preference_audience = preferences.get("audience") if isinstance(preferences, dict) else None
+        _preference_length = preferences.get("length") if isinstance(preferences, dict) else None
+
+        # 前端参数中文标签映射（用于显示）
+        _TONE_LABELS = {
+            "friendly": "友好",
+            "professional": "专业",
+            "humorous": "幽默",
+            "warm": "温暖",
+            "authoritative": "权威",
+            "casual": "随意",
+        }
+        _AUDIENCE_LABELS = {
+            "beginner": "初学者",
+            "intermediate": "进阶",
+            "expert": "专家",
+        }
+        _LENGTH_LABELS = {
+            "short": "短篇",
+            "medium": "中篇",
+            "long": "长篇",
+        }
+
+        def _label(key: str | None, mapping: dict) -> str:
+            if not key:
+                return ""
+            return mapping.get(key, key)
+
         # Emit reasoning 事件（发送 LLM 理解分析的完整结果）
         intent_info = understanding.get("intent", {})
         slots = understanding.get("slots", {})
@@ -587,12 +623,19 @@ async def understand_intent(state: AgentGraphState) -> dict:
             reasoning_parts.append(f"📍 目标平台：{platform_name}")
         if understanding.get("cleaned_prompt"):
             reasoning_parts.append(f"💬 核心需求：{understanding['cleaned_prompt'][:100]}")
-        if slots.get("tone"):
-            reasoning_parts.append(f"🎨 写作风格：{slots['tone']}")
-        if slots.get("length_hint"):
-            reasoning_parts.append(f"📐 篇幅要求：{slots['length_hint']}")
-        if slots.get("audience"):
-            reasoning_parts.append(f"👥 目标读者：{slots['audience']}")
+        # 优先用前端 preferences，再用 LLM 解析值（兜底）
+        # tone: 前端优先，用户手动设置的不会被 LLM 语义推断覆盖
+        display_tone = _label(_preference_tone, _TONE_LABELS) or slots.get("tone", "")
+        if display_tone:
+            reasoning_parts.append(f"🎨 写作风格：{display_tone}")
+        # length: 同上
+        display_length = _label(_preference_length, _LENGTH_LABELS) or slots.get("length_hint", "")
+        if display_length:
+            reasoning_parts.append(f"📐 篇幅要求：{display_length}")
+        # audience: 同上
+        display_audience = _label(_preference_audience, _AUDIENCE_LABELS) or slots.get("audience", "")
+        if display_audience:
+            reasoning_parts.append(f"👥 目标读者：{display_audience}")
         if understanding.get("language"):
             reasoning_parts.append(f"🌐 语言：{understanding['language']}")
         reasoning_parts.append(f"🔒 安全检查：{'✅ 通过' if safety else '❌ 未通过'}")
@@ -851,6 +894,7 @@ Output ONLY the JSON plan, no extra text."""
         # 自动修正依赖链（防止 LLM 漏设依赖导致并行错误）
         # 从 registry 的 CATEGORY_DEPENDENCY_RULES 推断
         tasks = plan.get("tasks", [])
+        task_map = {t["id"]: t for t in tasks}
 
         # 按类别分组 task_id（用于依赖注入）
         _category_task_ids: dict[str, list[str]] = {}
@@ -870,13 +914,95 @@ Output ONLY the JSON plan, no extra text."""
             if tid.startswith("auto-"):
                 _auto_ids.add(tid)
 
-        # "search" 类任务（WebSearch/URLCrawler）始终为根任务，不依赖任何人
+        # ── 注入缺失的 ReviewAgent ──
+        # 当计划有 FixAgent 但无 ReviewAgent 时自动注入，
+        # 确保 FixAgent 在初审之后运行（而非直接空转后再由 review-fix 循环补复审）
+        _has_fix = any(
+            get_card(t.get("agent_type", "")) and get_card(t.get("agent_type", "")).category == "fix"
+            for t in tasks
+        )
+        _has_review = any(
+            get_card(t.get("agent_type", "")) and get_card(t.get("agent_type", "")).category == "review"
+            for t in tasks
+        )
+        if _has_fix and not _has_review:
+            _writing_ids = _category_task_ids.get("writing", [])
+            _title_tag_ids = _category_task_ids.get("title_tag", [])
+            _review_dep_ids = _writing_ids + _title_tag_ids
+            _review_dep = _review_dep_ids[-1] if _review_dep_ids else ""
+            _review_id = f"auto-inject-review-{uuid.uuid4()}"
+            tasks.append({
+                "id": _review_id,
+                "agent_type": "ReviewAgent",
+                "input": {"topic": plan.get("goal", ""), "_skip_cache": True},
+                "dependencies": [_review_dep] if _review_dep else [],
+                "can_parallel_with": [],
+                "retry_on_low_quality": False,
+                "priority": "medium",
+                "config": {"reasoning": "auto-inject: FixAgent 缺少 ReviewAgent", "priority": len(tasks)},
+            })
+            _auto_ids.add(_review_id)
+            _category_task_ids.setdefault("review", []).append(_review_id)
+            logger.info("自动注入缺失的 ReviewAgent (id=%s, dep=%s)", _review_id, _review_dep or "无")
+            # 让所有 FixAgent 依赖这个新注入的 ReviewAgent
+            for _t in tasks:
+                _tc = get_card(_t.get("agent_type", ""))
+                if _tc and _tc.category == "fix":
+                    _curr_deps = _t.setdefault("dependencies", [])
+                    if _review_id not in _curr_deps:
+                        _curr_deps.append(_review_id)
+                        logger.info("FixAgent 依赖注入: %s -> %s", _t.get("agent_type"), _review_id)
+
+        # "search" 类任务（WebSearch）始终为根任务，不依赖任何人
         # 防止 LLM 误设 WebSearch 依赖 SearchAnalyzer 等反向依赖
         for t in tasks:
             card = get_card(t.get("agent_type", ""))
             if card and card.category == "search":
                 t["dependencies"] = []
+            # 清理非字符串依赖（LLM 偶尔会输出错误格式如 {id: "task-1"}）
+            deps = t.get("dependencies", [])
+            if any(not isinstance(d, str) for d in deps):
+                clean_deps = [d for d in deps if isinstance(d, str)]
+                if clean_deps != deps:
+                    logger.warning("清理 task '%s' 的非字符串依赖: %s -> %s", t.get("id"), deps, clean_deps)
+                t["dependencies"] = clean_deps
 
+        # 拓扑排序函数：确保依赖任务在被依赖任务之前
+        def _topo_sort(tasks_to_sort: list[dict]) -> list[dict]:
+            """拓扑排序：确保依赖任务在被依赖任务之前"""
+            _task_map = {t["id"]: t for t in tasks_to_sort}
+            _in_degree = {t["id"]: 0 for t in tasks_to_sort}
+            _adj = {t["id"]: [] for t in tasks_to_sort}
+            
+            for t in tasks_to_sort:
+                for dep in t.get("dependencies", []):
+                    # 跳过非字符串依赖（LLM 偶尔会输出错误格式）
+                    if not isinstance(dep, str):
+                        continue
+                    if dep in _adj:
+                        _adj[dep].append(t["id"])
+                        _in_degree[t["id"]] += 1
+            
+            _queue = [tid for tid, deg in _in_degree.items() if deg == 0]
+            _sorted_ids = []
+            while _queue:
+                # 按原始列表顺序排序，保证输出确定性
+                _queue.sort(key=lambda x: tasks_to_sort.index(_task_map[x]))
+                tid = _queue.pop(0)
+                _sorted_ids.append(tid)
+                for nxt in _adj.get(tid, []):
+                    _in_degree[nxt] -= 1
+                    if _in_degree[nxt] == 0:
+                        _queue.append(nxt)
+            
+            # 如果有环，保留原顺序
+            if len(_sorted_ids) != len(tasks_to_sort):
+                logger.warning("拓扑排序发现环，保留原顺序")
+                return tasks_to_sort
+            
+            return [_task_map[tid] for tid in _sorted_ids]
+
+        # 修正缺失的依赖（但使用拓扑排序后的顺序）
         for t in tasks:
             card = get_card(t.get("agent_type", ""))
             if not card:
@@ -887,8 +1013,16 @@ Output ONLY the JSON plan, no extra text."""
                 dep_ids = _category_task_ids.get(dep_cat, [])
                 # 过滤掉 auto-fixer 刚注入的 id，避免循环依赖
                 filtered = [did for did in dep_ids if did not in _auto_ids]
-                if filtered and filtered[-1] not in deps:
-                    deps.append(filtered[-1])
+                # 使用拓扑排序后的第一个依赖（而不是最后一个）
+                # 这样即使 LLM 输出顺序混乱，也能保证依赖正确
+                if filtered:
+                    # 重新按拓扑顺序排列 filtered，提取 id
+                    sorted_tasks = _topo_sort([task_map[did] for did in filtered if did in task_map])
+                    sorted_dep_id = sorted_tasks[0]["id"] if sorted_tasks else None
+                    if sorted_dep_id and sorted_dep_id not in deps:
+                        deps.append(sorted_dep_id)
+                        logger.info("自动修正依赖: %s -> %s (category=%s)", 
+                                   t.get("agent_type"), sorted_dep_id, card.category)
 
         # 清理 task 依赖：剔除自引用（task 写自己为 dep）和循环引用
         # LLM 偶尔会误把"dep: 0"写到 task[1] 上，导致整条链死锁
@@ -909,6 +1043,12 @@ Output ONLY the JSON plan, no extra text."""
                 logger.info("清理 task[%d] %s 的自引用依赖: %s -> %s",
                             _i, _t.get("agent_type", "?"), _deps, _clean_deps)
                 _t["dependencies"] = _clean_deps
+
+        # 按拓扑排序重新排列任务列表，确保依赖任务在被依赖任务之前执行
+        _sorted_tasks = _topo_sort(list(plan.get("tasks", [])))
+        if _sorted_tasks != plan.get("tasks", []):
+            logger.info("拓扑排序后任务顺序: %s", [t.get("agent_type") for t in _sorted_tasks])
+            plan["tasks"] = _sorted_tasks
 
         updates = {
             "plan": plan,
@@ -957,16 +1097,44 @@ Output ONLY the JSON plan, no extra text."""
         })
 
         # ── Layer 4: 冻结 plan (retry→patch→replan 升级协议的状态基础) ──
-        try:
+        # 注意：plan 在出 plan_tasks 之前可能经过多次修改（normalize/auto-fix/clean），
+        # 必须对修改后的 plan 重新验证，防止引入循环依赖等拓扑错误。
+        pyd_plan = dict_to_plan(plan)
+        if pyd_plan is None:
+            # dict_to_plan 校验失败（修改后 plan 出现环/孤立依赖），回退到 fallback
+            logger.warning(
+                "plan_tasks: 冻结前 plan 校验失败，使用兜底方案. "
+                "plan tasks=%d", len(plan.get("tasks", []) if plan else []),
+            )
+            plan = _build_fallback_plan(cleaned_prompt, detected_platform)
+            updates["plan"] = plan
             pyd_plan = dict_to_plan(plan)
-            frozen = FrozenPlan.freeze(pyd_plan)
-            updates["frozen_plan"] = frozen.to_dict()
-            updates["plan_version"] = frozen.version_hash
-        except Exception as _e:
-            # 冻结失败不影响 plan 本身使用, 仅记录
-            logger.warning("plan freeze failed (non-fatal)", error=str(_e)[:200])
+        if pyd_plan is None:
+            # 极端情况下 fallback 也失败，跳过冻结
+            logger.error("plan_tasks: 连 fallback plan 都无法冻结，跳过 FrozenPlan.freeze")
             updates["frozen_plan"] = None
             updates["plan_version"] = None
+        else:
+            # 重新验证（修改后的 plan 可能引入了环或孤立依赖）
+            from .plan_validator import validate_plan as _validate_plan
+            vresult = _validate_plan(pyd_plan)
+            if not vresult.valid:
+                logger.warning(
+                    "plan_tasks: 校验发现 issues（极少数情况），使用 fallback. issues=%s",
+                    vresult.issues,
+                )
+                plan = _build_fallback_plan(cleaned_prompt, detected_platform)
+                updates["plan"] = plan
+                pyd_plan = dict_to_plan(plan)
+            try:
+                frozen = FrozenPlan.freeze(pyd_plan)
+                updates["frozen_plan"] = frozen.to_dict()
+                updates["plan_version"] = frozen.version_hash
+            except Exception as _e:
+                # 冻结失败不影响 plan 本身使用, 仅记录
+                logger.warning("plan freeze failed (non-fatal)", error=str(_e)[:200])
+                updates["frozen_plan"] = None
+                updates["plan_version"] = None
 
         # plan_tasks 成功生成 plan 时设置 plan_valid=True
         # 这样 _after_validate 条件边能正确路由到 execute
@@ -1292,7 +1460,6 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
 
         # ── Review-Fix 循环检测（最多 2 轮，每批只允许生成一轮，防止指数爆炸） ──
         _MAX_REVIEW_LOOPS = 2
-        _disable_review_loop = str(state.get("context", {}).get("action") or "").lower() == "revise"
 
         # 从 task_queue 中计算当前 review-fix 轮数，不依赖 state 累积
         # （因为 LangGraph 状态合并可能因 TypedDict 列表/字典 reducer 问题导致
@@ -1308,12 +1475,23 @@ async def execute_task_batch(state: AgentGraphState) -> dict:
         _review_fix_cycles = _cycle_from_queue
         _loop_already_created = state.get("_loop_created_in_cycle", False)
 
+        # 调试日志：打印当前审核循环状态
+        _context_action = str(state.get("context", {}).get("action") or "").lower()
+        _last_review_passed = state.get("_last_review_passed", False)
+        logger.info(
+            "[DEBUG] Review-Fix 循环状态: action=%s, _review_fix_cycles=%d, _loop_already_created=%s, _last_review_passed=%s, completed_FixAgent=%s",
+            _context_action, _review_fix_cycles, _loop_already_created, _last_review_passed,
+            [tid for tid in completed if task_results.get(tid, {}).get("agent_type") == "FixAgent"]
+        )
+
         loop_new_tasks: list[dict] = []
+        # 第一次润色后强制追加审核（_review_fix_cycles == 0 表示还没有进行过复审）
+        # 后续轮次（_review_fix_cycles > 0）才根据 _last_review_passed 决定
+        _force_review_after_first_polish = _review_fix_cycles == 0 and not _loop_already_created
         if (
-            not _disable_review_loop
-            and _review_fix_cycles < _MAX_REVIEW_LOOPS
+            _review_fix_cycles < _MAX_REVIEW_LOOPS
             and not _loop_already_created
-            and not _last_review_passed
+            and (not _last_review_passed or _force_review_after_first_polish)
         ):
             # 找本轮刚完成的最新 FixAgent（按 task_queue 顺序取最后一个）
             fix_candidates = [
@@ -1459,10 +1637,12 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 if context.get("platform_quality_check"):
                     t_input["_platform_quality_check"] = context["platform_quality_check"]
                 if "content_type" not in t_input and context.get("platform"):
-                    from .platform_profile import get_profile
+                    from .platform_profile import get_profile, get_content_genre
                     profile = get_profile(platform_code)
                     if profile:
                         t_input["content_type"] = platform_code
+                        # 体裁信息注入（图文/视频脚本/音频脚本）
+                        t_input["_content_genre"] = profile.get("content_genre", "text")
 
             understanding = state.get("understanding", {})
             slots = understanding.get("slots", {}) if understanding else {}
@@ -1509,6 +1689,10 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
 
             # Emit stage:started 事件（在缓存检查之前，确保前端 timeline 一致性）
             review_round = task_input.get("_review_round", 0)
+            logger.info(
+                "[DEBUG stage:started] agent=%s, _review_round=%d, task_id=%s",
+                agent_type, review_round, task.get("id") if task else "N/A"
+            )
             stage_data = {
                 "agent": agent_type,
                 "label": get_stage_label(agent_type),
@@ -1582,11 +1766,11 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                     "JudgeAgent": "review",
                     "CriticAgent": "review",
                     "WebSearch": "search",
-                    "URLCrawler": "search",
+                    # "URLCrawler": "search",  # TEMP: URLCrawler disabled
                     "SearchAnalyzer": "search",
                     "SEOAgent": "body",
                     "CodeAgent": "body",
-                    "DiagramAgent": "body",
+                    # "DiagramAgent": "body",  # TEMP: DiagramAgent disabled
                     "AnalysisAgent": "review",
                 }
                 _agent_channel = _CHANNEL_MAP.get(agent_type, "body")
@@ -1786,7 +1970,7 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                 pass
 
             # 沉淀记忆（仅对内容产出型 Agent）
-            if _uid and agent_type in ("WritingAgent", "WebSearch", "SEOAgent", "DiagramAgent"):
+            if _uid and agent_type in ("WritingAgent", "WebSearch", "SEOAgent"):  # TEMP: DiagramAgent disabled
                 try:
                     from src.memory import memory_manager
                     await memory_manager.remember(
@@ -2136,12 +2320,15 @@ async def validate_plan_node(state: AgentGraphState) -> dict:
             # 重新 hash 当前 plan, 与 frozen 的 version_hash 比较
             from .plan_validator import dict_to_plan
             current_plan = dict_to_plan(plan)
-            current_frozen = FrozenPlan.freeze(current_plan)
-            if current_frozen.version_hash != frozen.version_hash:
-                issues.append(
-                    f"plan 拓扑在 freeze 后被修改 "
-                    f"(frozen={frozen.version_hash}, current={current_frozen.version_hash})"
-                )
+            if current_plan is None:
+                issues.append("plan 校验失败（dict_to_plan 返回 None，可能存在循环依赖）")
+            else:
+                current_frozen = FrozenPlan.freeze(current_plan)
+                if current_frozen.version_hash != frozen.version_hash:
+                    issues.append(
+                        f"plan 拓扑在 freeze 后被修改 "
+                        f"(frozen={frozen.version_hash}, current={current_frozen.version_hash})"
+                    )
         except Exception as e:
             logger.debug("frozen_plan verify skipped", error=str(e)[:100])
 
@@ -2165,7 +2352,11 @@ async def validate_plan_node(state: AgentGraphState) -> dict:
         from src.agent.plan_frozen import FrozenPlan
         from .plan_validator import dict_to_plan
         current_pydantic_plan = dict_to_plan(plan)
-        FrozenPlan.freeze(current_pydantic_plan)
+        if current_pydantic_plan is None:
+            issues.append("plan 拓扑校验失败：dict_to_plan 返回 None（极可能存在循环依赖）")
+            logger.warning("validate_plan_node: dict_to_plan 返回 None, plan 拓扑异常")
+        else:
+            FrozenPlan.freeze(current_pydantic_plan)
     except ValueError as cycle_err:
         issues.append(str(cycle_err))
         logger.warning("validate_plan_node 检测到环形依赖: %s", cycle_err)
@@ -2265,102 +2456,6 @@ async def replan_plan_node(state: AgentGraphState) -> dict:
 
     result["plan_valid"] = True  # plan_tasks 已自校验过
     return result
-
-
-async def preview_sync_node(state: AgentGraphState) -> dict:
-    """PreviewSync 节点 — 收集标题、标签、正文，推送到前端预览面板
-
-    在 execute_task_batch 执行完成后、merge_and_finish 之前运行。
-    纯数据聚合，不调用 LLM。收集的数据供前端实时预览使用。
-    """
-    # 发 stage:started 让前端 timeline 可见
-    await _publish_streaming_event(state, "stage", {
-        "agent": "PreviewSync",
-        "label": "预览同步中",
-        "icon": "📄",
-        "status": "started",
-        "timestamp": time.time(),
-    })
-    _ps_start = time.time()
-
-    task_results = dict(state.get("task_results", {}))
-    _shared = state.get("_shared_results", {})
-    for _k, _v in _shared.items():
-        if _k not in task_results:
-            task_results[_k] = _v
-
-    title = ""
-    tags: list[str] = []
-    body = ""
-
-    # 从 output_fields 提取 TitleAgent 的标题、TagAgent 的标签
-    for tid in reversed(list(task_results.keys())):
-        result = task_results.get(tid, {})
-        agent_type = result.get("agent_type", "")
-        output = result.get("output", {})
-        output_fields = output.get("output_fields", {}) if isinstance(output, dict) else {}
-
-        if agent_type == "TitleAgent" and output_fields.get("article_title"):
-            title = output_fields["article_title"]
-        if agent_type == "TagAgent" and output_fields.get("tags"):
-            raw_tags = output_fields["tags"]
-            if isinstance(raw_tags, list):
-                tags = [str(t) for t in raw_tags if t]
-
-    # 正文优先级：FixAgent > ReviewAgent(with fix) > WritingAgent
-    content_candidates: list[tuple[int, str]] = []
-    for tid in reversed(list(task_results.keys())):
-        result = task_results.get(tid, {})
-        agent_type = result.get("agent_type", "")
-        output = result.get("output", {})
-        if not isinstance(output, dict):
-            continue
-        content = output.get("content", "") or ""
-        if not content or len(content.strip()) < 50:
-            continue
-        if agent_type == "FixAgent":
-            content_candidates.append((0, content))   # 最高优先级
-        elif agent_type == "ReviewAgent":
-            fixed = output.get("fixed_content", "")
-            if fixed:
-                content_candidates.append((1, fixed))
-        elif agent_type == "WritingAgent":
-            content_candidates.append((2, content))   # 兜底
-
-    content_candidates.sort(key=lambda x: x[0])  # 按优先级排序
-    if content_candidates:
-        body = content_candidates[0][1]
-
-    # 去正文里重复的"标题"前缀（FixAgent 当前会在正文开头加一行 **标题：xxx**，
-    # 但 title 字段已由 TitleAgent 独立产出，不应在正文中再次出现）。
-    body = strip_leading_title_block(body or "")
-
-    preview_data = {
-        "title": title,
-        "tags": tags,
-        "body": body,
-    }
-
-    # 发布 preview_sync 事件到前端（让右侧预览面板直接消费）
-    await _publish_streaming_event(state, "preview_sync", preview_data)
-
-    # 发 stage:completed
-    await _publish_streaming_event(state, "stage", {
-        "agent": "PreviewSync",
-        "status": "completed",
-        "duration": round(time.time() - _ps_start, 2),
-        "timestamp": time.time(),
-    })
-
-    logger.info(
-        "预览同步完成: title=%s tags=%d body=%d字",
-        title[:30] if title else "(无)", len(tags), len(body),
-    )
-
-    return {
-        "_preview_data": preview_data,
-        "_loop_created_in_cycle": False,  # 重置循环标志，准备下次执行
-    }
 
 
 async def merge_and_finish(state: AgentGraphState) -> dict:
@@ -2506,7 +2601,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             full_text_parts = [primary_content]
 
         # 输出的 Agent 类型：只有内容产出型 Agent 进入预览
-        _OUTPUT_AGENTS = {"WritingAgent", "ReviewAgent", "FixAgent", "CodeAgent", "DiagramAgent"}
+        _OUTPUT_AGENTS = {"WritingAgent", "ReviewAgent", "FixAgent", "CodeAgent"}  # TEMP: DiagramAgent disabled
         for task in task_queue:
             tid = task.get("id", "")
             result = task_results.get(tid, {})
@@ -2531,20 +2626,35 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
         elif failed > 0:
             status = "partial"
 
-        # 提取标题 + 标签：严格走 TitleAgent / TagAgent 的产物（_preview_data 由 preview_sync_node
-        # 从 task_results 的 output_fields 聚合而来）。正文首行兜底只在极个别没有 TitleAgent 的场景使用。
+        # 提取标题 + 标签：从 task_results 的 output_fields / structured 聚合（TitleAgent/TagAgent 的产物）
         _title = ""
         _tags: list[str] = []
-        _preview = state.get("_preview_data", {}) or {}
-        if _preview.get("title"):
-            _title = _preview["title"]
-        else:
+        for tid in reversed(list(task_results.keys())):
+            result = task_results.get(tid, {})
+            agent_type = result.get("agent_type", "")
+            output = result.get("output", {})
+            if not isinstance(output, dict):
+                continue
+            structured = output.get("structured", {}) or {}
+            if agent_type == "TitleAgent" and not _title:
+                _title = str(structured.get("title", "") or output.get("article_title", ""))
+            if agent_type == "TagAgent" and not _tags:
+                raw_tags = structured.get("tags", []) or output.get("tags", [])
+                if isinstance(raw_tags, list):
+                    _tags = [str(t) for t in raw_tags if t]
+
+        # 标题兜底：正文第一行（极个别没有 TitleAgent 的场景）
+        if not _title:
             _first_line = primary_content.lstrip('\n').split('\n')[0].strip()
             _clean_line = re.sub(r'[#*`_\[\]()【】（）『』「」《》<>｜‖/\\]', '', _first_line).strip()
             if 2 <= len(_clean_line) <= 60:
                 _title = _clean_line
-        if isinstance(_preview.get("tags"), list):
-            _tags = [str(t) for t in _preview["tags"] if t]
+
+        platform_code = (
+            state.get("context", {}).get("platform")
+            or plan.get("platform", "")
+            or ""
+        )
 
         asyncio.create_task(_persist_results_async(
             state=state,
@@ -2553,11 +2663,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             status=status,
             title=_title,
             tags=_tags,
-            platform_code=(
-                state.get("context", {}).get("platform")
-                or plan.get("platform", "")
-                or ""
-            ),
+            platform_code=platform_code,
         ))
 
         merge_span.set_attribute("merge.status", status)
@@ -2600,6 +2706,17 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
             '', raw_full_text
         ).strip()
 
+        # structured：把 TitleAgent / TagAgent 等元数据真正合到 final_output.structured，
+        #     这样下游 stream_core._build_artifact_structured（只透传 structured）拿到的
+        #     就是真实的产物数据，前端 handlePreview 不必猜来源。
+        structured: dict[str, object] = {}
+        if _title:
+            structured["title"] = _title
+        if _tags:
+            structured["tags"] = _tags
+        if platform_code:
+            structured["platform"] = platform_code
+
         return {
             "final_output": {
                 "goal": plan.get("goal", ""),
@@ -2611,6 +2728,7 @@ async def merge_and_finish(state: AgentGraphState) -> dict:
                 ),
                 "title": _title,
                 "tags": _tags,
+                "structured": structured,
                 "sections": sections,
                 "full_text": clean_text,
                 "review_content": review_content,

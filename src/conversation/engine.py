@@ -2,9 +2,17 @@
 
 每次用户消息：
 1. 加载对话历史和用户偏好
-2. 调用对话 LLM 流式生成回复（v3: bind_tools 让 LLM 用 trigger_generation 函数触发创作）
-3. 提取 tool_call → 返回 trigger（不再支持文本 [GENERATE] 标记）
-4. 返回对话文本 + 可选的触发指令
+2. 系统判断当前是否需要触发创作（状态机）
+3. 调用对话 LLM 流式生成回复
+   - 如果需要触发创作：tool_choice="required"，强制 LLM 调用工具
+   - 如果正常对话：tool_choice="auto"，LLM 自行决定
+4. 提取 tool_call → 返回 trigger
+5. 返回对话文本 + 可选的触发指令
+
+核心设计：
+- 系统维护状态机，自己知道什么时候"需要触发创作"
+- 不依赖 LLM/正则判断"是否应该调用工具"
+- 不需要 fallback 重试来检测"是否调用了工具"
 """
 
 from __future__ import annotations
@@ -12,6 +20,7 @@ import json
 import logging
 import os
 import re
+from enum import Enum
 from typing import AsyncGenerator, Optional
 
 from langchain_core.messages import SystemMessage, HumanMessage, AIMessage
@@ -27,6 +36,108 @@ logger = logging.getLogger(__name__)
 
 # 统一 LLM 入口：所有对话流必须走 Gateway，禁止直连
 _GATEWAY_URL = os.getenv("LLM_GATEWAY_URL") or "http://localhost:9010/v1"
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 对话状态机
+# ──────────────────────────────────────────────────────────────────────
+class ConversationState(Enum):
+    """对话状态枚举
+
+    系统根据状态决定是否需要触发创作：
+    - COLLECTING: 收集参数中，正常对话
+    - WAITING_GENERATION: 用户已确认，系统需要触发创作
+    """
+
+    COLLECTING = "collecting"  # 收集参数中，正常对话
+    WAITING_GENERATION = "waiting_generation"  # 等待触发创作
+
+
+# 生成意图关键词：用户明确要求生成内容
+_GENERATION_KEYWORDS = [
+    "开始创作", "开始生成", "开始写", "生成", "创作", "写一篇",
+    "写一个", "写一份", "生成一份", "重新生成", "重新写", "重写",
+    "再来", "重新", "来一份", "写吧", "开始吧", "生成吧",
+]
+
+
+def _user_wants_generation(message: str) -> bool:
+    """判断用户是否明确要求生成内容（确定性判断）
+
+    只用于系统状态判断，不用于 LLM prompt。
+    """
+    if not message:
+        return False
+    msg_lower = message.strip().lower()
+    return any(kw in msg_lower for kw in _GENERATION_KEYWORDS)
+
+
+def _is_pure_redo(message: str) -> bool:
+    """判断用户消息是否是纯重做指令（如"重新生成"、"再来一份"）
+
+    用于检测用户想用相同主题再生成一次。
+    """
+    if not message:
+        return False
+    msg = message.strip()
+    # 纯动作词，长度 <= 8
+    if len(msg) > 8:
+        return False
+    redo_keywords = ["重新生成", "重新写", "重写", "再来", "重新", "开始", "生成", "写"]
+    return any(msg == kw or msg.startswith(kw) for kw in redo_keywords)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# 系统状态判断
+# ──────────────────────────────────────────────────────────────────────
+def _determine_conversation_state(
+    user_message: str,
+    ctx_platform: Optional[str],
+    ctx_content_type: Optional[str],
+    has_topic_in_context: bool = False,
+) -> ConversationState:
+    """系统根据用户输入和上下文，判断当前对话状态
+
+    这是确定性的布尔判断，不会有失误。
+    只有当用户明确要求生成内容时，才返回 WAITING_GENERATION。
+
+    Args:
+        user_message: 当前用户消息
+        ctx_platform: 前端传入的平台预选
+        ctx_content_type: 前端传入的体裁预选
+        has_topic_in_context: 对话历史/上下文中是否已有主题
+
+    Returns:
+        WAITING_GENERATION: 用户明确要求生成，且系统等待触发创作
+        COLLECTING: 正常对话/收集参数中
+    """
+    msg = (user_message or "").strip()
+
+    # 用户说了生成关键词
+    if _user_wants_generation(msg):
+        return ConversationState.WAITING_GENERATION
+
+    # 纯重做指令（如"重新生成"）也视为需要触发
+    if _is_pure_redo(msg):
+        return ConversationState.WAITING_GENERATION
+
+    # 正常对话/收集参数
+    return ConversationState.COLLECTING
+
+
+def _build_state_hint(state: ConversationState) -> str:
+    """根据状态构建系统提示片段，注入到 LLM 的 System Prompt 中
+
+    让 LLM 知道当前对话状态，以便做出正确的响应。
+    """
+    if state == ConversationState.WAITING_GENERATION:
+        return (
+            "\n\n[系统状态] 当前对话状态: WAITING_GENERATION\n"
+            "用户已确认需要开始创作。\n"
+            "你必须调用 trigger_generation 工具来启动创作流程。\n"
+            "仅输出文本（如'好的，马上创作'）而不调用工具是无效的。"
+        )
+    return ""  # COLLECTING 状态不需要额外提示
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -326,42 +437,106 @@ class ConversationEngine:
         except Exception:
             pass
 
-        # 4. 流式调用 LLM — 绑定 trigger_generation 工具
-        # 工具调用优先级高于文本 [GENERATE] 标记（fallback）。
-        # 旧版 LLM 不支持 tool_calls 时自动退回纯文本模式。
+        # ──────────────────────────────────────────────────────────────────────
+        # 4. 系统状态判断：系统自己知道当前是否需要触发创作
+        # ──────────────────────────────────────────────────────────────────────
+        # 判断用户是否要求生成内容（确定性判断，不依赖 LLM/正则）
+        conv_state = _determine_conversation_state(
+            user_message=ctx.message or "",
+            ctx_platform=ctx.platform,
+            ctx_content_type=ctx.content_type,
+        )
+        logger.info("系统状态: %s, 用户消息: %r", conv_state.value, (ctx.message or "")[:50])
+
+        # 根据状态决定 tool_choice
+        # - WAITING_GENERATION: 必须调用工具，不调用就是 API 问题（不需要 fallback）
+        # - COLLECTING: 正常对话，auto 让 LLM 自行决定
+        needs_tool = conv_state == ConversationState.WAITING_GENERATION
+        tool_choice = "required" if needs_tool else "auto"
+
+        # 注入状态提示到 System Prompt，让 LLM 知道当前状态
+        if needs_tool:
+            state_hint = _build_state_hint(conv_state)
+            messages.insert(-1, SystemMessage(content=state_hint))
+
+        # ──────────────────────────────────────────────────────────────────────
+        # 5. 流式调用 LLM（使用 astream_events 同时获取流式文本和完整 tool_call）
+        # ──────────────────────────────────────────────────────────────────────
+        # 问题：astream 流式传输中，tool_call 的 args 是增量传输的
+        # 解决：使用 astream_events，文本通过事件流输出，最终从完整响应提取 tool_call
         try:
-            _llm_with_tools = llm.bind_tools(TRIGGER_TOOL_SCHEMA, tool_choice="auto")
+            _llm_with_tools = llm.bind_tools(TRIGGER_TOOL_SCHEMA, tool_choice=tool_choice)
         except Exception:
             _llm_with_tools = llm
 
         full_text = ""
         tool_call_payload: Optional[dict] = None
-        try:
-            async for chunk in _llm_with_tools.astream(messages):
-                # 提取文本片段（yield 给前端 streaming 渲染）
-                content = chunk.content if hasattr(chunk, "content") else None
-                if isinstance(content, str) and content:
-                    full_text += content
-                    yield {"type": "text", "content": content}
 
-                # 提取 tool_calls（OpenAI Chat Completions 格式）
-                # chunk.tool_calls 是 List[ToolCall]（每次流式追加）
-                chunk_tool_calls = getattr(chunk, "tool_calls", None)
-                if chunk_tool_calls:
-                    for tc in chunk_tool_calls:
-                        # 每个 ToolCall 有 name / args（dict 或 str）/ id
-                        # 部分 chunk 里 args 是空 dict（增量），等下一个 chunk 补全
-                        tc_name = (tc.get("name") if isinstance(tc, dict) else getattr(tc, "name", None))
+        try:
+            # 使用 astream_events：文本流式输出 + 最终获取完整 tool_call
+            async for event in _llm_with_tools.astream_events(messages, version="v2"):
+                # 确保 event 是字典
+                if not isinstance(event, dict):
+                    continue
+                event_type = event.get("event", "")
+                name = event.get("name", "")
+
+                # 文本片段：yield 给前端
+                if event_type == "on_chat_model_stream":
+                    event_data = event.get("data")
+                    if event_data is None:
+                        continue
+                    # data 可能是字典或对象
+                    if isinstance(event_data, dict):
+                        chunk = event_data.get("chunk", {})
+                    else:
+                        chunk = getattr(event_data, "chunk", None) or getattr(event_data, "content", "")
+                    if chunk:
+                        content = getattr(chunk, "content", "") if hasattr(chunk, "content") else str(chunk)
+                    else:
+                        content = ""
+                    if content:
+                        full_text += content
+                        yield {"type": "text", "content": content}
+
+                # LLM 完成：提取完整的 tool_call
+                elif event_type == "on_chat_model_end":
+                    # on_chat_model_end 的 data.output 包含完整响应
+                    event_data = event.get("data")
+                    if event_data is None:
+                        continue
+                    # 获取 output（AIMessage 对象）
+                    if isinstance(event_data, dict):
+                        response = event_data.get("output", {})
+                    else:
+                        response = getattr(event_data, "output", None) or event_data
+                    # response 可能是 AIMessage 对象
+                    response_tool_calls = getattr(response, "tool_calls", None) or []
+                    for tc in response_tool_calls:
+                        # 安全获取 tc_name
+                        if isinstance(tc, dict):
+                            tc_name = tc.get("name")
+                            tc_args = tc.get("args")
+                        else:
+                            tc_name = getattr(tc, "name", None)
+                            tc_args = getattr(tc, "args", None)
                         if tc_name != "trigger_generation":
                             continue
-                        tc_args = tc.get("args") if isinstance(tc, dict) else getattr(tc, "args", None)
                         if isinstance(tc_args, str):
                             try:
-                                tc_args = json.loads(tc_args) if tc_args.strip() else None
+                                tc_args = json.loads(tc_args) if tc_args.strip() else {}
                             except json.JSONDecodeError:
-                                tc_args = None
-                        if isinstance(tc_args, dict) and tc_args.get("topic"):
-                            tool_call_payload = tc_args
+                                tc_args = {}
+                        if isinstance(tc_args, dict):
+                            if tc_args.get("topic"):
+                                tool_call_payload = tc_args
+                            elif needs_tool and ctx.message:
+                                logger.info("tool_call args 为空，用用户消息作为 topic fallback")
+                                tool_call_payload = {
+                                    "action": tc_args.get("action", "create"),
+                                    "topic": ctx.message.strip(),
+                                }
+
         except Exception as e:
             logger.error("对话 LLM 调用失败: %s", e)
             yield {"type": "text", "content": f"抱歉，我暂时遇到了问题: {e}"}
@@ -466,197 +641,124 @@ class ConversationEngine:
             }
             return
 
-        # ── 兜底：LLM 没有调用 trigger_generation 但用户明确要求生成内容 ──
-        _user_msg = (ctx.message or "").strip()
-        _user_msg_lower = _user_msg.lower()
-        _gen_keywords = ["写", "生成", "重新写", "重新生成", "重写", "再来",
-                         "新的一篇", "重新", "生成一份", "写一份", "来一份"]
-        # "重做"类关键词：用户想用相同主题再生成一次，必须保留上次 topic
-        _redo_keywords = ["重新生成", "重新写", "重新", "重写", "再来", "新的一篇",
-                          "再来一份", "重新来"]
-        # ── 关键修复：剥离 [目标平台：xxx] 前缀再做"重做"判断 ──
-        # 用户消息 "[目标平台：微博]\n重新生成" 长度 13，超过 8 字符阈值，
-        # 导致 _is_pure_redo=False → 走兜底 topic 提取 → 误把"重新生成"当主题。
-        # 先清洗再判断：用 _user_msg_clean 作为统一的清洗后消息。
-        _hint_strip_re = re.compile(r'^\[目标平台：[^\]]+\]\s*\n?')
-        _user_msg_clean = _hint_strip_re.sub('', _user_msg).strip()
-        # 简化：用户消息（剥前缀后）几乎完全是重做关键词（如 "重新生成"、"再写一份吧"）
-        _is_pure_redo = (
-            0 < len(_user_msg_clean) <= 8
-            and any(_user_msg_clean == kw or _user_msg_clean.startswith(kw)
-                    for kw in _redo_keywords)
-        )
-        _wants_generation = any(kw in _user_msg_lower for kw in _gen_keywords)
+        # ── 核心设计：系统维护状态机，不需要复杂的正则 fallback ──
+        #
+        # 判断逻辑：
+        # 1. 系统判断状态（确定性）
+        # 2. 根据状态决定 tool_choice
+        #    - WAITING_GENERATION: "required" → LLM 必须调用工具
+        #    - COLLECTING: "auto" → 正常对话，LLM 自行决定
+        # 3. 有了 tool_choice="required"，不再需要 fallback 重试来检测"是否调用了工具"
+        #
+        # 保留的检测：
+        # - 越权检测：防止 LLM 越权写正文
+        # - 参数校验：LLM 调用了工具但参数有问题（如缺 topic）
+        # ──────────────────────────────────────────────────────────────────────
 
-        # ── 安全网：LLM 输出"够了/开始创作"但没调工具 ──
-        # 可能原因：Gateway 未正确透传 tool_calls、LLM 不支持工具调用。
-        # 当 LLM 明确表示已足够但没调工具时，进入兜底 pipeline。
-        _llm_ready_signal = (
-            not _wants_generation
-            and not trigger
-            and not IntentDetector.looks_like_followup_question(full_text)
-            and IntentDetector.looks_like_ready_to_generate(full_text)
-        )
-
-        # ── 关键防御：LLM 已主动追问 = 规则 A 正常执行，不要被兜底覆盖 ──
-        # 当用户消息里有生成关键词，但 LLM 正确表达了"信息不足、需要追问"
-        # （如"请告诉我主题和平台"），应尊重 LLM 的判断，不再兜底触发 pipeline。
-        # 兜底分支只用于：LLM 没追问、也没调用工具的异常情况（如模型卡住 / 返回空 / 旧模型不支持 tools）。
-        if (
-            _wants_generation
-            and not IntentDetector.looks_like_unauthorized_write(full_text)
-            and IntentDetector.looks_like_followup_question(full_text)
-        ):
-            logger.info(
-                "对话 LLM 已主动追问（信息不足），尊重其判断，不触发 pipeline "
-                "(msg_len=%s, user_msg=%r, llm_preview=%r)",
-                len(full_text), _user_msg[:50], full_text[:80],
-            )
+        if trigger:
+            yield {"type": "trigger", "data": _build_trigger_data(trigger, ctx.preferences)}
             return
 
-        if _wants_generation or _llm_ready_signal:
-            if _llm_ready_signal:
-                logger.info(
-                    "安全网：LLM 输出含'足够/开始创作'信号但未调工具，自动触发 pipeline "
-                    "(full_text_preview=%r, topic_from=%s)",
-                    full_text[:80], "context_extraction",
-                )
-            else:
-                logger.info("LLM 未调用 trigger_generation 但用户要求生成，自动触发 pipeline (msg_len=%s, user_msg=%s)",
-                            len(full_text), _user_msg[:50])
-
-            # ── 重做场景：保留上次的 topic，不要从 history 随便取 ──
-            _topic: Optional[str] = None
-            if _is_pure_redo and not _llm_ready_signal:
-                def _get_last_topic_from_memory(ctx_obj):
-                    return memory_manager.get_last_conversation_topic(
-                        user_id=ctx_obj.user_id or "",
-                        conversation_id=ctx_obj.conversation_id or "",
-                    )
-                _topic = _get_last_topic_from_memory(ctx)
-                if not _topic:
-                    logger.info("重做场景未找到上次 topic，转追问")
-                    yield {
-                        "type": "text_cleanup",
-                        "content": "这是我们的第一次对话，还没有可重新生成的内容。"
-                                  "请告诉我你想写什么主题、发布在哪个平台。",
-                    }
-                    return
-                logger.info("重做场景，复用上次 topic=%r", _topic[:50])
-            else:
-                # 兜底 topic 提取优先级（关键修复）：
-                #   1. 从 LLM 输出里识别"就以X为主题""以X为题"等显式信号
-                #      → 即使 LLM 没调工具，它可能已经说出主题
-                #   2. 从对话历史里找最近一条有实质内容的 user 消息
-                #      （排除"直接生成""开始创作"这种无意义短消息）
-                #   3. 才考虑剥离当前用户消息里的动作词（fallback）
-
-                # 优先级 1: LLM 输出里识别显式主题
-                _llm_topic_re = re.compile(
-                    r'(?:就以|以|围绕|关于)(.{2,40}?)(?:为主题|为题|写|创作)',
-                    re.DOTALL,
-                )
-                _m = _llm_topic_re.search(full_text)
-                if _m:
-                    _topic = _m.group(1).strip().strip('"\'""''「」『』')
-                    logger.info("兜底：从 LLM 输出提取 topic=%r", _topic[:50])
-
-                # 优先级 2: 对话历史里找最近实质主题
-                if not _topic or len(_topic) < 3:
-                    _placeholder_re = re.compile(r'^\[[^\]]+\]$')
-                    # "纯动作词"检测：开始创作/直接生成/再来一份/重写/帮我写个...
-                    # 注意：中文里常带各种标点（吧/吧。/！/"等）+ 单引号 + 全角空格
-                    # 这里用 (主题内容) 与 (尾标点) 分开剥离，避免 误判
-                    #
-                    # 关键修复：增加"重新生成""重新写""新的一篇"这种 **两段动词组合**
-                    # 不被长尾巴（如"生成"作为第二段）漏判并误当 topic。
-                    _gen_action_only_re = re.compile(
-                        r'^[直接的马快立刻帮我给我]*(?:'
-                        r'生成|写|创作|开始|再来|重写|重新)'
-                        r'(?:一份|一篇|一下|个|吧|创作|写|生成)?'
-                        r'[的吧！!。.，,"\'\s]*$'
-                    )
-                    # 单独的"重做"动作短消息（如"重新生成""重新写""重写""再来"）
-                    _redo_only_re = re.compile(
-                        r'^[重新]*(?:'
-                        r'生成|写|创作|开始|再来|重写|重新)'
-                        r'(?:一份|一篇|一下|个|吧|创作|写|生成)?'
-                        r'[的吧！!。.，,"\'\s]*$'
-                    )
-                    _hint_re = re.compile(r'^\[目标平台：[^\]]+\]\s*\n?')
-                    for msg in reversed(ctx.history):
-                        if msg.get("role") != "user":
-                            continue
-                        candidate = msg.get("content", "").strip()
-                        if not candidate:
-                            continue
-                        # 剥 [目标平台：xxx] 前缀
-                        candidate = _hint_re.sub('', candidate).strip()
-                        # 跳过按钮占位
-                        if _placeholder_re.match(candidate):
-                            continue
-                        # 跳过"直接生成""开始创作""开始写""重新生成""再来一份"等纯动作词
-                        # 注意两次用不同 regex，覆盖"直接+动作"和"重新+动作"两种模式
-                        if _gen_action_only_re.match(candidate):
-                            continue
-                        if _redo_only_re.match(candidate):
-                            logger.info("兜底：跳过历史中的纯重做动作词 msg=%r", candidate[:30])
-                            continue
-                        # 跳过太短/太长
-                        candidate = re.sub(r'\s+', ' ', candidate).strip()
-                        if 3 <= len(candidate) <= 200:
-                            _topic = candidate
-                            logger.info("兜底：从对话历史提取 topic=%r", _topic[:50])
-                            break
-
-                # 优先级 3: 剥离当前用户消息里的动作词（最后兜底）
-                if not _topic or len(_topic) < 3:
-                    _topic = _user_msg_clean  # 复用上面已清洗过的消息
-                    for _pre in sorted(_gen_keywords, key=len, reverse=True):
-                        if _pre in _topic:
-                            _topic = _topic.replace(_pre, "").strip()
-                    # 还要剥"重新""重新生成""重新写"等重做前缀
-                    for _pre in sorted(_redo_keywords, key=len, reverse=True):
-                        if _topic.startswith(_pre):
-                            _topic = _topic[len(_pre):].strip()
-                    # 还要剥"直接""马上""开始"等纯动作词
-                    for _pre in ["直接", "马上", "立刻", "快点", "快"]:
-                        if _topic.startswith(_pre):
-                            _topic = _topic[len(_pre):].strip()
-                    logger.info("兜底：从当前用户消息提取 topic=%r", _topic[:50])
-
-            # 还提不出来 → 不要瞎猜，直接走追问而不是兜底
-            if not _topic or len(_topic) < 3:
-                logger.info("兜底分支 topic 提取失败，转追问（不触发 pipeline）")
-                yield {
-                    "type": "text_cleanup",
-                    "content": "请告诉我你想写什么主题、发布在哪个平台（例如：小红书、公众号、知乎）。"
-                              "回复示例：'写一篇关于 Python 入门的笔记，发布在小红书'。",
-                }
-                return
-
-            # 修复兜底 BUG：优先用前端已选的 ctx.platform / ctx.content_type，
-            #     不再依赖 user_profile 字符串匹配（之前 _user_profile="" 会导致 platform=""）。
-            _platform = ctx.platform or ""
-            _style = ctx.content_type or ""
-            if not _platform and _user_prefs:
-                _platform = "xiaohongshu" if ("xiaohongshu" in _user_prefs or "小红书" in _user_prefs) else ""
-                _style = "真实体验分享" if "真实" in _user_prefs else ""
-
-            # 修复兜底 BUG：剥离用户输入里的 [目标平台：xxx] 前缀（前端 Workspace.tsx 注入），
-            #     避免 topic 里夹带平台标签导致后续 pipeline 主题错乱
-            _PLATFORM_HINT_RE = re.compile(r"^\[目标平台：[^\]]+\]\s*\n?")
-            _topic = _PLATFORM_HINT_RE.sub("", _topic).strip()
-            if not _topic:
-                _topic = ctx.message
-
-            _fallback_trigger = GenerateTrigger(
-                action="create",
-                topic=_topic,
-                platform=_platform,
-                style=_style,
+        # ── 越权自写但没 trigger → 拦截 ──
+        # 即使在 required 模式下也要检测，防止 LLM 越权
+        if IntentDetector.looks_like_unauthorized_write(full_text):
+            logger.error(
+                "对话 LLM 越权自写且未调用 trigger_generation，强制拦截 "
+                "(full_text_len=%s, preview=%r)",
+                len(full_text), full_text[:80],
             )
-            # 把 preferences 平铺到 fallback trigger，让前端能透传到 /agent/stream
-            _fb_data = _build_trigger_data(_fallback_trigger, ctx.preferences)
-            _fb_data["_fallback"] = True
-            yield {"type": "trigger", "data": _fb_data}
+            yield {
+                "type": "text_cleanup",
+                "content": "抱歉，我刚刚的回复格式有误，请重试一次。"
+                          "请用一句话告诉我：你想写什么主题、发布在哪个平台。",
+            }
+            return
+
+        # ── needs_tool=True 但没有 tool_call_payload 的兜底处理 ──
+        # 理论上在 "required" 模式下不会发生，但作为安全网保留
+        if needs_tool and not tool_call_payload:
+            logger.warning(
+                "安全网：tool_choice=required 但没有 tool_call_payload，尝试从上下文提取 topic "
+                "(full_text_preview=%r)",
+                full_text[:80],
+            )
+            # 从对话历史或用户消息提取 topic
+            _topic = _extract_topic_from_context(ctx, full_text)
+            if _topic:
+                _fallback_trigger = GenerateTrigger(
+                    action="create",
+                    topic=_topic,
+                    platform=ctx.platform or "",
+                    style=ctx.content_type or "",
+                )
+                _fb_data = _build_trigger_data(_fallback_trigger, ctx.preferences)
+                _fb_data["_fallback"] = True
+                yield {"type": "trigger", "data": _fb_data}
+                return
+            # 提取失败，转追问
+            yield {
+                "type": "text_cleanup",
+                "content": "请告诉我你想写什么主题、发布在哪个平台。",
+            }
+            return
+
+        # needs_tool=False（正常对话）：LLM 没有调用工具是正确的行为，直接返回文本
+        # 不需要任何 fallback
+        logger.debug(
+            "正常对话（needs_tool=False），LLM 未调用工具，文本回复: %r",
+            full_text[:80],
+        )
+
+
+def _extract_topic_from_context(ctx, full_text: str) -> Optional[str]:
+    """从对话上下文提取 topic（兜底用）
+
+    仅在 tool_choice=required 但 LLM 未调用工具的异常情况下使用。
+    """
+    import re as _re
+
+    # 1. 从 LLM 输出里识别"就以X为主题"等显式信号
+    _llm_topic_re = _re.compile(
+        r'(?:就以|以|围绕|关于)(.{2,40}?)(?:为主题|为题|写|创作)',
+        _re.DOTALL,
+    )
+    _m = _llm_topic_re.search(full_text)
+    if _m:
+        return _m.group(1).strip().strip('"\'""''「」『』')
+
+    # 2. 从对话历史里找最近实质主题
+    _hint_re = _re.compile(r'^\[目标平台：[^\]]+\]\s*\n?')
+    _gen_action_re = _re.compile(
+        r'^[直接的马快立刻帮我给我]*(?:'
+        r'生成|写|创作|开始|再来|重写|重新)'
+        r'(?:一份|一篇|一下|个|吧|创作|写|生成)?'
+        r'[的吧！!。.，,"\'\s]*$'
+    )
+    _placeholder_re = _re.compile(r'^\[[^\]]+\]$')
+
+    for msg in reversed(ctx.history):
+        if msg.get("role") != "user":
+            continue
+        candidate = msg.get("content", "").strip()
+        if not candidate:
+            continue
+        candidate = _hint_re.sub('', candidate).strip()
+        if _placeholder_re.match(candidate):
+            continue
+        if _gen_action_re.match(candidate):
+            continue
+        candidate = _re.sub(r'\s+', ' ', candidate).strip()
+        if 3 <= len(candidate) <= 200:
+            return candidate
+
+    # 3. 从当前用户消息剥离动作词
+    _user_msg = (ctx.message or "").strip()
+    _user_msg = _hint_re.sub('', _user_msg).strip()
+    _gen_keywords = ["写", "生成", "创作", "开始", "重新", "再来"]
+    for _pre in sorted(_gen_keywords, key=len, reverse=True):
+        if _pre in _user_msg:
+            _user_msg = _user_msg.replace(_pre, "").strip()
+    if len(_user_msg) >= 3:
+        return _user_msg
+
+    return None

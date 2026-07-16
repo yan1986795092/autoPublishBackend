@@ -14,7 +14,7 @@ def _env_file_path() -> Path:
 
 
 class Settings(BaseSettings):
-    app_name: str = "AutoPublish"
+    app_name: str = "墨掌柜"
     debug: bool = True
     api_prefix: str = "/api/v1"
 
@@ -31,7 +31,7 @@ class Settings(BaseSettings):
 
     # 阿里通义千问 — 兼容 QWEN_API_KEY / DASHSCOPE_API_KEY 两种环境变量名（主力，2026/08/20 到期）
     qwen_api_key: Optional[str] = Field(default=None, validation_alias=AliasChoices("qwen_api_key", "QWEN_API_KEY", "DASHSCOPE_API_KEY"))
-    qwen_model: str = "qwen3.7-max"
+    qwen_model: str = "qwen-plus"
     qwen_base_url: str = "https://dashscope.aliyuncs.com/compatible-mode/v1"
 
     # Embedding 配置：用 Qwen text-embedding-v3 替代过期的 Zhipu embedding-2

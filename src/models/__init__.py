@@ -139,6 +139,7 @@ class Platform(Base):
     name = Column(String(100), nullable=False)
     icon_url = Column(String(255))
     category = Column(String(50), default='social_media')
+    content_genre = Column(String(20), default='text')  # text | video | audio
     is_active = Column(Boolean, default=True)
     is_mock = Column(Boolean, default=True)
 

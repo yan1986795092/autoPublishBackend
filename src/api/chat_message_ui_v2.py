@@ -22,7 +22,7 @@ UPGRADE_MIN_CONTENT_LENGTH = 300
 
 # 触发升级的 agent 类型（内容生成类，不是 reasoning 类）
 UPGRADE_ELIGIBLE_AGENTS = frozenset({
-    "WritingAgent", "FixAgent", "SEOAgent", "CodeAgent", "DiagramAgent", "ReviewAgent",
+    "WritingAgent", "FixAgent", "SEOAgent", "CodeAgent", "ReviewAgent",  # TEMP: DiagramAgent disabled
 })
 
 
@@ -31,7 +31,7 @@ def should_upgrade_text_to_artifact(part: dict, agent_type: str = "") -> bool:
 
     规则（来自 writing-engine spec §2.3）：
     - type == "text"
-    - agent 属于内容生成类（WritingAgent / FixAgent / SEOAgent / CodeAgent / DiagramAgent / ReviewAgent）
+    - agent 属于内容生成类（WritingAgent / FixAgent / SEOAgent / CodeAgent / ReviewAgent）
     - content 长度 >= 300 字（短文案可能是临时回答）
 
     Args:

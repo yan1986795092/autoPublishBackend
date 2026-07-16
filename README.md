@@ -1,4 +1,4 @@
-# AutoPublish Backend
+# 墨掌柜 Backend
 
 > 🤖 AI 驱动的内容生产 API —— 输入一个主题，输出一篇可在多平台发布的高质量内容。
 

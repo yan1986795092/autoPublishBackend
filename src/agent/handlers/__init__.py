@@ -2,9 +2,9 @@
 
 from .writing import handle_writing
 from .review import handle_review
-from .diagram import handle_diagram
+# from .diagram import handle_diagram  # TEMP: DiagramAgent disabled
 from .code import handle_code
-from .web_search import handle_web_search, handle_url_crawl
+from .web_search import handle_web_search
 from .fix import handle_fix
 from .search_analyzer import handle_search_analyzer
 from .title import handle_title
@@ -17,9 +17,9 @@ HANDLER_MAP = {
     "FixAgent": handle_fix,
     "TitleAgent": handle_title,
     "TagAgent": handle_tags,
-    "DiagramAgent": handle_diagram,
+    # "DiagramAgent": handle_diagram,  # TEMP: DiagramAgent disabled
     "CodeAgent": handle_code,
     "WebSearch": handle_web_search,
-    "URLCrawler": handle_url_crawl,
+    # "URLCrawler": handle_url_crawl,  # TEMP: URLCrawler disabled
     "SearchAnalyzer": handle_search_analyzer,
 }

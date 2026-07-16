@@ -86,7 +86,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="AutoPublish API",
+    title="墨掌柜 API",
     description="AI 内容生产与发布工具 API",
     version="2.0.0",
     docs_url="/docs",
@@ -274,7 +274,7 @@ app.include_router(agent_router, prefix="/api/v1")
 
 @app.get("/")
 def root():
-    return {"message": "AutoPublish API", "version": "1.0.0", "status": "running"}
+    return {"message": "墨掌柜 API", "version": "1.0.0", "status": "running"}
 
 
 @app.get("/health")

@@ -55,7 +55,7 @@ BUILTIN_SKILLS: list[BuiltinSkill] = [
         "user_prompt_template": "写一篇关于「{topic}」的技术博客，要求：\n1. 深度分析而非表面介绍\n2. 包含代码示例\n3. 适合在技术社区发布\n4. 字数 2000-4000 字",
         "preset_plan": {
             "complexity": "medium",
-            "agent_sequence": ["WebSearch", "WritingAgent", "DiagramAgent", "SEOAgent", "ReviewAgent"],
+            "agent_sequence": ["WebSearch", "WritingAgent", "SEOAgent", "ReviewAgent"],  # TEMP: DiagramAgent disabled
         },
         "content_types": ["blog"],
         "config_schema": {
@@ -176,53 +176,49 @@ BUILTIN_SKILLS: list[BuiltinSkill] = [
     },
     {
         "id": "builtin-004",
-        "name": "短视频脚本",
-        "description": "口播短视频脚本，包含开场钩子、叙事节奏、分镜描述。适合抖音/B站/视频号等平台。",
+        "name": "图文笔记",
+        "description": "适合抖音、小红书等平台的图文笔记。信息密度高、排版清晰，适合快速浏览。",
         "category": "writing",
-        "icon": "🎬",
+        "icon": "📱",
         "source": "builtin",
         "author": None,
         "version": "1.0.0",
-        "tags": ["视频", "脚本", "抖音", "B站", "口播"],
+        "tags": ["图文", "笔记", "抖音", "小红书"],
         "is_enabled": True,
-        "system_prompt": """你是一位头部短视频内容创作者，精通各平台算法和用户心理。
+        "system_prompt": """你是一位图文内容创作者，精通信息流平台的图文创作。
 
-脚本结构：
-1. 开场钩子（前3秒）：用问题/冲突/反常识吸引停留
-2. 主题引入（5-10秒）：快速点题
-3. 内容展开（30-60秒）：核心内容，分点叙述
-4. 高潮/反转（10秒）：情绪最高点
-5. 结尾引导（5秒）：互动引导 + 下期预告
+图文结构：
+1. 标题（1秒钩子）：数字/反差/痛点，一眼看懂能获得什么
+2. 正文（信息密度）：1-3个核心信息点，每段只讲一件事
+3. 结尾：总结 + 互动引导
 
 写作要点：
-1. 语速感：读出来要顺口，每句不超过20字
-2. 情绪起伏：有高有低，不能平铺直叙
-3. 视觉提示：标注分镜、镜头切换
-4. BGM 建议：推荐适合的背景音乐类型
-5. 字幕设计：关键台词用大字标注
+1. 短句为主：方便快速扫读，每句不超过20字
+2. 信息密集：干货要硬，不要废话
+3. 排版留白：多换行、多空行
+4. 视觉层次：重点加粗、关键信息突出
 
 格式：
-- 时长：总时长和每个段落时长
-- 画面：镜头描述
-- 台词：口播内容
-- 标注：特效、字幕、BGM""",
-        "user_prompt_template": "为「{topic}」写一个口播短视频脚本：\n1. 时长 1-3 分钟\n2. 适合抖音/视频号\n3. 包含开场钩子和互动引导\n4. 有分镜描述",
+- 标题：一行，冲击力强
+- 正文：短段落，多换行
+- 标签：1-3个相关话题标签""",
+        "user_prompt_template": "为「{topic}」写一篇图文笔记：\n1. 信息密度要高\n2. 适合抖音/小红书\n3. 标题能一眼抓住人\n4. 有互动引导",
         "preset_plan": {
             "complexity": "medium",
             "agent_sequence": ["WebSearch", "WritingAgent", "ReviewAgent"],
         },
-        "content_types": ["script"],
+        "content_types": ["douyin", "xiaohongshu"],
         "config_schema": {
-            "duration": {
+            "length": {
                 "type": "select",
-                "label": "时长",
-                "options": ["30s", "60s", "90s", "180s"],
-                "default": "60s",
+                "label": "篇幅",
+                "options": ["短篇(100-300字)", "中篇(300-600字)", "长篇(600-1000字)"],
+                "default": "中篇(300-600字)",
             },
             "platform": {
                 "type": "select",
                 "label": "目标平台",
-                "options": ["douyin", "bilibili", "wechat_video", "all"],
+                "options": ["douyin", "xiaohongshu", "all"],
                 "default": "douyin",
             },
         },

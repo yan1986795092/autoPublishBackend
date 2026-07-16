@@ -26,56 +26,66 @@ class PlatformMeta(NamedTuple):
     name: str           # 中文显示名
     category: str        # social_media | creative_writing | marketing | technical
     content_type: str    # WritingAgent 的 content_type
+    content_genre: str   # 内容体裁: text(图文) | video(视频脚本) | audio(音频) | image(图文帖)
     seo_rewrite: bool    # SEOAgent 是否用 rewrite 模式（True=改写内容，False=分析评分）
     # 以下供 SEO 改写 prompt 选择
     rewrite_prompt_key: str  # seo.py _REWRITE_PROMPTS 的 key
 
 
 # ── 平台元数据（LLM 上下文用）──────────────────────────────────────────
+# content_genre: text(图文) | video(视频脚本) | audio(音频脚本)
 PLATFORMS: dict[str, PlatformMeta] = {
     # ── 社交媒体 ─────────────────────────────────────────
     "xiaohongshu": PlatformMeta(
         code="xiaohongshu", name="小红书", category="social_media",
-        content_type="xhs_post", seo_rewrite=True, rewrite_prompt_key="xiaohongshu",
+        content_type="xhs_post", content_genre="text", seo_rewrite=True, rewrite_prompt_key="xiaohongshu",
     ),
     "wechat": PlatformMeta(
         code="wechat", name="微信公众号", category="social_media",
-        content_type="wechat_article", seo_rewrite=False, rewrite_prompt_key="wechat",
+        content_type="wechat_article", content_genre="text", seo_rewrite=False, rewrite_prompt_key="wechat",
     ),
     "zhihu": PlatformMeta(
         code="zhihu", name="知乎", category="social_media",
-        content_type="zhihu_article", seo_rewrite=False, rewrite_prompt_key="zhihu",
+        content_type="zhihu_article", content_genre="text", seo_rewrite=False, rewrite_prompt_key="zhihu",
+    ),
+    "douyin": PlatformMeta(
+        code="douyin", name="抖音", category="social_media",
+        content_type="douyin_post", content_genre="text", seo_rewrite=False, rewrite_prompt_key="",
+    ),
+    "bilibili": PlatformMeta(
+        code="bilibili", name="B站", category="social_media",
+        content_type="bilibili_post", content_genre="text", seo_rewrite=False, rewrite_prompt_key="",
     ),
     # ── 创意写作 ───────────────────────────────────────
     "fiction": PlatformMeta(
         code="fiction", name="小说创作", category="creative_writing",
-        content_type="fiction", seo_rewrite=False, rewrite_prompt_key="",
+        content_type="fiction", content_genre="text", seo_rewrite=False, rewrite_prompt_key="",
     ),
     "storyboard": PlatformMeta(
         code="storyboard", name="分镜脚本", category="creative_writing",
-        content_type="storyboard", seo_rewrite=False, rewrite_prompt_key="",
+        content_type="storyboard", content_genre="video", seo_rewrite=False, rewrite_prompt_key="",
     ),
     "script": PlatformMeta(
         code="script", name="剧本创作", category="creative_writing",
-        content_type="script", seo_rewrite=False, rewrite_prompt_key="",
+        content_type="script", content_genre="text", seo_rewrite=False, rewrite_prompt_key="",
     ),
     # ── 营销内容 ──────────────────────────────────────
     "copywriting": PlatformMeta(
         code="copywriting", name="营销文案", category="marketing",
-        content_type="copywriting", seo_rewrite=True, rewrite_prompt_key="copywriting",
+        content_type="copywriting", content_genre="text", seo_rewrite=True, rewrite_prompt_key="copywriting",
     ),
     "newsletter": PlatformMeta(
         code="newsletter", name="邮件通讯", category="marketing",
-        content_type="newsletter", seo_rewrite=True, rewrite_prompt_key="newsletter",
+        content_type="newsletter", content_genre="text", seo_rewrite=True, rewrite_prompt_key="newsletter",
     ),
     # ── 技术内容 ──────────────────────────────────────
     "technical_doc": PlatformMeta(
         code="technical_doc", name="技术文档", category="technical",
-        content_type="technical_doc", seo_rewrite=False, rewrite_prompt_key="",
+        content_type="technical_doc", content_genre="text", seo_rewrite=False, rewrite_prompt_key="",
     ),
     "tutorial": PlatformMeta(
         code="tutorial", name="教程指南", category="technical",
-        content_type="tutorial", seo_rewrite=False, rewrite_prompt_key="",
+        content_type="tutorial", content_genre="text", seo_rewrite=False, rewrite_prompt_key="",
     ),
 }
 
@@ -111,3 +121,26 @@ def get_names_map() -> dict[str, str]:
 def get_all_codes() -> list[str]:
     """返回所有平台代码"""
     return list(PLATFORMS.keys())
+
+
+def get_content_genre(platform_code: str) -> str:
+    """获取平台的内容体裁
+
+    返回值:
+        text: 图文（默认）
+        video: 视频脚本
+        audio: 音频脚本
+    """
+    if platform_code in PLATFORMS:
+        return PLATFORMS[platform_code].content_genre
+    return "text"
+
+
+def get_genre_display_name(genre: str) -> str:
+    """获取体裁的中文显示名"""
+    names = {
+        "text": "图文",
+        "video": "视频脚本",
+        "audio": "音频脚本",
+    }
+    return names.get(genre, "图文")

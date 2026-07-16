@@ -12,7 +12,7 @@ CONTENT_TYPE_PROMPTS: dict[str, str] = {
     "copywriting":
         "写一篇营销文案。要求：抓住痛点的标题、价值主张、行动号召。",
     "script":
-        "写一个视频脚本。要求：口播自然、有开场钩子、分镜描述。",
+        "为某平台写一篇图文内容。要求：信息密度高、排版清晰、重点突出。",
     "newsletter":
         "写一封邮件Newsletter。要求：友好的问候语、2-3个核心内容。",
     "report":
@@ -55,6 +55,30 @@ STYLE_GUIDES: dict[str, str] = {
     "教程": "步骤清晰，从零开始，每个步骤都有预期结果说明。",
 }
 
+# 语调指南：前端"语调"参数 → 写作 LLM 的语气要求
+TONE_GUIDES: dict[str, str] = {
+    "friendly": "语气友好亲切，像朋友聊天一样自然，避免生硬说教。",
+    "professional": "语气专业严谨，措辞正式但不晦涩，适合职场和商务场景。",
+    "humorous": "轻松幽默，适度调侃和玩笑，让内容有趣易读。",
+    "warm": "温暖柔和，像贴心的长辈或闺蜜，给人被理解和被关怀的感觉。",
+    "authoritative": "权威果断，观点鲜明，不模棱两可，给读者明确指引。",
+    "casual": "口语化随意，像朋友圈动态或私信一样轻松自在。",
+}
+
+# 篇幅指南：前端"篇幅"参数 → 字数要求和内容详略
+LENGTH_GUIDES: dict[str, str] = {
+    "short": "简洁精炼，约 300-800 字。聚焦一个核心观点，信息密度高，不展开细节，适合快速阅读。",
+    "medium": "适中篇幅，约 1000-2000 字。观点有展开，适度举例和解释，节奏适中。",
+    "long": "深度长文，约 2500-4000 字。系统全面，论点充分展开，论据丰富，适合深度阅读。",
+}
+
+# 目标读者指南：前端"受众"参数 → 内容深度和专业度
+AUDIENCE_GUIDES: dict[str, str] = {
+    "beginner": "面向零基础初学者，假设读者没有任何前置知识，需要解释每一个概念，步骤要极其详细。",
+    "intermediate": "面向有基础的中级读者，假设读者了解基础知识，重点讲解进阶技巧和常见误区。",
+    "expert": "面向专业从业者，可以用术语直接交流，重点分享深度洞察、行业趋势和前沿实践。",
+}
+
 templates = [
     # ── 写作主任务 ──
     PromptTemplateDef(
@@ -64,14 +88,21 @@ templates = [
 **主题：** {topic}
 **内容形式：** {content_type}
 {platform_line}
+{genre_line}
 **风格偏好：** {style_guide}
+
+**语调要求：** {tone_guide}
+
+**篇幅要求：** {length_guide}
+
+**目标读者：** {audience_guide}
 
 **正文要求：**
 {type_guide}
 
 直接输出完整的文章正文，不要加任何 JSON 包装、标题、标签。""",
         description="写作任务指令（纯正文输出）",
-        version="3.0",
+        version="5.0",
         role="WritingAgent",
         group="writing",
         variables=[
@@ -81,8 +112,18 @@ templates = [
             VariableDef("style_guide", required=False, default="自然流畅，有自己的观点和态度",
                         label="风格偏好"),
             VariableDef("platform_line", required=False, default="", label="目标平台行"),
+            VariableDef("genre_line", required=False, default="**内容体裁：** 图文", label="体裁行"),
             VariableDef("type_guide", required=False, default=CONTENT_TYPE_PROMPTS["blog"],
                         label="内容形式要求"),
+            VariableDef("tone_guide", required=False,
+                        default="语气自然流畅，像和朋友聊天一样亲切友好。",
+                        label="语调要求"),
+            VariableDef("length_guide", required=False,
+                        default="适中篇幅，约 1000-2000 字，观点有展开，节奏适中。",
+                        label="篇幅要求"),
+            VariableDef("audience_guide", required=False,
+                        default="面向有基础的中级读者，假设读者了解基础知识，重点讲解进阶技巧。",
+                        label="目标读者"),
         ],
     ),
 

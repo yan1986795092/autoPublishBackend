@@ -23,6 +23,7 @@ from typing import Any
 #   name          - 中文名
 #   icon          - 显示图标
 #   category      - 分组: social_media | content | professional
+#   content_genre - 体裁: text(图文) | video(视频脚本) | audio(音频)
 #   system_prompt - LLM 角色定位（覆盖默认）
 #   writing_rules - 结构化写作规则
 #   agent_pipeline - Agent 组合建议
@@ -39,6 +40,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "小红书",
         "icon": "📕",
         "category": "social_media",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个真实的小红书内容创作者。你的内容像朋友在分享亲身经历——口语化、有细节、有温度。你不是在写文章，你是在跟粉丝聊天分享。",
         "writing_rules": {
             "length_min": 300,
@@ -70,13 +72,14 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
             "title_optimize": True,
             "keyword_strategy": "标题包含核心搜索词，正文自然分布长尾词",
         },
-        "quality_check": "内容有小鱼干感吗？像真人分享吗？有互动引导吗？有没有广告腔？标题包含搜索关键词吗？段落间距合理吗？",
+        "quality_check": "像真人分享吗？有真实使用感吗？有互动引导吗？有没有广告腔？标题能引发点赞收藏吗？段落短小有留白吗？",
     },
 
     "wechat": {
         "name": "公众号",
         "icon": "📱",
         "category": "social_media",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个资深的行业观察者和内容创作者。你的文章有深度、有温度、有态度。读者愿意花5-10分钟读你的文章，是因为你提供了不可替代的洞察。",
         "writing_rules": {
             "length_min": 2000,
@@ -108,13 +111,14 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
             "title_optimize": True,
             "keyword_strategy": "标题包含目标读者关注的关键词，正文SEO非核心",
         },
-        "quality_check": "文章有深度吗？观点有论据支撑吗？结构有递进吗？开头够吸引人吗？读者愿意转发吗？",
+        "quality_check": "有让人想转发的冲动吗？观点有数据或案例支撑吗？结构层次清晰吗？开头能让读者停下来吗？读者会认真读完吗？",
     },
 
     "weibo": {
         "name": "微博",
         "icon": "🔵",
         "category": "social_media",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个观点鲜明的微博博主。你的每条微博都有态度、有信息量、有传播力。你知道怎么用140字让别人停下来看完。",
         "writing_rules": {
             "length_min": 50,
@@ -149,7 +153,8 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "抖音",
         "icon": "🎵",
         "category": "social_media",
-        "system_prompt": "你是一个抖音短视频创作者。你写的是口播稿，不是文章。开场3秒决定完播率。你知道怎么在15秒内说完一个让人记住的点。",
+        "content_genre": "text",  # 图文
+        "system_prompt": "你是一个抖音图文笔记创作者。你的图文内容要在信息流里1秒内抓住注意力。标题要冲击感强，正文要信息密度高、实用价值强。",
         "writing_rules": {
             "length_min": 100,
             "length_max": 600,
@@ -159,15 +164,15 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
                 "正文（7-50秒）：讲1-2个核心信息点，不要贪多。信息点之间用'重点来了'等过渡。",
                 "结尾（2-3秒）：总结+引导关注/点赞，如'觉得有用点个赞吧～'",
             ],
-            "formatting": "标注每段预估时长（秒）。关键句标注'重读'。停顿处标注'（停顿）'。手势/表情处标注'（指屏幕）'。",
+            "formatting": "每段不超过3行。关键信息加粗。数字/重点突出。多留白，方便手机阅读。",
             "opening_template": "[数字/反差/痛点]！今天聊点干的：[一句话主题]",
-            "ending_template": "总结一下：[一句话核心]。觉得有用的话点个赞，下期聊[下期预告]",
-            "emoji_strategy": "脚本中标注画面效果时使用，口播内容本身不需要emoji。",
+            "ending_template": "总结一下：[一句话核心]。觉得有用的话点个赞！",
+            "emoji_strategy": "适度使用，每段1-2个。用🔴🔥💡✅等标记重点。",
             "avoid": [
-                "不要写长句——口播要短句，方便换气",
-                "不要信息量太大——一条视频讲清1个点就够了",
-                "不要忘了节奏感——要有起承转合",
+                "不要写长句——图文要短句，方便快速扫读",
+                "不要信息量太大——一条图文讲清1-2个点就够了",
                 "不要用书面语——说'看'不说'观看'，说'用'不说'使用'",
+                "不要超过500字",
             ],
         },
         "agent_pipeline": {
@@ -179,32 +184,33 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
             "title_optimize": True,
             "keyword_strategy": "标题和描述中布局搜索关键词",
         },
-        "quality_check": "前3秒有钩子吗？口播读起来顺口吗？信息点不超过2个吗？有节奏感吗？",
+        "quality_check": "图文信息密度够吗？标题能一眼抓住人吗？有实用价值吗？排版层次清晰吗？",
     },
 
     "bilibili": {
         "name": "B站",
         "icon": "🅱️",
         "category": "social_media",
-        "system_prompt": "你是一个B站UP主。你的内容有专业深度，但用有趣的方式表达。你了解弹幕文化，知道什么时候留白让弹幕飞。",
+        "content_genre": "text",  # 图文
+        "system_prompt": "你是一个B站UP主。你的图文内容专业但有趣，干货硬核。读者收藏了你的内容，是希望以后认真看的。",
         "writing_rules": {
             "length_min": 800,
             "length_max": 3000,
             "tone": "专业但不端着，有趣但不低俗。像跟朋友边聊天边展示专业。可以吐槽、自黑。",
             "structure": [
-                "开场hook：用吐槽/自黑/惊人开场，如'这期视频可能会得罪很多人，但我还是想说...'",
-                "引入主题：为什么要聊这个，背景是什么。1-2分钟。",
-                "正文深度：3-5个核心论点，每个论点用数据/案例支撑。可以穿插搞笑片段。",
-                "结尾：总结+一键三连引导。可以加彩蛋或下期预告。",
+                "开头：用吐槽/自黑/惊人开场，如'这期视频可能会得罪很多人，但我还是想说...'",
+                "引入主题：为什么要聊这个，背景是什么。1-2分钟阅读量。",
+                "正文深度：3-5个核心论点，每个论点用数据/案例支撑。可以穿插幽默缓解信息疲劳。",
+                "结尾：总结+收藏引导。可以说'建议收藏，以后用得上'。",
             ],
-            "formatting": "脚本标注'画面'和'声音'两条线。在可能出弹幕的地方标注'（等弹幕）'。有趣的点标注'梗'。",
-            "opening_template": "[开场hook]。大家好，我是[UP主名]。今天咱们来聊聊[主题]。",
-            "ending_template": "好了以上就是本期全部内容。如果你觉得有帮助，别忘了一键三连～我们下期见！",
-            "emoji_strategy": "文案本身不依赖emoji。但标注画面效果时使用（😅🔥💀）。",
+            "formatting": "小标题分层。有趣的论点可以加粗。3-4段插入一张配图为宜。",
+            "opening_template": "[开场hook]。大家好，今天咱们来聊聊[主题]。",
+            "ending_template": "好了以上就是本期全部内容。建议收藏，以后可能用得上～",
+            "emoji_strategy": "文案本身适度使用（😅🔥💀），标注画面效果时使用。",
             "avoid": [
-                "不要像教科书——B站用户讨厌'念稿感'",
+                "不要像教科书——B站读者讨厌'念稿感'",
                 "不要全是干货没有梗——需要穿插幽默缓解信息疲劳",
-                "不要忘了弹幕互动——留白让观众吐槽",
+                "不要忘了收藏引导——B站用户习惯先收藏再细看",
                 "不要用其他平台的语言风格——B站有自己的社区文化",
             ],
         },
@@ -217,7 +223,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
             "title_optimize": True,
             "keyword_strategy": "标题包含搜索关键词，标签匹配热门分类",
         },
-        "quality_check": "有B站味吗？节奏有起伏吗？有留弹幕的空间吗？专业度够吗？有趣吗？",
+        "quality_check": "有干货吗？让人想收藏吗？专业但有趣吗？排版适合深度阅读吗？",
     },
 
     # ═══════════════════════════════════════════════════
@@ -228,6 +234,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "产品文案",
         "icon": "📝",
         "category": "content",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个资深的营销文案写手。你的文字能卖货。你知道怎么在3秒内抓住注意力、在10秒内传递价值、在30秒内促使用户行动。",
         "writing_rules": {
             "length_min": 100,
@@ -269,6 +276,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "品牌故事",
         "icon": "💼",
         "category": "content",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个品牌叙事专家。你帮品牌讲出让用户记住的故事。你知道好的品牌故事不是介绍'我是谁'，而是让用户觉得'这就是我相信的'。",
         "writing_rules": {
             "length_min": 500,
@@ -309,6 +317,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "广告文案",
         "icon": "📢",
         "category": "content",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个效果广告文案专家。你写的每一个字都要为转化负责。你知道在信息流里，你的文案只有1秒让用户停下来。",
         "writing_rules": {
             "length_min": 30,
@@ -346,6 +355,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "小说故事",
         "icon": "📖",
         "category": "content",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个小说作家。你不只是讲故事，你创造了一个让读者愿意沉浸的世界。你的人物有血肉，他们的选择让读者在意。你的语言有质感，每个字都有分量。",
         "writing_rules": {
             "length_min": 1000,
@@ -385,6 +395,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "剧本脚本",
         "icon": "🎬",
         "category": "content",
+        "content_genre": "text",  # 图文剧本
         "system_prompt": "你是一个编剧。你写的不是供人阅读的文字，而是供人拍摄的蓝图。你思考的是：这个镜头怎么拍？这场戏的情绪是什么？这个台词演员怎么说出来？",
         "writing_rules": {
             "length_min": 500,
@@ -416,7 +427,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
             "title_optimize": False,
             "keyword_strategy": "剧本不依赖SEO",
         },
-        "quality_check": "格式规范吗？场景描述可视化吗？对白自然有潜台词吗？节奏有起伏吗？",
+        "quality_check": "场景可视化吗？人物有血肉吗？对白有潜台词吗？节奏有起伏吗？展现而非讲述了吗？",
     },
 
     # ═══════════════════════════════════════════════════
@@ -427,6 +438,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "技术文档",
         "icon": "📘",
         "category": "professional",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个技术文档工程师。你的读者是忙碌的开发者。他们不是来欣赏文采的，是来解决问题的。每一个字都要为'让读者快速理解和使用'这个目标服务。",
         "writing_rules": {
             "length_min": 300,
@@ -468,6 +480,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "教程指南",
         "icon": "📗",
         "category": "professional",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个有耐心的老师。你擅长把一个复杂的事情拆成简单步骤。你不只是告诉读者怎么做，你还帮他们理解为什么这么做。你记得你第一次学这个东西时哪里最困惑。",
         "writing_rules": {
             "length_min": 500,
@@ -509,6 +522,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "SEO文章",
         "icon": "🔍",
         "category": "professional",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个SEO内容专家。你写的每一篇文章都有一个明确的搜索目标。你理解搜索意图（用户搜这个词到底想找什么），并围绕这个意图组织内容。你同时为搜索引擎和真实读者写作。",
         "writing_rules": {
             "length_min": 1500,
@@ -551,6 +565,7 @@ PLATFORM_PROFILES: dict[str, dict[str, Any]] = {
         "name": "邮件营销",
         "icon": "📧",
         "category": "professional",
+        "content_genre": "text",  # 图文
         "system_prompt": "你是一个邮件营销专家。你知道每一封邮件都在争夺用户注意力。你的用户可能每天收到50封邮件，你的邮件要让TA想打开、想读完、想点击。",
         "writing_rules": {
             "length_min": 100,
@@ -665,6 +680,58 @@ def get_seo_config(platform_code: str) -> dict[str, Any]:
 def get_all_codes() -> list[str]:
     """返回所有平台代码"""
     return list(PLATFORM_PROFILES.keys())
+
+
+def get_content_genre(platform_code: str) -> str:
+    """获取平台的内容体裁
+
+    返回值:
+        text: 图文（默认）
+        video: 视频脚本
+        audio: 音频脚本
+    """
+    profile = get_profile(platform_code)
+    if profile:
+        return profile.get("content_genre", "text")
+    return "text"
+
+
+def get_genre_display_name(genre: str) -> str:
+    """获取体裁的中文显示名"""
+    names = {
+        "text": "图文",
+        "video": "视频脚本",
+        "audio": "音频脚本",
+    }
+    return names.get(genre, "图文")
+
+
+def get_all_genres() -> list[dict[str, str]]:
+    """返回所有体裁类型（去重）"""
+    genres_seen = set()
+    genres = []
+    for code, profile in PLATFORM_PROFILES.items():
+        genre = profile.get("content_genre", "text")
+        if genre not in genres_seen:
+            genres_seen.add(genre)
+            genres.append({
+                "code": genre,
+                "name": get_genre_display_name(genre),
+            })
+    return genres
+
+
+def get_platforms_by_genre(genre: str) -> list[dict[str, str]]:
+    """获取指定体裁的所有平台"""
+    result = []
+    for code, profile in PLATFORM_PROFILES.items():
+        if profile.get("content_genre", "text") == genre:
+            result.append({
+                "code": code,
+                "name": profile["name"],
+                "icon": profile.get("icon", ""),
+            })
+    return result
 
 
 def get_names_map() -> dict[str, str]:

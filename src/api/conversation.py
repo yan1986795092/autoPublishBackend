@@ -133,8 +133,9 @@ async def conversation_chat(
             .first()
         )
         if existing:
+            conv = existing
+            conv.updated_at = datetime.utcnow()
             conversation_id = existing.id
-            existing.updated_at = datetime.utcnow()
             db.commit()
         else:
             conv = ChatConversation(
@@ -228,11 +229,14 @@ async def conversation_chat(
                     # 不在这里 yield trigger，等文本流结束后再 yield
 
             # 5. 保存对话 LLM 的回复
-            if accumulated_text:
+            # 注意：tool_choice="required" 模式下 LLM 可能只调工具不输出文本，
+            # 此时 accumulated_text 为空，但仍然需要 asst_msg 来挂 trigger/result_json。
+            # 所以只要有任意可挂载的内容（文本或 trigger），就创建 asst_msg。
+            if accumulated_text or trigger_data:
                 asst_msg = ChatMessageRecord(
                     conversation_id=conversation_id,
                     role="assistant",
-                    content=accumulated_text,
+                    content=accumulated_text or "",
                     status="completed",
                 )
                 db.add(asst_msg)
@@ -245,6 +249,16 @@ async def conversation_chat(
                     _inject_revision_source(trigger_data, conversation_id, db)
 
                 # 更新 assistant 消息的 result_json
+                # 防御性兜底：若 asst_msg 不存在（理论上不会到这里，但保持鲁棒性）
+                if 'asst_msg' not in locals() or asst_msg is None:
+                    asst_msg = ChatMessageRecord(
+                        conversation_id=conversation_id,
+                        role="assistant",
+                        content="",
+                        status="completed",
+                    )
+                    db.add(asst_msg)
+                    db.commit()
                 asst_msg.result_json = json.dumps({
                     "trigger": trigger_data,
                     "type": trigger_data.get("action", "create"),
@@ -305,11 +319,16 @@ async def conversation_chat(
                     yield agent_event
 
             # 返回 done 事件
+            # 防御性：asst_msg 只在 accumulated_text 或 trigger_data 存在时才会被创建
             yield {
                 "event": "done",
                 "data": json.dumps({
                     "conversation_id": conversation_id,
-                    "message_id": asst_msg.id if accumulated_text else None,
+                    "message_id": (
+                        asst_msg.id
+                        if 'asst_msg' in locals() and asst_msg is not None
+                        else None
+                    ),
                 }, ensure_ascii=False),
             }
 

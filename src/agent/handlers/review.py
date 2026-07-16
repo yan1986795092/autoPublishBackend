@@ -140,15 +140,10 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             lc_messages.append(SystemMessage(content=(
                 f"注意：这是第 {review_round} 轮复审。内容是经过上一轮审核意见修改后的版本。\n"
                 f"请仔细检查修改是否到位。如果内容质量已达标，请明确给出通过结论。\n\n"
-                f"【强制格式要求】即使内容已通过，也必须输出完整的评分格式：\n"
-                f"- 内容完整性：XX/25（扣分原因：...）\n"
-                f"- 逻辑连贯性：XX/25（扣分原因：...）\n"
-                f"- 语言表达：XX/25（扣分原因：...）\n"
-                f"- 合规与节奏：XX/25（扣分原因：...）\n"
-                f"- 总分：XX/100\n"
-                f"- 审核结论：通过 / 基本通过 / 需修改\n"
-                f"- 主要问题：（引用原文用「」，限 3 条）\n"
-                f"- 改进建议：（限 5 条，无则写'无'）\n"
+                f"【强制输出格式】\n"
+                f"**审核结论：** 通过 / 需修改\n"
+                f"**主要问题：** （引用原文用「」，限 3 条，无则写'整体质量良好'）\n"
+                f"**改进建议：** （限 5 条，无则写'无'）\n"
                 f"请在你的回复末尾单独一行输出审核结论：**审核结论：通过** 或 **审核结论：需修改**"
             )))
 
@@ -160,24 +155,21 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         )
         quality_text = llm_result.content
 
-        # 从输出中提取总分（格式：总分：**XX**/100 或 总分：XX/100）
-        score_match = re.search(r"总分[：:][\s\*]*(\d{1,3})[\s\*]*/\s*100", quality_text)
-        score = int(score_match.group(1)) if score_match else 0
-        # 从输出中提取各维度分（兼容 **XX/25**、XX/25、**XX**/25 等格式）
-        dims = re.findall(r"[：:][\s\*]*(\d{1,2})\s*/\s*25", quality_text)
-        min_dim = min(int(d) for d in dims) if len(dims) >= 4 else 0
-
-        # 提取 LLM 显式结论（prompt 末尾的"**审核结论：通过/需修改**"行）
-        # 优先信任 LLM 自己的判断（它能识别"改无可改"的边际情况）
+        # 提取 LLM 结论（"**审核结论：通过**" 或 "**审核结论：需修改**"）
         explicit_pass = bool(re.search(
             r"\*\*审核结论[:：]\*\*\s*\[?通过\]?", quality_text
         ))
 
-        # 判定标准：总分≥70 且 每项≥12（"基本通过"线），
-        # 或 LLM 显式给出"通过"结论（"已达标可放过"）。
-        passed = explicit_pass or (score >= 70 and min_dim >= 12)
+        # 提取隐藏评分行（格式 "SCORE:85"），用于 pass/fail 判定
+        score = 0
+        score_match = re.search(r"SCORE\s*[:：]\s*(\d{1,3})", quality_text)
+        if score_match:
+            score = int(score_match.group(1))
 
-        # 提取改进建议（只取 "**改进建议：**" 之后的内容，避免评分区文字干扰）
+        # 判定标准：总分≥70 或 LLM 显式给出"通过"结论
+        passed = explicit_pass or score >= 70
+
+        # 提取改进建议（从 "**改进建议：**" 之后的内容）
         suggestions = []
         in_suggestion_section = False
         for line in quality_text.split("\n"):
@@ -189,18 +181,8 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
                 if stripped and stripped != "无":
                     suggestions.append(stripped)
 
-        # 重新构建展示内容：去掉评分明细，只留结论、问题、建议
-        display_lines = []
-        in_score_section = False
-        for line in quality_text.split("\n"):
-            if "**各维度评分" in line:
-                in_score_section = True
-                continue
-            if "**审核结论：**" in line and in_score_section:
-                in_score_section = False
-            if in_score_section:
-                continue
-            display_lines.append(line)
+        # 展示内容：去掉 SCORE 隐藏行，只留结论+问题+建议
+        display_lines = [l for l in quality_text.split("\n") if not re.match(r"^\s*SCORE\s*[:：]\s*\d", l.strip())]
         display_text = "\n".join(display_lines).strip()
 
         # ── 自动修正 ──
@@ -257,7 +239,7 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
         prompt_tokens = llm_result.prompt_tokens + (fix_result.prompt_tokens if rewrite_applied else 0)
         completion_tokens = llm_result.completion_tokens + (fix_result.completion_tokens if rewrite_applied else 0)
 
-        thinking_summary = f"总分 {score}" + (f" ✓" if passed else " ✗") + f" · 违禁词 {len(banned_found)} 个"
+        thinking_summary = ("✅ 通过" if passed else "❌ 需修改") + f" · 违禁词 {len(banned_found)} 个"
         if fc_report:
             thinking_summary += f" · 事实核查 {fc_report.get('total_claims_checked', 0)} 处"
         if rewrite_applied:
@@ -273,7 +255,6 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             output_extra={
                 "passed": passed,
                 "score": score,
-                "min_dim": min_dim,
                 "banned_words": banned_found,
                 "factcheck": fc_report,
                 "suggestions": suggestions[:5],
@@ -285,7 +266,6 @@ async def handle_review(task_input: dict, llm: ChatOpenAI, mcp_tools: list | Non
             output_fields={
                 "review_text": display_text,
                 "passed": passed,
-                "score": score,
                 "suggestions": suggestions[:5],
             },
             prompt_versions=composed.used_templates,

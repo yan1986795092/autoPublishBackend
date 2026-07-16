@@ -19,7 +19,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from pydantic import ValidationError
+
 from .contracts import PlannerOutput
+from ..logging_shared import get_logger
+
+logger = get_logger("agent.plan_validator")
 
 
 @dataclass
@@ -84,6 +89,12 @@ def validate_plan(plan: PlannerOutput) -> PlanValidationResult:
             if d not in task_ids:
                 issues.append(f"task '{t.id}' 的依赖 '{d}' 不存在（应引用本 plan 中其他 task 的 id）")
 
+    # 5b. 重复依赖（同 一个 task 的 dependencies 中有重复 id）
+    for t in plan.tasks:
+        if len(t.dependencies) != len(set(t.dependencies)):
+            dupes = [d for d in t.dependencies if t.dependencies.count(d) > 1]
+            issues.append(f"task '{t.id}' 的 dependencies 有重复: {set(dupes)}")
+
     # 6. 自引用
     for t in plan.tasks:
         if t.id in t.dependencies:
@@ -142,10 +153,27 @@ def plan_to_dict(plan: PlannerOutput) -> dict[str, Any]:
     }
 
 
-def dict_to_plan(data: dict[str, Any]) -> PlannerOutput:
-    """把 graph state 的 dict 反序列化为 PlannerOutput。"""
-    return PlannerOutput.model_validate({
-        "goal": data.get("goal", ""),
-        "tasks": data.get("tasks", []),
-        "reasoning": data.get("reasoning", ""),
-    })
+def dict_to_plan(data: dict[str, Any]) -> PlannerOutput | None:
+    """把 graph state 的 dict 反序列化为 PlannerOutput。
+
+    如果 Pydantic 校验失败（如修改后引入了循环依赖），返回 None。
+    调用方应处理 None 并走 fallback。
+    """
+    try:
+        return PlannerOutput.model_validate({
+            "goal": data.get("goal", ""),
+            "tasks": data.get("tasks", []),
+            "reasoning": data.get("reasoning", ""),
+        })
+    except ValidationError as e:
+        logger.warning(
+            "dict_to_plan: Pydantic 校验失败（plan 可能在修改后引入了循环依赖），返回 None. error=%s",
+            str(e)[:200],
+        )
+        return None
+    except Exception as e:
+        logger.warning(
+            "dict_to_plan: 意外异常，返回 None. error=%s",
+            str(e)[:200],
+        )
+        return None

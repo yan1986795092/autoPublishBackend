@@ -8,12 +8,27 @@ from langchain_core.messages import SystemMessage, HumanMessage
 from langchain_openai import ChatOpenAI
 from ..agent_utils import extract_output
 from src.prompts import PromptBuilder, CONTENT_TYPE_PROMPTS, STYLE_GUIDES
+from src.prompts.builtins.writing import TONE_GUIDES, LENGTH_GUIDES, AUDIENCE_GUIDES
 from src.core.exceptions import HandlerError
 from .tool_utils import call_llm
 from src.logging_shared.config import get_logger
 from ..platform_profile import get_profile, format_writing_rules, get_names_map
 
 logger = get_logger("agent.writing")
+
+# ── 创作偏好 → LLM 参数映射 ──────────────────────────────
+def _creativity_to_temperature(creativity: float | None) -> float | None:
+    """前端 creativity (0~1) 映射为 LLM temperature (0.2~0.9)"""
+    if creativity is None:
+        return None
+    return round(0.2 + creativity * 0.7, 2)
+
+
+LENGTH_TO_MAX_TOKENS: dict[str, int] = {
+    "short": 1200,
+    "medium": 2500,
+    "long": 5000,
+}
 
 
 async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | None = None) -> dict:
@@ -24,6 +39,14 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         style: str = task_input.get("style", "")
         platform: str = task_input.get("platform", "")
         platform_name: str = ""
+
+        # ── 创作偏好参数（从 ConversationEngine trigger 或前端 preferences 传入） ──
+        # 映射链路：前端 preferences → trigger fields → task_input
+        creativity: float | None = task_input.get("creativity")
+        tone: str = task_input.get("tone", "")
+        length: str = task_input.get("length", "medium")
+        audience: str = task_input.get("audience", "intermediate")
+
         # consume 字段：由依赖链自动注入
         search_analysis: str = task_input.get("search_analysis", "")
 
@@ -68,12 +91,35 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         style_guide = STYLE_GUIDES.get(style, "自然流畅，有自己的观点和态度")
         platform_line = f"**目标平台：** {platform_name}" if platform_name else ""
 
+        # ── 创作偏好 → 写作指南（Prompt 渲染用）─────────────────────────────
+        tone_guide = TONE_GUIDES.get(tone, TONE_GUIDES.get("friendly", "语气自然流畅，像和朋友聊天一样亲切友好。"))
+        length_guide = LENGTH_GUIDES.get(length, LENGTH_GUIDES.get("medium", "适中篇幅，约 1000-2000 字，观点有展开，节奏适中。"))
+        audience_guide = AUDIENCE_GUIDES.get(audience, AUDIENCE_GUIDES.get("intermediate", "面向有基础的中级读者，假设读者了解基础知识，重点讲解进阶技巧。"))
+
+        # ── 体裁信息（用于 agent 行为控制）─────────────────────
+        genre = task_input.get("_content_genre", "text")
+        genre_display = {
+            "text": "图文",
+            "video": "视频脚本",
+            "audio": "音频脚本",
+        }.get(genre, "图文")
+        genre_line = f"**内容体裁：** {genre_display}"
+
+        # ── 创作偏好 → LLM 参数（temperature / max_tokens）───────────────────
+        # creativity 映射 temperature，length 映射 max_tokens
+        effective_temperature = _creativity_to_temperature(creativity)
+        effective_max_tokens = LENGTH_TO_MAX_TOKENS.get(length)
+
         builder.instructions("writing.task", {
             "topic": topic,
             "content_type": content_type,
             "style_guide": style_guide,
             "platform_line": platform_line,
+            "genre_line": genre_line,
             "type_guide": type_guide,
+            "tone_guide": tone_guide,
+            "length_guide": length_guide,
+            "audience_guide": audience_guide,
         })
 
         # 注入工具描述
@@ -107,11 +153,14 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
                 lc_messages.append(HumanMessage(content=m["content"]))
 
         # ── 工具感知的 LLM 调用 ──
+        # 透传创作偏好：creativity → temperature，length → max_tokens
         llm_result = await call_llm(
             llm, lc_messages,
             agent_type="WritingAgent",
             stream=True,
             on_chunk=task_input.get("_on_llm_chunk"),
+            temperature=effective_temperature,
+            max_tokens=effective_max_tokens,
         )
         raw = llm_result.content
 

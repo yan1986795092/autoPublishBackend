@@ -101,11 +101,16 @@ async def handle_search_analyzer(task_input: dict, llm: ChatOpenAI, mcp_tools: l
             HumanMessage(content=prompt),
         ]
 
+        # 流式回调：发送 reasoning 和 llm_chunk 事件到前端
+        on_reasoning = task_input.get("_on_reasoning")
+        on_llm_chunk = task_input.get("_on_llm_chunk")
+
         llm_result = await call_llm(
             llm, messages,
             agent_type="SearchAnalyzer",
             stream=True,
-            on_chunk=task_input.get("_on_llm_chunk"),
+            on_chunk=on_llm_chunk,
+            on_reasoning=on_reasoning,
         )
 
         analysis = llm_result.content.strip()

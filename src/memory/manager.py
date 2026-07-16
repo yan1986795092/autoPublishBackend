@@ -24,7 +24,7 @@ AGENT_NAMESPACE_MAP: dict[str, str] = {
     "WebSearch": "knowledge",
     "ReviewAgent": "feedback",
     "SEOAgent": "domain",
-    "DiagramAgent": "content",
+    # "DiagramAgent": "content",  # TEMP: DiagramAgent disabled
     "PlatformAdapter": "template",
     "ImageAgent": "content",
     "SearchAnalyzer": "knowledge",
@@ -35,13 +35,13 @@ AGENT_NAMESPACE_MAP: dict[str, str] = {
 # ── 哪些 Agent 需要注入语义记忆上下文 ──
 AGENT_MEMORY_ENABLED = {
     "WritingAgent", "SEOAgent", "ReviewAgent",
-    "DiagramAgent", "CodeAgent", "TranslationAgent",
+    # "DiagramAgent", "CodeAgent", "TranslationAgent",  # TEMP: DiagramAgent disabled
 }
 
 # ── 哪些 Agent 的输出值得存入语义记忆 ──
 AGENT_REMEMBER_ENABLED = {
     "WritingAgent", "WebSearch",
-    "DiagramAgent", "SEOAgent",
+    # "DiagramAgent", "SEOAgent",  # TEMP: DiagramAgent disabled
 }
 
 

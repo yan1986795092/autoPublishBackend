@@ -124,6 +124,15 @@ async def handle_web_search(task_input: dict, llm: ChatOpenAI, mcp_tools: list |
             "source": "bocha",
             "query": query,
             "original_query": original_query,
+            # structured 用于前端格式化展示搜索结果（一次性传递，非流式）
+            "structured": {
+                "type": "search_results",
+                "query": query,
+                "original_query": original_query,
+                "source": "bocha",
+                "results": results,
+                "count": len(results),
+            },
         },
         output_fields={
             "search_results": results,

@@ -28,6 +28,32 @@ def _make_part_id(prefix: str, suffix: str = "") -> str:
     return f"{prefix}_{suffix}_{ts}" if suffix else f"{prefix}_{ts}"
 
 
+def _build_artifact_structured(output: dict) -> dict | None:
+    """构建 artifact 的 structured 数据。
+    
+    1. 优先使用 output.structured
+    2. WebSearch 等工具的 results 数据自动合并到 structured.search_results
+    """
+    structured = output.get("structured")
+    
+    # WebSearch 工具：把 results 自动放入 structured.search_results
+    results = output.get("results")
+    if results and isinstance(results, list):
+        if structured is None:
+            structured = {}
+        if "search_results" not in structured:
+            structured["search_results"] = {
+                "type": "search_results",
+                "query": output.get("query", ""),
+                "original_query": output.get("original_query", ""),
+                "source": output.get("source", "bocha"),
+                "results": results,
+                "count": len(results),
+            }
+    
+    return structured if isinstance(structured, dict) and structured else None
+
+
 async def run_agent_sse_generator(
     *,
     user_prompt: str,
@@ -224,6 +250,7 @@ async def run_agent_sse_generator(
                         "icon": icon,
                         "status": status,
                         "round": round_,
+                        "reviewRound": round_,  # 前端期望 reviewRound，同时保留 round 兼容
                         **({"duration_ms": duration_ms} if duration_ms else {}),
                         **({"error": error_msg} if error_msg else {}),
                     }, ensure_ascii=False),
@@ -293,10 +320,12 @@ async def run_agent_sse_generator(
                     ),
                 }
                 # P0: 累积 llm_chunk，写入 result_json
+                # 按 (agent, review_round) 分拆 key，多轮审核/润色各自独立
                 if delta and agent != "unknown":
-                    if agent not in _accumulated_llm_chunks:
-                        _accumulated_llm_chunks[agent] = []
-                    _accumulated_llm_chunks[agent].append({
+                    _llm_key = f"{agent}|{review_round}" if review_round else agent
+                    if _llm_key not in _accumulated_llm_chunks:
+                        _accumulated_llm_chunks[_llm_key] = []
+                    _accumulated_llm_chunks[_llm_key].append({
                         "agent": agent,
                         "content": delta,
                         "timestamp": int(time.time() * 1000),
@@ -401,21 +430,6 @@ async def run_agent_sse_generator(
                         "status": step_data.get("status", "done"),
                     })
 
-            # ── preview_sync → 推送到前端预览面板 ──
-            elif et == "preview_sync":
-                yield {
-                    "event": "preview_sync",
-                    "data": json.dumps(data, ensure_ascii=False),
-                }
-                # 同时写入 PartWriter（让历史消息能还原预览数据）
-                if part_writer and data.get("body"):
-                    await part_writer.append("artifact", "preview_sync", {
-                        "artifact_type": "preview_sync",
-                        "body": data.get("body", ""),
-                        "title": data.get("title", ""),
-                        "tags": data.get("tags", []),
-                    })
-
             # ── task_partial → artifact（部分结果）──
             # [修复] 第一轮 pipeline 完成后，虽然 task_partial 被 worker 标记为失败重试，
             # 但内容已生成；直接 yield artifact 让用户能看到中间产物。
@@ -428,8 +442,9 @@ async def run_agent_sse_generator(
                         "artifact_type": _infer_artifact_type(output),
                         "body": full_text,
                         "title": output.get("title"),
+                        "tags": output.get("tags"),
                         "platform": output.get("platform"),
-                        "structured": output.get("structured"),
+                        "structured": _build_artifact_structured(output),
                     })
                 yield {
                     "event": "artifact",
@@ -438,8 +453,9 @@ async def run_agent_sse_generator(
                         "artifact_type": _infer_artifact_type(output),
                         "body": full_text,
                         "title": output.get("title"),
+                        "tags": output.get("tags"),
                         "platform": output.get("platform"),
-                        "structured": output.get("structured"),
+                        "structured": _build_artifact_structured(output),
                     }, ensure_ascii=False),
                 }
 
@@ -453,8 +469,9 @@ async def run_agent_sse_generator(
                         "artifact_type": _infer_artifact_type(output),
                         "body": full_text,
                         "title": output.get("title"),
+                        "tags": output.get("tags"),
                         "platform": output.get("platform"),
-                        "structured": output.get("structured"),
+                        "structured": _build_artifact_structured(output),
                     })
                 yield {
                     "event": "artifact",
@@ -463,8 +480,9 @@ async def run_agent_sse_generator(
                         "artifact_type": _infer_artifact_type(output),
                         "body": full_text,
                         "title": output.get("title"),
+                        "tags": output.get("tags"),
                         "platform": output.get("platform"),
-                        "structured": output.get("structured"),
+                        "structured": _build_artifact_structured(output),
                     }, ensure_ascii=False),
                 }
                 # 更新消息正文 + result_json（含 accumulated stages/reasoning/llmChunks）
@@ -539,8 +557,9 @@ async def run_agent_sse_generator(
                         "artifact_type": _infer_artifact_type(output),
                         "body": full_text,
                         "title": output.get("title"),
+                        "tags": output.get("tags"),
                         "platform": output.get("platform"),
-                        "structured": output.get("structured"),
+                        "structured": _build_artifact_structured(output),
                     })
                 yield {
                     "event": "artifact",
@@ -549,8 +568,9 @@ async def run_agent_sse_generator(
                         "artifact_type": _infer_artifact_type(output),
                         "body": full_text,
                         "title": output.get("title"),
+                        "tags": output.get("tags"),
                         "platform": output.get("platform"),
-                        "structured": output.get("structured"),
+                        "structured": _build_artifact_structured(output),
                     }, ensure_ascii=False),
                 }
                 if part_writer:

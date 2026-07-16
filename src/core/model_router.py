@@ -3,7 +3,7 @@
 两种模式：
   1. get_chat_model(agent_type)  — 自动路由模式
      发送 model="auto" + X-Route-Hint，交给 Gateway 的 AutoRouter 按成本选 cheapest
-     适用于：WritingAgent, SEOAgent, ReviewAgent, DiagramAgent, WebSearch, AIEditorService
+     适用于：WritingAgent, SEOAgent, ReviewAgent, WebSearch, AIEditorService  # TEMP: DiagramAgent disabled
 
      2. get_chat_model_for_model(model, agent_type) — 指定模型模式
      发送具体模型名（如 "deepseek-chat"），Gateway 精确匹配到对应 adapter
@@ -58,7 +58,7 @@ class ModelRouter:
             "WritingAgent": "creative",
             "SEOAgent": "creative",
             "ReviewAgent": "analysis",
-            "DiagramAgent": "creative",
+            # "DiagramAgent": "creative",  # TEMP: DiagramAgent disabled
             "WebSearch": "simple",
             "AIEditorService": "simple",
             "ContentService": "simple",

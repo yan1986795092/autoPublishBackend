@@ -142,11 +142,14 @@ async def call_llm(
     agent_type: str = "",
     stream: bool = False,
     on_chunk: Optional[Callable] = None,
+    on_reasoning: Optional[Callable] = None,
     trace_id: str | None = None,
     span_id: str | None = None,
     parent_span_id: str | None = None,
     tool_definitions: list[dict] | None = None,
     raw: bool = False,
+    temperature: float | None = None,
+    max_tokens: int | None = None,
 ) -> LLMResult:
     """调用 LLM，返回内容 + 实际 token 用量。
 
@@ -156,6 +159,12 @@ async def call_llm(
     - 新增参数：trace_id / span_id / parent_span_id / tool_definitions / raw。
       全部默认 None 或 False，向后兼容现有 12 个 handler 调用方。
     - raw=True 表示跳过 PII 脱敏（业务侧确认无敏感信息时可显式 opt-in）。
+
+    创作偏好增强：
+    - temperature: 覆盖 LLM 实例默认 temperature，控制输出随机性（0=确定性，1=发散）。
+      由前端"创造力"参数映射而来（creativity 0→0.2，0.5→0.6，1→0.9）。
+    - max_tokens: 覆盖 LLM 实例默认 max_tokens，控制最大输出长度。
+      由前端"篇幅"参数映射而来（short→800，medium→2000，long→4000）。
 
     Args:
         llm: ChatOpenAI 实例
@@ -168,12 +177,23 @@ async def call_llm(
         parent_span_id: 上游 Agent 的 span id（如果有）
         tool_definitions: 调用 LLM 时可用的工具 schema（写入 PromptRecord）
         raw: True = 不脱敏
+        temperature: 可选，per-call 覆盖 LLM 的 temperature（用于创作偏好）
+        max_tokens: 可选，per-call 覆盖 LLM 的 max_tokens（用于篇幅控制）
 
     Returns:
         LLMResult: 包含 content / prompt_tokens / completion_tokens
     """
     model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
-    temperature = getattr(llm, "temperature", None)
+    # per-call 参数优先于 LLM 实例属性
+    effective_temperature = temperature if temperature is not None else getattr(llm, "temperature", None)
+    effective_max_tokens = max_tokens
+
+    # 构建 per-call LLM config（用于 ainvoke / astream）
+    call_config: dict[str, Any] = {}
+    if effective_temperature is not None:
+        call_config["temperature"] = effective_temperature
+    if effective_max_tokens is not None:
+        call_config["max_tokens"] = effective_max_tokens
 
     # 从 contextvars 提取 trace 元数据 — 业务侧 push_trace() 后即使 handler 不传参也能落库
     _cur = get_current_trace()
@@ -204,7 +224,7 @@ async def call_llm(
         model=model_name,
         messages=messages_dict,
         tool_definitions=tool_definitions,
-        temperature=temperature,
+        temperature=effective_temperature,
         raw=effective_raw,
     )
     try:
@@ -222,7 +242,7 @@ async def call_llm(
 
     if stream:
         start = time.perf_counter()
-        result = await _stream_only(llm, messages, on_chunk)
+        result = await _stream_only(llm, messages, on_chunk, on_reasoning, call_config)
         duration_ms = (time.perf_counter() - start) * 1000
         model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
 
@@ -269,7 +289,10 @@ async def call_llm(
 
     start = time.perf_counter()
     try:
-        result = await llm.ainvoke(messages)
+        if call_config:
+            result = await llm.ainvoke(messages, config=call_config)
+        else:
+            result = await llm.ainvoke(messages)
     except Exception as exc:
         duration_ms = (time.perf_counter() - start) * 1000
         model_name = getattr(llm, "model_name", getattr(llm, "model", "unknown"))
@@ -405,18 +428,42 @@ async def _stream_only(
     llm: ChatOpenAI,
     messages: list[BaseMessage],
     on_chunk: Optional[Callable],
+    on_reasoning: Optional[Callable] = None,
+    call_config: dict | None = None,
 ) -> LLMResult:
     """流式调用 LLM，尝试从流中提取 token 用量，失败时估算。
 
     策略（按优先级）：
     1. 从最后一个 chunk 的 response_metadata 中提取实际 token 用量
     2. 降级：按字符数估算 prompt_tokens 和 completion_tokens
+
+    Args:
+        on_reasoning: 可选的 reasoning 回调，用于接收 LLM 的思考过程
+        call_config: 可选的 per-call config dict，透传 temperature / max_tokens
     """
     raw_chunks: list[Any] = []
     full_content_chunks: list[str] = []
 
-    async for chunk in llm.astream(messages):
+    # 流式调用：temperature / max_tokens 通过 astream(config={...}) 注入
+    if call_config:
+        stream_input = (messages, {"configurable": call_config})
+    else:
+        stream_input = (messages,)
+
+    async for chunk in llm.astream(*stream_input):
         raw_chunks.append(chunk)
+
+        # 检查 chunk 是否包含 reasoning 内容
+        # LangChain 的 ChatOpenAI 流可能通过 additional_kwargs 或其他方式返回 reasoning
+        reasoning_content = None
+        if hasattr(chunk, "additional_kwargs"):
+            additional = chunk.additional_kwargs or {}
+            reasoning_content = additional.get("thinking") or additional.get("reasoning")
+
+        # 处理 reasoning 回调
+        if reasoning_content and on_reasoning:
+            await on_reasoning(reasoning_content)
+
         if chunk.content:
             full_content_chunks.append(chunk.content)
             if on_chunk:

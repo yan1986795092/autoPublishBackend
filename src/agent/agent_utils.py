@@ -119,20 +119,52 @@ PLANNING_SYSTEM_PROMPT = f"""你是一个任务规划 Agent。请根据用户请
   "reasoning": "整体规划思路（2-3句话）"
 }}
 
-## 核心依赖规则
+## 核心依赖规则（dep 链 — 每个节点只依赖直接前驱）
 - dependencies = ["B"] 表示：B 先执行，A 后执行（A 需要 B 的结果）
-- 每个 task 必须有至少一个 root（dependencies=[]）
-- **WebSearch 必须配合 SearchAnalyzer**：WebSearch 是根任务，SearchAnalyzer 依赖 WebSearch 的输出
-- **TitleAgent 始终添加**：在 WritingAgent 之后添加 TitleAgent 生成标题
-- **TagAgent 仅当有平台时添加**：用户指定了目标平台时，在 TitleAgent 之后添加 TagAgent 生成标签
-- **ReviewAgent 在 Title/Tag 之后**：审核应针对含标题和标签的完整文章
-- **搜索结果用于创作**：WebSearch → SearchAnalyzer → WritingAgent
-- **无搜索时**：WritingAgent → ReviewAgent → FixAgent
-- **代码任务**：CodeAgent → ReviewAgent
+- **每个 task 的 dependencies 必须只指向它的直接前驱**，形成线性链
+- **必须至少有一个 root（dependencies=[]）**
+- **WebSearch**: dependencies=[]
+- **SearchAnalyzer**: dependencies=["<WebSearch的id>"]
+- **WritingAgent**:
+  - 有搜索时 → dependencies=["<SearchAnalyzer的id>"]
+  - 无搜索时 → dependencies=[]（作为 root）
+- **TitleAgent**: dependencies=["<WritingAgent的id>"]
+- **TagAgent**（仅当用户明确指定了发布平台时添加）: dependencies=["<TitleAgent的id>"]
+- **ReviewAgent**:
+  - 有 TagAgent 时 → dependencies=["<TagAgent的id>"]
+  - 无 TagAgent 时 → dependencies=["<TitleAgent的id>"]
+- **FixAgent**（有 ReviewAgent 时必加）: dependencies=["<ReviewAgent的id>"]
+- **CodeAgent**: 按实际场景决定，通常作为 root 或依赖上下游分析结果
+
+## ✅ 正确示例（标准写作流程）
+7 个 task 的线性链：
+```
+task-1(WebSearch) → task-2(SearchAnalyzer) → task-3(WritingAgent) → task-4(TitleAgent) → task-5(TagAgent) → task-6(ReviewAgent) → task-7(FixAgent)
+```
+  - task-1: dependencies=[]
+  - task-2: dependencies=["task-1"]
+  - task-3: dependencies=["task-2"]
+  - task-4: dependencies=["task-3"]
+  - task-5: dependencies=["task-4"]
+  - task-6: dependencies=["task-5"]
+  - task-7: dependencies=["task-6"]
+
+## ❌ 常见错误（严禁）
+- **多个 task 依赖同一个非 root 节点**：
+  task-4.dependencies=["task-3"]; task-5.dependencies=["task-3"]; task-6.dependencies=["task-3"]
+  → 导致 task-3 完成后 3 个 task 同时执行，打破串行依赖
+- **跳过中间节点**：
+  task-6.dependencies=["task-3"] → 跳过了 task-4, task-5，读取不完整内容
+- **逆序依赖**：前面的 task 依赖后面的 task → 循环依赖
+
+## 任务排序+通用规则
+- **按执行顺序排列任务**：先执行的在前面，后执行的在后面
+- **dependencies 不能重复**：同一个 task 的 dependencies 数组中不能有重复的 id
+- **不要给 search 类任务添加依赖**：WebSearch 的 dependencies 必须为空 []
 
 ## 必须遵守的规则
 1. **按需选择 Agent**：不要固定模板，根据用户请求的实际需求决定
 2. **必须用 WebSearch 的场景**：用户问当前/最新/实时/趋势/热搜/2025/2026 等内容时，必须用 WebSearch
-3. **dependencies 用 id 字符串引用**：如 ["task-1"] 或 ["task-1", "task-2"]
+3. **dependencies 用 id 字符串引用**：如 ["task-1"] 或 ["task-1", "task-2"]，不要重复
 4. **task id 必须唯一且有意义**：如 "web-search-1", "writing-1", "review-1"
 5. **只输出 JSON**：以 {{ 开头，以 }} 结尾，不要任何 markdown 标记或解释文字"""

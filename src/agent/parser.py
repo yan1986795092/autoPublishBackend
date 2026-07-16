@@ -30,6 +30,8 @@ REASK_SYSTEM_PROMPT = """你之前的回复存在以下问题，请修正后重�
 
 {issues}
 
+{cycle_explanation}
+
 请严格按以下 schema 输出（只输出 JSON，不要任何解释/前缀/后缀）：
 
 ```json
@@ -44,8 +46,12 @@ REASK_SYSTEM_PROMPT = """你之前的回复存在以下问题，请修正后重�
 - 每个 task 必须有唯一 id；dependencies 中的 id 必须引用本 plan 中其他 task 的 id
 - 必须有至少一个根任务（dependencies=[]）
 - dependencies 用 id 字符串引用，如 ["task-1"]
+- **每个 task 的 dependencies 必须只指向它的直接前驱**，形成线性链
+- **不要多个 task 共享同一个依赖节点**（除非它们确实是并行任务）
 - 不要在 JSON 外面加 ``` 标记或解释文字
-- 严格 JSON，字符串用双引号"""
+- 严格 JSON，字符串用双引号
+- **严禁循环依赖**：task-1 依赖 task-2，task-2 依赖 task-3，则 task-3 不能依赖 task-1
+- **依赖必须是单向的**：后面的 task 依赖前面的 task，不要让前面的 task 依赖后面的"""
 
 
 def extract_json_block(content: str) -> str | None:
@@ -148,6 +154,12 @@ async def parse_plan_with_reask(
         "- 每个 task 的 id 必须是唯一字符串（如 task-1, task-2）\n"
         "- dependencies 用 id 字符串引用，如 [\"task-1\"]\n"
         "- 至少有一个根任务（dependencies=[]）\n"
+        "- **严禁循环依赖**：依赖链必须是单向的，后面的 task 依赖前面的 task，"
+        "前面的 task 不能依赖后面的 task\n"
+        "- **每个 task 的 dependencies 必须只指向它的直接前驱**，形成线性链\n"
+        "- **不要多个 task 共享同一个依赖节点**（除非它们是并行任务）\n"
+        "- **示例**：task-1 → task-2 → task-3，则 task-3 的 dependencies=[\"task-2\"],"
+        " task-2 的 dependencies=[\"task-1\"], task-1 的 dependencies=[]\n"
         "- 不要在 JSON 外面加任何标记或说明\n\n"
         f"可用 Agent：\n{available_agents_list}\n\n"
         "JSON Schema：\n" + schema_json
@@ -156,6 +168,10 @@ async def parse_plan_with_reask(
         SystemMessage(content=_STRICT_SYSTEM),
         HumanMessage(content=user_prompt),
     ]
+
+    # 追踪连续失败的 cycle 类型，避免无限重试同一种错误
+    _cycle_fail_count = 0
+    _last_cycle_pattern = ""
 
     last_issues: list[str] = []
     for attempt in range(1, max_attempts + 1):
@@ -167,10 +183,35 @@ async def parse_plan_with_reask(
             else:
                 # Reask：把上次的问题注入，让 LLM 在下一轮纠正
                 issues_text = "\n".join(f"- {i}" for i in last_issues)
+                # 检测是否反复出现同类 cycle 问题
+                has_cycle = any("循环依赖" in i for i in last_issues)
+                cycle_explanation = ""
+                if has_cycle:
+                    # 提取 cycle 详情（如 "task-3 -> task-2 -> task-5 -> task-3"）
+                    for i in last_issues:
+                        if "循环依赖" in i:
+                            cycle_explanation = (
+                                "\n\n【循环依赖警告】检测到 plan 存在环状依赖！"
+                                "这会导致任务无法执行。请严格按以下规则构建依赖：\n"
+                                "- 只使用线性依赖链：task-1 → task-2 → task-3（task-3 依赖 task-2，task-2 依赖 task-1）\n"
+                                "- **禁止逆序依赖**：task-1 不能依赖 task-2，task-2 不能依赖 task-3\n"
+                                "- **正确示例**：task-2 的 dependencies=[\"task-1\"]，task-3 的 dependencies=[\"task-2\"]\n"
+                                "- **错误示例**：task-1 的 dependencies=[\"task-2\"]（前面的 task 依赖后面的 task）\n"
+                            )
+                            # 统计同类 cycle 重复次数
+                            cycle_pattern = i
+                            if cycle_pattern == _last_cycle_pattern:
+                                _cycle_fail_count += 1
+                            else:
+                                _cycle_fail_count = 1
+                                _last_cycle_pattern = cycle_pattern
+                            break
+
                 reask_prompt = REASK_SYSTEM_PROMPT.format(
                     issues=issues_text,
                     schema=schema_json,
                     available_agents=available_agents_desc,
+                    cycle_explanation=cycle_explanation,
                 )
                 resp = await asyncio.wait_for(
                     llm.ainvoke(
@@ -203,6 +244,15 @@ async def parse_plan_with_reask(
 
             # 有校验问题 → 注入 reask prompt，让 LLM 下一轮纠正
             last_issues = vresult.issues
+
+            # 如果连续两次 reask 后仍出现同类 cycle，直接放弃 LLM 重试，走 fallback
+            if _cycle_fail_count >= 2:
+                logger.warning(
+                    "parse_plan_with_reask: 连续 %d 次 cycle 失败，放弃 LLM 重试，切换 fallback",
+                    _cycle_fail_count,
+                )
+                return None
+
             logger.warning(
                 "plan validation issues on attempt %d: %s",
                 attempt, vresult.issues,
