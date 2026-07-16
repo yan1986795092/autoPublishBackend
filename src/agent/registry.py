@@ -174,6 +174,10 @@ register(AgentCard(
             "tone": {"type": "string", "source": "param:tone", "description": "语气: professional/friendly/humorous/...", "optional": True},
             "audience": {"type": "string", "source": "param:audience", "description": "目标受众: beginner/intermediate/expert", "optional": True},
             "search_analysis": {"type": "string", "source": "consume", "description": "搜索结果分析（来自 SearchAnalyzer）", "optional": True},
+            # 平台写作 DNA（由 nodes.py 从 platform_profile 注入，纯透传）
+            "_platform_system_prompt": {"type": "string", "source": "meta", "description": "平台角色定位 system prompt", "optional": True},
+            "_platform_writing_rules": {"type": "object", "source": "meta", "description": "平台结构化写作规则", "optional": True},
+            "_content_genre": {"type": "string", "source": "meta", "description": "内容体裁: text(图文)/video(视频脚本)/audio(音频)", "optional": True},
         },
         "required": ["topic"],
     },

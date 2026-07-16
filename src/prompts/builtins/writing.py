@@ -86,7 +86,7 @@ templates = [
         template="""## 写作任务
 
 **主题：** {topic}
-**内容形式：** {content_type}
+**内容形式：** {content_type_label}
 {platform_line}
 {genre_line}
 **风格偏好：** {style_guide}
@@ -107,8 +107,9 @@ templates = [
         group="writing",
         variables=[
             VariableDef("topic", required=True, label="写作主题"),
-            VariableDef("content_type", required=False, default="blog", label="内容形式",
+            VariableDef("content_type", required=False, default="blog", label="内容形式（code）",
                         options=list(CONTENT_TYPE_PROMPTS.keys())),
+            VariableDef("content_type_label", required=False, default="blog", label="内容形式展示名"),
             VariableDef("style_guide", required=False, default="自然流畅，有自己的观点和态度",
                         label="风格偏好"),
             VariableDef("platform_line", required=False, default="", label="目标平台行"),

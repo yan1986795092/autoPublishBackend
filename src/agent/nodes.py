@@ -1643,6 +1643,8 @@ async def _run_single_agent_task(task: dict, state: AgentGraphState, task_step_n
                         t_input["content_type"] = platform_code
                         # 体裁信息注入（图文/视频脚本/音频脚本）
                         t_input["_content_genre"] = profile.get("content_genre", "text")
+                        t_input["_platform_system_prompt"] = profile.get("system_prompt", "")
+                        t_input["_platform_writing_rules"] = profile.get("writing_rules", {})
 
             understanding = state.get("understanding", {})
             slots = understanding.get("slots", {}) if understanding else {}

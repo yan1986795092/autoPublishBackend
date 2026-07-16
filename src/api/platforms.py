@@ -10,20 +10,32 @@ router = APIRouter(prefix="/platforms", tags=["平台"])
 
 
 DEFAULT_PLATFORMS = [
-    # 社交媒体
+    # ═══════════════════════════════════════════════════════════
+    # 社交平台 — 可一键发布到外部渠道
+    # ═══════════════════════════════════════════════════════════
     {"code": "xiaohongshu", "name": "小红书", "category": "social_media", "content_genre": "text", "is_mock": True},
     {"code": "wechat", "name": "微信公众号", "category": "social_media", "content_genre": "text", "is_mock": True},
     {"code": "zhihu", "name": "知乎", "category": "social_media", "content_genre": "text", "is_mock": True},
-    # 创意写作
-    {"code": "fiction", "name": "小说创作", "category": "creative_writing", "content_genre": "text", "is_mock": True},
-    {"code": "storyboard", "name": "分镜脚本", "category": "creative_writing", "content_genre": "video", "is_mock": True},
-    {"code": "script", "name": "剧本创作", "category": "creative_writing", "content_genre": "video", "is_mock": True},
-    # 营销内容
-    {"code": "copywriting", "name": "营销文案", "category": "marketing", "content_genre": "text", "is_mock": True},
-    {"code": "newsletter", "name": "邮件通讯", "category": "marketing", "content_genre": "text", "is_mock": True},
-    # 技术内容
-    {"code": "technical_doc", "name": "技术文档", "category": "technical", "content_genre": "text", "is_mock": True},
-    {"code": "tutorial", "name": "教程指南", "category": "technical", "content_genre": "text", "is_mock": True},
+    {"code": "weibo", "name": "微博", "category": "social_media", "content_genre": "text", "is_mock": True},
+    {"code": "douyin", "name": "抖音", "category": "social_media", "content_genre": "text", "is_mock": True},
+    {"code": "bilibili", "name": "B站", "category": "social_media", "content_genre": "text", "is_mock": True},
+    # ═══════════════════════════════════════════════════════════
+    # 营销体裁 — 按对应结构/语气生成内容
+    # ═══════════════════════════════════════════════════════════
+    {"code": "copywriting", "name": "产品文案", "category": "content", "content_genre": "text", "is_mock": True},
+    {"code": "brand-story", "name": "品牌故事", "category": "content", "content_genre": "text", "is_mock": True},
+    {"code": "ad-copy", "name": "广告文案", "category": "content", "content_genre": "text", "is_mock": True},
+    {"code": "fiction", "name": "小说创作", "category": "content", "content_genre": "text", "is_mock": True},
+    {"code": "script", "name": "剧本脚本", "category": "content", "content_genre": "text", "is_mock": True},
+    {"code": "storyboard", "name": "分镜脚本", "category": "content", "content_genre": "video", "is_mock": True},
+    {"code": "newsletter", "name": "邮件通讯", "category": "content", "content_genre": "text", "is_mock": True},
+    # ═══════════════════════════════════════════════════════════
+    # 专业文体 — 结构严谨的内容格式
+    # ═══════════════════════════════════════════════════════════
+    {"code": "tech-doc", "name": "技术文档", "category": "professional", "content_genre": "text", "is_mock": True},
+    {"code": "tutorial", "name": "教程指南", "category": "professional", "content_genre": "text", "is_mock": True},
+    {"code": "email", "name": "邮件营销", "category": "professional", "content_genre": "text", "is_mock": True},
+    {"code": "seo", "name": "SEO文章", "category": "professional", "content_genre": "text", "is_mock": True},
 ]
 
 
@@ -31,6 +43,18 @@ def _ensure_default_platforms(db: Session):
     """确保所有默认平台都存在（upsert 逻辑，不覆盖已有修改）"""
     defaults = {p["code"]: p for p in DEFAULT_PLATFORMS}
     existing = {p.code: p for p in db.query(Platform).filter(Platform.code.in_(defaults.keys())).all()}
+
+    # ══ 后向兼容：把旧版 technical_doc 重命名为 tech-doc ══
+    old_techdoc = db.query(Platform).filter(Platform.code == "technical_doc").first()
+    if old_techdoc and "tech-doc" not in existing:
+        old_techdoc.code = "tech-doc"
+        old_techdoc.name = "技术文档"
+        old_techdoc.category = "professional"
+        old_techdoc.content_genre = "text"
+        old_techdoc.is_mock = True
+        existing["tech-doc"] = old_techdoc
+        print(f"  迁移旧平台: technical_doc → tech-doc")
+        db.commit()
 
     for code, data in defaults.items():
         if code in existing:

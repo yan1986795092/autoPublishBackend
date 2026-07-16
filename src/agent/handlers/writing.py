@@ -110,9 +110,12 @@ async def handle_writing(task_input: dict, llm: ChatOpenAI, mcp_tools: list | No
         effective_temperature = _creativity_to_temperature(creativity)
         effective_max_tokens = LENGTH_TO_MAX_TOKENS.get(length)
 
+        content_type_label = platform_name if profile else content_type
+
         builder.instructions("writing.task", {
             "topic": topic,
             "content_type": content_type,
+            "content_type_label": content_type_label,  # 展示用中文名
             "style_guide": style_guide,
             "platform_line": platform_line,
             "genre_line": genre_line,
