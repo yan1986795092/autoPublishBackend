@@ -1,10 +1,9 @@
 # AutoPublish — 产品与系统设计规格
 
-> **文档状态**: Draft v1  
-> **版本**: 3.0.0  
-> **最后更新**: 2026-06-26  
-> **负责人**: TBD  
-> **对标格式**: Google Design Doc / Stripe API Spec / Microsoft Agent Schema
+> **文档状态**: Active
+> **版本**: 4.0.0
+> **最后更新**: 2026-07-21
+> **对标格式**: Google Design Doc / Stripe API Spec
 
 ---
 
@@ -29,7 +28,7 @@
 
 ### 1.1 产品定位
 
-AutoPublish 是一个 **AI 驱动的多 Agent 内容生产系统**。它不是传统的内容管理后台，而是一个"内容工厂流水线"——从选题研究、热点追踪、内容创作、质量审核到多平台发布，全流程由 Agent 协作完成。
+AutoPublish 是一个 **AI 驱动的多 Agent 内容生产系统**。它是一个"内容工厂流水线"——从选题研究、热点追踪、内容创作、质量审核到多平台发布，全流程由 Agent 协作完成。
 
 核心命题：**如何让一个人像一支内容团队一样高效运作。**
 
@@ -54,7 +53,6 @@ AutoPublish 是一个 **AI 驱动的多 Agent 内容生产系统**。它不是�
 - 技能模板（Skill）的复用与导入导出
 
 **不在范围内**:
-
 - 实际发布到第三方平台的 API 集成（由前端/外部服务处理）
 - 多用户协作工作流
 - A/B 测试或内容效果分析
@@ -71,7 +69,7 @@ AutoPublish 是一个 **AI 驱动的多 Agent 内容生产系统**。它不是�
 | # | 目标 | 衡量标准 |
 |---|------|---------|
 | G1 | 用户输入一个主题，系统自动完成研究→写作→审核→优化全流程 | 端到端成功率 > 90% |
-| G2 | 生成内容质量达到"可用"水平（> 70% 用户不修改直接发布） | ReviewAgent 通过率 > 70% |
+| G2 | 生成内容质量达到"可用"水平 | ReviewAgent 通过率 > 70% |
 | G3 | 用户可在 3s 内看到 Agent 开始思考的反馈 | SSE 首帧延迟 < 3s |
 | G4 | 一次生成可适配 6 个发布平台 | PlatformProfile 覆盖 15 种内容形态 |
 | G5 | 异步任务不丢失，失败可重试 | DLQ + 重试机制 |
@@ -79,14 +77,12 @@ AutoPublish 是一个 **AI 驱动的多 Agent 内容生产系统**。它不是�
 
 ### 2.2 Non-Goals
 
-这些是有意**不做**的事情（不是遗漏，是设计选择）：
-
-- **不追求 LLM 生成质量的无限提升**：Review-Fix 循环最多 2 轮，超过则认为当前模型能力边界已到，不无限浪费 Token
-- **不做 Agent 间自由对话**：所有 Agent 通过共享的 `AgentGraphState` 通信，不引入独立的 Agent-to-Agent Message Bus
+- **不追求 LLM 生成质量的无限提升**：Review-Fix 循环最多 2 轮
+- **不做 Agent 间自由对话**：所有 Agent 通过共享的 `AgentGraphState` 通信
 - **不做实时协作编辑**：多人同时编辑同一篇内容不在当前范围
-- **不做内容调度排期**：定时发布由前端/后端协作完成，非 Agent 编排系统的职责
+- **不做内容调度排期**：定时发布由前端/后端协作完成
 - **不做多模态生成**：不支持图片/视频生成，但可通过 Pexels MCP 检索图片
-- **不做 Agent 记忆的长期持久化**：记忆系统以会话为中心，跨会话记忆有限（语义记忆 + 情景记忆），不追求"完美终身记忆"
+- **不做 Agent 记忆的长期持久化**：记忆系统以会话为中心
 
 ---
 
@@ -109,7 +105,7 @@ Frontend (React) ↔ AutoPublish API (FastAPI, :9000)
 ┌─────────────────────────────────────────────────────────────────────┐
 │                     用户交互层                                       │
 │                                                                     │
-│  Frontend (React 18, Vite)                                          │
+│  Frontend (React 19, Vite)                                          │
 │  ├── Agent 工作室: 聊天界面 + 实时 Agent Timeline                    │
 │  ├── 内容管理: 列表/编辑/版本/日历                                    │
 │  ├── 设置: Skills / Platforms / API Keys                            │
@@ -129,7 +125,7 @@ Frontend (React) ↔ AutoPublish API (FastAPI, :9000)
 │                                                                      │
 │  Agent 编排系统 (LangGraph StateGraph)                               │
 │  ├── Orchestrator: 5 节点 DAG (理解→规划→调度→执行→合并)              │
-│  ├── Handler 池: 8 个注册 Handler + 扩展                            │
+│  ├── Handler 池: 多个注册 Handler + 扩展                            │
 │  ├── AgentCard 注册表: 元数据驱动                                    │
 │  └── Task Queue: 异步提交/执行/重试/DLQ                              │
 │                                                                      │
@@ -170,7 +166,7 @@ User: "写一篇露营装备推荐的小红书"
 4. WritingAgent 创作 → 800 字笔记 (emoji + 口语化 + 种草结构)
    │
    ▼
-5. ReviewAgent 审核 → 检查违禁词/可读性/平台规则 → passed: false, feedback: "需增加价格信息"
+5. ReviewAgent 审核 → 检查违禁词/可读性/平台规则 → passed: false
    │
    ▼
 6. FixAgent 优化 → 补充价格段 + 优化开头 hook
@@ -270,10 +266,10 @@ Agent 之间**不直接对话**，通过共享的 `AgentGraphState` 交换数据
 | **ReviewAgent** | 审核编辑 | 质量检查 + 违禁词 | content + 平台规则 | passed + feedback |
 | **FixAgent** | 责任编辑 | 按反馈优化 | content + feedback | 优化版正文 |
 | **WebSearch** | 研究员 | 联网搜索 | query | 搜索结果 |
-| **URLCrawler** | 数据采集 | 页面抓取 | url | 页面正文 |
-| **HotTopicAgent** | 分析师 | 热点趋势分析 | 搜索结果 | 分析洞察 |
+| **SEOAgent** | SEO专家 | SEO优化分析 | content + keywords | 优化建议 |
 | **DiagramAgent** | 美术 | Mermaid 图表 | topic | 图表代码 |
 | **CodeAgent** | 程序员 | 代码/技术文档 | task | 代码片段 |
+| **FactCheckAgent** | 事实核查 | 内容准确性 | content | 核查报告 |
 
 ### 5.3 编排流程 (LangGraph 5 节点)
 
@@ -285,7 +281,7 @@ Agent 之间**不直接对话**，通过共享的 `AgentGraphState` 交换数据
 │ 1. understand_intent                     │
 │    主编(ManagerAgent) 理解用户想做什么    │
 │    输出: {intent, platform, slots}       │
-│    兜底: 关键词规则匹配                  │
+│    兜底: 关键词规则匹配                   │
 └─────────────────────────────────────────┘
     │
     ▼
@@ -300,7 +296,7 @@ Agent 之间**不直接对话**，通过共享的 `AgentGraphState` 交换数据
 ┌─────────────────────────────────────────┐
 │ 3. schedule_and_execute ──── 条件判断 ──►│
 │    检查谁准备好了 (依赖已满足)            │
-│    死锁检测                              │
+│    死锁检测                               │
 └──────────┬──────────────────────────────┘
            │ 有就绪任务
            ▼
@@ -385,136 +381,70 @@ register(AgentCard(
 │   模式      │ 端点        │ 响应方式      │ 典型使用场景          │
 ├─────────────┼────────────┼──────────────┼─────────────────────┤
 │ 同步执行    │ /agent/run │ JSON 完整结果 │ 快速生成, 预览计划    │
-│ SSE 流式    │ /agent/stream │ text/event-stream │ 实时查看 Agent 过程  │
+│ SSE 流式    │ /agent/stream/v3 │ text/event-stream │ 实时查看 Agent 过程  │
 │ 异步提交    │ /agent/async/submit │ task_id │ 长时间任务, 离开页面 │
 │ WebSocket   │ /agent/ws/{id} │ 双向帧     │ 需要实时查询的交互    │
 └─────────────┴────────────┴──────────────┴─────────────────────┘
 ```
 
-### 6.2 SSE 事件规范
+### 6.2 SSE v3 事件规范
 
 #### 端点
 
 | 端点 | Audience | 状态 | 适用 |
 |------|----------|------|------|
-| `POST /api/v1/agent/stream/v2` | 业务轨 | ✅ 推荐 | 前端产品 |
-| `POST /api/v1/agent/stream` | 业务轨（兼容） | ⚠️ deprecated，2026-09-30 下线 | 旧前端 |
-| `GET /api/v1/agent/obs/stream/{task_id}` | Observability | 🔧 内部 | dev panel / 调试 |
+| `POST /api/v1/agent/stream/v3` | 业务轨 | 推荐 | 前端产品 |
+| `POST /api/v1/agent/stream/v2` | 业务轨（兼容） | 兼容，2026-09-30 下线 | 旧前端 |
+| `POST /api/v1/agent/stream` | 业务轨（兼容） | deprecated，2026-09-30 下线 | 旧前端 |
+| `GET /api/v1/agent/obs/stream/{task_id}` | Observability | 内部 | dev panel / 调试 |
 
-> **v2 vs v1 差异**（spec 2026-07-01）：
-> - v2 实时**下发** `thinking_step / reasoning`（audience 默认 both），前端 store 累积到 `stages[].reasoning` / `thinkingSteps` / `reasoningChunks` —— StageTimeline / MessageBubble 实时反馈
-> - 仅 `audience='observability'` 的事件不下发（保留观测轨独占能力）
-> - v2 `result` 事件数据**用收敛 schema**（不携带 `_stages / _thinkingSteps / _llmChunks / _reasoningChunks / _draftContent / agent_events`）—— 这些运行时缓冲由前端 store 自累积，结果入库时再拼接
-> - v2 其余事件（plan / stage / progress / llm_chunk / done / error）与 v1 一致
->
-> 详见 [docs/streaming-frontend-contract.md](./docs/streaming-frontend-contract.md) 和 [../docs/superpowers/specs/2026-07-01-streaming-frontend-contract.md](../docs/superpowers/specs/2026-07-01-streaming-frontend-contract.md)
+#### 事件类型 (v3 Parts 模型)
 
-**连接方式**: `POST /api/v1/agent/stream` (v1, deprecated) 或 `POST /api/v1/agent/stream/v2` (v2, 推荐) — 请求体包含 prompt + context + parameters + trigger
+| 事件 | 说明 | Part 类型 |
+|------|------|-----------|
+| `message_start` | 消息开始 | 设置 streamingMessageId |
+| `plan` | 规划预览 | PlanPart |
+| `stage:started` | Agent 阶段开始 | ToolCallPart (streaming) |
+| `stage:completed` | Agent 阶段完成 | state_transition → done |
+| `tool_input_delta` | 工具输入更新 | 更新 ToolCallPart.input |
+| `tool_result` | 工具结果输出 | 更新 ToolCallPart.output |
+| `reasoning_delta` | 推理过程流式 | ReasoningPart |
+| `text_delta` | 正文流式 | TextPart |
+| `artifact` | 产物追加 | ArtifactPart |
+| `message_end` | 消息结束 | 关闭流式状态 |
+| `error` | 错误信息 | ErrorPart |
 
-**事件流** (按发送顺序):
+#### v3 事件流示例
 
 ```json
-// stage: Agent 阶段开始/结束 (前端 Timeline 用)
+// message_start: 消息开始
+event: message_start
+data: {"message_id": "msg_xxx"}
+
+// plan: 规划预览
+event: plan
+data: {"part_id": "plan_1", "goal": "写一篇露营装备推荐", "tasks": [...]}
+
+// stage: Agent 阶段开始
 event: stage
-data: {"agent":"ManagerAgent","label":"思考分析中","icon":"🧠","status":"started"}
+data: {"part_id": "stage_1", "agent": "ManagerAgent", "label": "思考分析中", "icon": "🧠", "status": "started"}
 
-// reasoning: Agent 的推理过程 (前端思考气泡用)
-// ⚠️ v2 不下发，v1 仍下发
-event: reasoning
-data: {"agent":"ManagerAgent","content":"📋 意图分析：CREATE - generate content\n📍 目标平台：小红书..."}
+// reasoning_delta: 推理过程
+event: reasoning_delta
+data: {"part_id": "reasoning_1", "agent": "ManagerAgent", "delta": "📋 意图分析..."}
 
-// llm_chunk: LLM 流式输出 (前端实时渲染用)
-event: llm_chunk
-data: {"agent":"WritingAgent","content":"露营新手必看", "channel":"body"}
+// text_delta: 正文流式
+event: text_delta
+data: {"part_id": "text_main", "delta": "露营新手必看..."}
 
-// thinking_step: 每个 Agent 步骤的起止
-// ⚠️ v2 不下发，v1 仍下发
-event: thinking_step
-data: {"agent":"WritingAgent","action":"开始执行","status":"running"}
+// artifact: 产物
+event: artifact
+data: {"part_id": "artifact_1", "artifact_type": "content", "title": "...", "body": "..."}
 
-// progress: 整体进度百分比
-event: progress
-data: {"progress":60,"message":"审核优化中"}
-
-// result: 最终结果
-// v2 用收敛 schema，v1 是 AgentResult 全量 dump
-event: result
-data: {"task_id":"...","status":"completed","agent_type":"WritingAgent","output":{...},"usage":{...}}
-
-// error: 失败
-event: error
-data: {"error":"Agent 执行超时","code":"TIMEOUT"}
+// message_end: 消息结束
+event: message_end
+data: {"status": "completed", "usage": {"tokens": 1234, "time_elapsed": 8.5}}
 ```
-
-**事件类型枚举**:
-
-| 事件 | 前端用途 | 发送者 | 是否必达 | v1 下发？ | v2 下发？ |
-|------|---------|--------|---------|-----------|-----------|
-| `plan` | Timeline 显示规划 | Orchestrator | 是 | ✅ | ✅ |
-| `task_created` | 关联 task_id | Orchestrator | 是 | ✅ | ✅ |
-| `thinking_step` | Agent 步骤详情 | Handler | 建议 | ✅ | ❌ 收敛到 store 自累积 |
-| `progress` | 进度条 | Orchestrator | 建议 | ✅ | ✅ |
-| `stage` | Timeline 显示 Agent 阶段 | Orchestrator | 是 | ✅ | ✅ |
-| `llm_chunk` | 实时文字渲染 | Handler | 是(流式) | ✅ | ✅ |
-| `reasoning` | 思考气泡展示 | ManagerAgent | 建议 | ✅ | ❌ 同上 |
-| `result` | 最终结果展示 | Orchestrator | 是 | ✅ 全量 dump | ✅ **收敛 schema** |
-| `done` | 终态 | Orchestrator | 是 | ✅ | ✅ |
-| `error` | 错误提示 | Orchestrator | 是 | ✅ | ✅ |
-
-#### 业务轨 `result` schema 收敛（v2）
-
-**v2 下发的 result（业务轨）**：
-
-```python
-{
-    # 标识
-    "task_id": "...",
-    "status": "completed" | "failed" | "partial",
-    "agent_type": "WritingAgent",
-    # 产物
-    "output": {
-        "full_text": "...",
-        "title": "...",
-        "platform": "...",
-        "content_type": "...",
-        "draft_content": "...",     # 多轮 review 时存在
-        "review_content": "...",    # 评审意见
-    },
-    # UI 摘要（MessageBubble 实际渲染）
-    "usage": {
-        "tokens_used": 1234,
-        "time_elapsed": 8.5,
-        "model": "gpt-4o",
-    },
-}
-```
-
-**DB 持久化 schema（前端入库时拼接）**：
-
-```python
-{
-    ...上面业务轨字段,
-    "_stages": [...],              # 运行时缓冲（历史回放用）
-    "_thinkingSteps": [...],
-    "_llmChunks": {...},
-    "_reasoningChunks": {...},
-    "_draftContent": "...",
-    "agent_events": {...},         # 全量 events（仅入库）
-}
-```
-
-**后端实现位置**：
-- `_transform_result_for_frontend()` in `src/agent/api.py`
-- `_result_for_persistence()` in `src/agent/api.py`
-- `_should_skip_in_business_track()` in `src/agent/api.py`
-
-#### 单元测试
-
-`tests/agents/test_stream_v2_contract.py` 覆盖（24 个用例）：
-- transform 函数字段映射 / 兜底 / 白名单
-- persistence 不污染输入
-- 业务轨过滤逻辑（按 audience 字段：observability 不下发 / both / frontend 下发）
-- 路由注册（v1 deprecated、v2 注册、obs 注册）
 
 ### 6.3 异步任务生命周期
 
@@ -559,8 +489,8 @@ class PlatformProfile:
     tone_tags: [str]             # ["casual", "friendly", "emotional"]
     target_audience: str         # "18-35岁女性"
     system_prompt: str           # 平台 System Prompt (写入 LLM 角色)
-    writing_rules: [str]         # 写作规则列表
-    example_structures: [dict]   # 示例结构
+    writing_rules: [str]          # 写作规则列表
+    example_structures: [dict]    # 示例结构
     seo_rules: dict              # SEO 改写规则 (可选)
     quality_checks: [dict]       # 质量检查规则
 ```
@@ -792,7 +722,7 @@ Logs (logs-YYYY.MM.DD)
 
 **新增 Provider**: 只需在 config.py 添加配置项 + LLM Gateway 添加 Adapter
 
-**新增 Agent**: 实现 Handler → 注册 AgentCard → 自动生效（见 5.5）
+**新增 Agent**: 实现 Handler → 注册 AgentCard → 自动生效
 
 **新增平台**: 在 `platform_profile.py` 添加 PlatformProfile
 
@@ -871,12 +801,13 @@ Logs (logs-YYYY.MM.DD)
 
 | 方法 | 路径 | 说明 | 请求体 | 响应 |
 |------|------|------|--------|------|
-| POST | `/api/v1/agent/run` | 同步执行 | `{prompt, context?, skill_name?}` | `AgentResult` |
+| POST | `/api/v1/agent/run` | 同步执行 | `{prompt, context?, skill_id?}` | `AgentResult` |
 | POST | `/api/v1/agent/plan` | 预览计划 | `{prompt, context?}` | `ExecutionPlan` |
-| **POST** | **`/api/v1/agent/stream/v2`** | **SSE 流式 v2（推荐）** | `{prompt, context?, skill_name?}` | **`text/event-stream`（业务轨收敛 schema）** |
-| POST | `/api/v1/agent/stream` | SSE 流式 v1（deprecated） | `{prompt, context?, skill_name?}` | `text/event-stream`（全量 dump） |
-| **GET** | **`/api/v1/agent/obs/stream/{task_id}`** | **Observability SSE** | **—** | **`text/event-stream`（dev panel 用）** |
-| POST | `/api/v1/agent/async/submit` | 异步提交 | `{prompt, context?, skill_name?}` | `{task_id}` |
+| **POST** | **`/api/v1/agent/stream/v3`** | **SSE 流式 v3（推荐）** | `{prompt, context?, skill_id?}` | **`text/event-stream`** |
+| POST | `/api/v1/agent/stream/v2` | SSE 流式 v2（兼容） | `{prompt, context?, skill_id?}` | `text/event-stream` |
+| POST | `/api/v1/agent/stream` | SSE 流式 v1（deprecated） | `{prompt, context?, skill_id?}` | `text/event-stream` |
+| **GET** | **`/api/v1/agent/obs/stream/{task_id}`** | **Observability SSE** | — | **`text/event-stream`** |
+| POST | `/api/v1/agent/async/submit` | 异步提交 | `{prompt, context?, skill_id?}` | `{task_id}` |
 | GET | `/api/v1/agent/async/status/{id}` | 查询状态 | — | `AsyncTask` |
 | GET | `/api/v1/agent/async/list` | 任务列表 | `?page&size` | `{tasks, total}` |
 | DELETE | `/api/v1/agent/async/{id}` | 取消任务 | — | `{status}` |
@@ -923,7 +854,18 @@ Logs (logs-YYYY.MM.DD)
 | POST | `/api/v1/contents/ai-edit/analyze-viral` | 爆款分析 |
 | POST | `/api/v1/contents/ai-edit/parse-url` | URL 解析 |
 
-### 12.4 数据模型
+### 12.4 对话端点
+
+| 方法 | 路径 | 说明 |
+|------|------|------|
+| GET | `/api/v1/chat/conversations` | 对话列表 |
+| POST | `/api/v1/chat/conversations` | 创建对话 |
+| GET | `/api/v1/chat/conversations/{id}` | 对话详情 |
+| DELETE | `/api/v1/chat/conversations/{id}` | 删除对话 |
+| POST | `/api/v1/chat/messages` | 发送消息 |
+| GET | `/api/v1/chat/messages/{conversation_id}` | 消息历史 |
+
+### 12.5 数据模型
 
 **AgentResult** (编排执行结果):
 
@@ -974,8 +916,70 @@ Logs (logs-YYYY.MM.DD)
   "plan": {"goal": "...", "reasoning": "..."},
   "result": null,
   "error": null,
-  "created_at": "2026-06-26T10:00:00Z"
+  "created_at": "2026-07-21T10:00:00Z"
 }
 ```
 
-## 
+### 12.6 前端 Parts 模型类型
+
+```typescript
+// MessagePart 联合类型
+type MessagePart = TextPart | ReasoningPart | ToolCallPart | PlanPart | ArtifactPart | ErrorPart;
+
+interface TextPart {
+  type: 'text';
+  id: string;
+  server_id?: string;
+  state: 'streaming' | 'done' | 'error';
+  content: string;
+}
+
+interface ReasoningPart {
+  type: 'reasoning';
+  id: string;
+  agent: string;
+  round?: number;
+  collapsed_by_default: boolean;
+  state: 'streaming' | 'done';
+  content: string;
+}
+
+interface ToolCallPart {
+  type: 'tool_call';
+  id: string;
+  server_id?: string;
+  tool_name: string;
+  display_name?: string;
+  icon?: string;
+  round?: number;
+  state: 'streaming' | 'done' | 'error';
+  input: Record<string, unknown>;
+  output?: unknown;
+  duration_ms?: number;
+  error_message?: string;
+}
+
+interface PlanPart {
+  type: 'plan';
+  goal: string;
+  reasoning?: string;
+  tasks: PlanTask[];
+}
+
+interface ArtifactPart {
+  type: 'artifact';
+  artifact_type: 'content' | 'search_results' | 'code' | 'diagram';
+  title?: string;
+  body?: string;
+  tags?: string[];
+  platform?: string;
+}
+
+interface ErrorPart {
+  type: 'error';
+  code?: string;
+  message: string;
+  details?: unknown;
+  retry_supported: boolean;
+}
+```

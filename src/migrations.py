@@ -465,3 +465,64 @@ def create_chat_message_parts(engine) -> None:
         conn.commit()
 
     logger.info("chat_message_parts 表创建完成")
+
+
+@migration_manager.register(
+    "fix_missing_schema_elements",
+    "修复 platforms.content_genre 列缺失 + 创建模型中定义的普通索引",
+)
+def fix_missing_schema_elements(engine) -> None:
+    """修复 schema 漂移：添加缺失列和索引（幂等）"""
+    inspector = inspect(engine)
+
+    # 1. 添加 platforms.content_genre 列（模型要求）
+    if "platforms" in inspector.get_table_names():
+        cols = {c["name"] for c in inspector.get_columns("platforms")}
+        if "content_genre" not in cols:
+            with engine.connect() as conn:
+                conn.execute(text(
+                    "ALTER TABLE platforms ADD COLUMN content_genre VARCHAR(20) DEFAULT 'text'"
+                ))
+                conn.commit()
+                logger.info("Added content_genre to platforms")
+        else:
+            logger.info("platforms.content_genre exists, skipped")
+
+    # 2. 索引列表：(table, column, index_name)
+    indexes = [
+        ("agent_tasks",            "user_id",          "ix_agent_tasks_user_id"),
+        ("agent_tasks",            "conversation_id",  "ix_agent_tasks_conversation_id"),
+        ("agent_thinking_traces",  "task_id",          "ix_agent_thinking_traces_task_id"),
+        ("agent_tool_calls",       "subtask_id",       "ix_agent_tool_calls_subtask_id"),
+        ("agent_tool_calls",       "task_id",          "ix_agent_tool_calls_task_id"),
+        ("chat_conversations",     "is_pinned",        "ix_chat_conversations_is_pinned"),
+        ("chat_conversations",     "user_id",          "ix_chat_conversations_user_id"),
+        ("chat_message_parts",     "message_id",        "ix_chat_message_parts_message_id"),
+        ("chat_message_records",   "conversation_id",   "ix_chat_message_records_conversation_id"),
+        ("execution_snapshots",   "agent_name",        "ix_execution_snapshots_agent_name"),
+        ("execution_snapshots",   "task_id",           "ix_execution_snapshots_task_id"),
+        ("execution_snapshots",   "timestamp",         "ix_execution_snapshots_timestamp"),
+        ("skills",                 "user_id",           "ix_skills_user_id"),
+        ("system_prompt_templates","code",             "ix_system_prompt_templates_code"),
+        ("system_skills",         "code",              "ix_system_skills_code"),
+        ("users",                 "email",             "ix_users_email"),
+    ]
+
+    created = 0
+    skipped = 0
+    for table, column, idx_name in indexes:
+        if table not in inspector.get_table_names():
+            continue
+        existing = {i["name"] for i in inspector.get_indexes(table)}
+        if idx_name in existing:
+            skipped += 1
+            continue
+        with engine.connect() as conn:
+            conn.execute(text(
+                f"CREATE INDEX IF NOT EXISTS {idx_name} ON {table}({column})"
+            ))
+            conn.commit()
+            logger.info(f"Created index {idx_name} on {table}({column})")
+        created += 1
+
+    logger.info(f"Index fix done: {created} created, {skipped} already existed")

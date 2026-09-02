@@ -1,6 +1,6 @@
 # 墨掌柜 Backend
 
-> 🤖 AI 驱动的内容生产 API —— 输入一个主题，输出一篇可在多平台发布的高质量内容。
+> AI 驱动的内容生产 API —— 输入一个主题，输出一篇可在多平台发布的高质量内容。
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)]()
 [![FastAPI](https://img.shields.io/badge/FastAPI-009688?logo=fastapi)]()
@@ -34,67 +34,6 @@ curl -X POST http://localhost:9000/api/v1/agent/plan \
 
 ---
 
-## 你能用它做什么
-
-### 一句话生成内容
-
-```bash
-curl -N -X POST http://localhost:9000/api/v1/agent/stream/v2 \
-  -H "Content-Type: application/json" \
-  -d '{
-    "prompt": "推荐 5 个提高效率的 VS Code 插件",
-    "context": {
-      "platform": "zhihu",
-      "tone": "professional",
-      "audience": "开发者"
-    }
-  }'
-# → SSE 流式返回: 思考分析 → 搜索资料 → 写作 → 审核 → 优化 → 完成
-```
-
-> **端点选择**：
-> - `POST /agent/stream/v2` — **推荐**。前端契约收敛（spec 2026-07-01），实时不下发内部状态。
-> - `POST /agent/stream` — 已标 deprecated，2026-09-30 下线（详见 [docs/streaming-frontend-contract.md](./docs/streaming-frontend-contract.md)）。
-
-### 追热点写文章
-
-提交一个异步任务，离开页面，回来时草稿已就绪：
-
-```bash
-TASK_ID=$(curl -s -X POST http://localhost:9000/api/v1/agent/async/submit \
-  -H "Content-Type: application/json" \
-  -d '{"prompt": "追今天的 AI 热点，写一篇公众号文章"}' \
-  | jq -r '.task_id')
-
-# 随时查看进度
-curl http://localhost:9000/api/v1/agent/async/status/$TASK_ID
-```
-
-### 内容再利用
-
-把公众号长文一键改写成小红书笔记：
-
-```bash
-curl -X POST http://localhost:9000/api/v1/agent/repurpose \
-  -H "Content-Type: application/json" \
-  -d '{
-    "content": "（已发布的公众号正文...）",
-    "target_platforms": ["xiaohongshu", "weibo"]
-  }'
-```
-
-### AI 编辑器（单步操作）
-
-改写、扩写、翻译、SEO 优化——不需要完整编排：
-
-```bash
-curl -X POST http://localhost:9000/api/v1/contents/ai-edit/rewrite \
-  -H "Content-Type: application/json" \
-  -d '{"content": "原文章...", "tone": "humorous"}'
-```
-
----
-
 ## 核心概念
 
 | 概念 | 一句话 |
@@ -120,6 +59,8 @@ curl -X POST http://localhost:9000/api/v1/contents/ai-edit/rewrite \
 | **HotTopicAgent** | 分析师 | 分析热点趋势 |
 | **DiagramAgent** | 美术 | 画图表（Mermaid） |
 | **CodeAgent** | 程序员 | 写代码、写技术文档 |
+| **SEOAgent** | SEO专家 | SEO优化分析 |
+| **FactCheckAgent** | 事实核查 | 核查内容准确性 |
 
 ### 内容支持（15 种形态）
 
@@ -129,67 +70,18 @@ curl -X POST http://localhost:9000/api/v1/contents/ai-edit/rewrite \
 专业写作: 技术文档 | 教程 | SEO 文章 | 邮件营销
 ```
 
-每种形态定义了独立的写作规则、字数范围、语气标签和 System Prompt——系统自动适配，无需手动切换 Prompt。
-
----
-
-## 架构一览
-
-```
-frontend/               # React 前端 (平级目录)
-  │ HTTP / SSE / WebSocket
-  ▼
-backend/ (:9000)        # 你在这里
-  ├── LangGraph 编排     # 5 节点 DAG，ManagerAgent 调度
-  ├── 8 个 Agent Handler # 每个 Handler 是一个专业"编辑"
-  ├── 三层记忆系统       # 工作记忆 / 语义记忆 / 情景记忆
-  └── 异步任务队列       # 提交→执行→DLQ→重试
-  │ ChatOpenAI 协议
-  ▼
-llm-gateway/ (:9010)    # LLM 网关 (平级目录)
-  │ OpenAI / 智谱 / 通义千问 / DeepSeek
-```
-
----
-
-## 后端结构
-
-```
-backend/
-├── src/
-│   ├── main.py                 # FastAPI 入口
-│   ├── api/                    # REST 路由
-│   ├── agent/                  # Agent 编排系统
-│   │   ├── orchestrator.py     # 编排器
-│   │   ├── graph.py            # LangGraph 图定义
-│   │   ├── nodes.py            # 5 个节点函数
-│   │   ├── handlers/           # Agent 实现 (writing/review/fix/search/...)
-│   │   ├── registry.py         # AgentCard 注册表
-│   │   └── workflow/           # 异步队列 + EventBus
-│   ├── memory/                 # 三层记忆系统
-│   ├── core/                   # 核心 (模型路由/认证/安全/异常)
-│   ├── mcp/                    # MCP 工具客户端
-│   ├── prompts/                # Prompt 模板管理
-│   ├── logging_shared/         # 统一日志
-│   └── observability/          # 追踪 + 指标
-├── tests/
-├── .env.example
-└── requirements.txt
-```
-
-> 完整目录树及每文件的职责说明，见 [SPEC.md](./SPEC.md) 附录。
-
 ---
 
 ## API 速查
 
-### Agent 执行（5 种模式 + 1 个观测轨）
+### Agent 执行
 
-| 模式 | 端点 | curl 示例 |
-|------|------|-----------|
+| 模式 | 端点 | 说明 |
+|------|------|------|
 | 同步 | `POST /agent/run` | 等结果返回 |
-| **SSE 流式 v2** | `POST /agent/stream/v2` | 实时看到思考过程 ✅ **推荐**（业务轨，spec 2026-07-01） |
-| SSE 流式 v1 | `POST /agent/stream` | ⚠️ deprecated，2026-09-30 下线 |
+| SSE 流式 v3 | `POST /agent/stream/v3` | 实时看到思考过程（推荐） |
+| SSE 流式 v2 | `POST /agent/stream/v2` | 兼容旧版，2026-09-30 下线 |
+| SSE 流式 v1 | `POST /agent/stream` | deprecated，2026-09-30 下线 |
 | Observability SSE | `GET /agent/obs/stream/{task_id}` | 内部状态/全量 events（dev panel 用） |
 | 异步 | `POST /agent/async/submit` | 提交就走，回来收草稿 |
 | WebSocket | `WS /agent/ws/{id}` | 双向实时进度 |
@@ -206,74 +98,115 @@ POST   /api/v1/contents/ai-edit/rewrite       # 重写
 POST   /api/v1/contents/ai-edit/translate     # 翻译
 POST   /api/v1/contents/ai-edit/analyze-seo   # SEO 分析
 POST   /api/v1/contents/ai-edit/analyze-viral # 爆款分析
+POST   /api/v1/contents/ai-edit/suggest-tags  # 标签推荐
+POST   /api/v1/contents/ai-edit/generate-headlines  # 标题生成
 ```
 
-> 完整端点列表见 [SPEC.md](./SPEC.md#12-appendix-api-reference)
+> 完整端点列表见 [SPEC.md](./SPEC.md)
 
 ---
 
-## 🎯 SSE 前端契约（spec 2026-07-01）
+## SSE 前端契约（spec 2026-07-02）
 
-2026-07-01 起，`/agent/stream` 的实时 SSE 流做了**分轨收敛**：
+`/agent/stream/v3` 是当前推荐的流式接口，采用 **Parts 模型**：
 
-| 端点 | Audience | 实时下发事件 | `result` 事件 schema | 适用场景 |
-|------|----------|-------------|---------------------|----------|
-| `POST /agent/stream/v2` | 业务轨（前端） | `plan / stage / progress / llm_chunk / thinking_step / reasoning / result / done / error` | **收敛**（不含运行时缓冲 / 不含全量 events） | ✅ 前端产品（推荐） |
-| `POST /agent/stream` | 业务轨（前端，兼容） | **全部**事件（含 `thinking_step / reasoning`） | **全量 dump**（含 `agent_events.events[]`） | ⚠️ deprecated，2026-09-30 下线 |
-| `GET /agent/obs/stream/{task_id}` | Observability | 内部状态 + 全量 result dump | 全量 | dev panel / 后端调试 |
+### v3 事件类型
 
-### 业务轨 `result` 收敛 schema（v2）
+| 事件 | 说明 |
+|------|------|
+| `message_start` | 消息开始，设置 streamingMessageId |
+| `plan` | 规划预览，追加 PlanPart |
+| `stage:started` | Agent 阶段开始，追加 ToolCallPart |
+| `stage:completed` | Agent 阶段完成，状态流转到 done |
+| `tool_input_delta` | 工具输入更新（部分 JSON 合并） |
+| `tool_result` | 工具结果输出 |
+| `reasoning_delta` | 推理过程流式片段 |
+| `text_delta` | 正文流式片段 |
+| `artifact` | 产物追加（标题/标签/正文） |
+| `message_end` | 消息结束，关闭流式状态 |
+| `error` | 错误信息 |
 
-```jsonc
-// SSE 下发（v2）
-{
-  "task_id": "...",
-  "status": "completed",
-  "agent_type": "WritingAgent",
-  "output": {
-    "full_text": "...",
-    "title": "...",
-    "platform": "xiaohongshu",
-    "content_type": "blog",
-    "draft_content": "...",     // 多轮 review 时存在
-    "review_content": "..."     // 评审意见
-  },
-  "usage": {                     // MessageBubble 实际渲染
-    "tokens_used": 1234,
-    "time_elapsed": 8.5,
-    "model": "gpt-4o"
-  }
-  // ❌ 不下发：_stages / _thinkingSteps / _llmChunks / _reasoningChunks
-  //            _draftContent / agent_events（运行时缓冲 + 全量 dump）
-}
+### v3 vs v2 差异
+
+- v3 使用 Parts 模型，前端通过 `eventToPartOp` 转换器处理事件
+- v3 支持更细粒度的流式更新（reasoning_delta、tool_input_delta）
+- v2/v1 仍可用，但将于 2026-09-30 下线
+
+---
+
+## 架构一览
+
+```
+frontend/               # React 前端 (平级目录)
+  │ HTTP / SSE / WebSocket
+  ▼
+backend/ (:9000)        # 后端服务
+  ├── LangGraph 编排     # 5 节点 DAG，ManagerAgent 调度
+  ├── Agent Handlers    # 每个 Handler 是一个专业"编辑"
+  ├── 三层记忆系统       # Working / Semantic / Episodic
+  ├── 对话引擎           # 意图检测 + Chat CRUD
+  └── 异步任务队列       # 提交→执行→DLQ→重试
+  │ ChatOpenAI 协议
+  ▼
+llm-gateway/ (:9010)    # LLM 网关 (平级目录)
+  │ OpenAI / 智谱 / 通义千问 / DeepSeek
 ```
 
-### DB 持久化 schema（不变）
+---
 
-DB 入库时由前端 store 拼接运行时缓冲（历史回放需要），**与历史消息兼容**：
+## 后端结构
 
-```jsonc
-{
-  ...上面业务轨字段,
-  "_stages": [...],
-  "_thinkingSteps": [...],
-  "_llmChunks": {...},
-  "_reasoningChunks": {...},
-  "_draftContent": "..."
-}
 ```
-
-### 迁移路径
-
-| 阶段 | 时间 | 工作 |
-|------|------|------|
-| Phase 1（本周） | 2026-07-01 | ✅ 后端实现 + 单元测试（24 用例） |
-| Phase 2（本周） | 2026-07-01 | ✅ 前端切到 v2 + StageTimeline 清理 |
-| Phase 3 | 2026-08-XX | 加 `Sunset` HTTP header + 文档提醒 |
-| Phase 4 | 2026-09-30 | 删除旧 `/agent/stream` 路由 |
-
-完整设计文档：[docs/streaming-frontend-contract.md](./docs/streaming-frontend-contract.md)
-设计 spec：[../docs/superpowers/specs/2026-07-01-streaming-frontend-contract.md](../docs/superpowers/specs/2026-07-01-streaming-frontend-contract.md)
+backend/
+├── src/
+│   ├── main.py                 # FastAPI 入口
+│   ├── config.py               # 配置管理
+│   ├── database.py             # 数据库连接
+│   ├── migrations.py           # 数据迁移
+│   ├── api/                    # REST 路由
+│   │   ├── agent.py           # Agent 执行接口
+│   │   ├── contents.py        # 内容管理
+│   │   ├── chat.py            # 对话接口
+│   │   ├── conversation.py    # 对话历史
+│   │   ├── auth.py            # 认证授权
+│   │   ├── publish.py         # 发布接口
+│   │   ├── platforms.py       # 平台配置
+│   │   ├── skills.py          # 技能模板
+│   │   ├── presets.py         # 预设管理
+│   │   └── admin.py           # 管理后台
+│   ├── agent/                  # Agent 编排系统
+│   │   ├── orchestrator.py    # 编排器
+│   │   ├── graph.py           # LangGraph 图定义
+│   │   ├── nodes.py           # 5 个节点函数
+│   │   ├── handlers/          # Agent 实现
+│   │   │   ├── writing.py     # WritingAgent
+│   │   │   ├── review.py      # ReviewAgent
+│   │   │   ├── fix.py         # FixAgent
+│   │   │   ├── web_search.py   # WebSearch
+│   │   │   ├── seo.py         # SEOAgent
+│   │   │   ├── diagram.py     # DiagramAgent
+│   │   │   ├── code.py        # CodeAgent
+│   │   │   └── ...
+│   │   ├── workflow/          # 异步队列
+│   │   │   ├── task_queue.py  # 任务队列
+│   │   │   └── worker.py      # Worker
+│   │   ├── registry.py        # AgentCard 注册表
+│   │   ├── platform_profile.py # 平台配置
+│   │   └── state.py          # 图状态
+│   ├── conversation/           # 对话引擎
+│   │   ├── engine.py          # 对话处理
+│   │   └── intent_detector.py # 意图检测
+│   ├── core/                   # 核心模块
+│   │   ├── model_router.py    # 模型路由
+│   │   ├── security.py        # 安全认证
+│   │   └── tenant.py         # 租户隔离
+│   ├── memory/                 # 记忆系统
+│   ├── logging_shared/         # 统一日志
+│   └── observability/          # 可观测性
+├── tests/
+├── .env.example
+└── requirements.txt
+```
 
 ---
 
@@ -298,6 +231,3 @@ DB 入库时由前端 store 拼接运行时缓冲（历史回放需要），**�
 | `MCP_ENABLE_PEXELS` | `false` | 图片搜索 (需 `PEXELS_API_KEY`) |
 
 > 全部环境变量见 [.env.example](.env.example)
-
----
-
